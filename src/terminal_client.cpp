@@ -377,15 +377,25 @@ void TerminalClient::handleCommand(const std::string& command) {
     history.push_back(command);
     const std::string sessionId = "interactive-" + std::to_string(getpid());
 
+    // Capture client entries early so that in-memory passwords are preserved.
+    // CommandExecutor::execute() reloads clients.txt from disk, which never
+    // contains passwords. Routing through executeOnClients() avoids that loss.
+    const auto configuredClients = clientManager.entries();
+
     std::atomic<bool> done(false);
     CommandExecutor executor;
     auto streamCallback = [&](const std::string& line, bool isStdout) {
         printColored(line + "\n", isStdout ? COLOR_RESET : COLOR_RED);
     };
 
-    std::thread execThread([&]() {
+    std::thread execThread([&, configuredClients]() {
         try {
-            auto result = executor.execute(command, sessionId, streamCallback, 0);
+            CommandResult result;
+            if (!configuredClients.empty()) {
+                result = executor.executeOnClients(command, configuredClients, sessionId, streamCallback, 0);
+            } else {
+                result = executor.execute(command, sessionId, streamCallback, 0);
+            }
             if (!result.clientResults.empty()) {
                 refreshClientStatuses(result.clientResults);
             }
