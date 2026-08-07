@@ -279,6 +279,6 @@ cmd> df -h
 
 ## License
 
-No license file is currently included in this repository.
+PipeShellX is licensed under the [Apache License 2.0](LICENSE).
 
-If this project is intended for public distribution, add a standard license such as MIT, BSD-3-Clause, or Apache-2.0 and update this section accordingly.
+See [PLAN.md](PLAN.md) for the product roadmap from the current prototype to the 1.0 launch.
