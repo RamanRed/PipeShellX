@@ -6,12 +6,10 @@
 #include "psx/os/console.hpp"
 #include "psx/os/system.hpp"
 
-#include <atomic>
 #include <chrono>
 #include <iostream>
 #include <optional>
 #include <sstream>
-#include <thread>
 
 namespace {
 
@@ -137,6 +135,29 @@ void TerminalClient::refreshClientStatuses(const std::vector<ProcessManager::Cli
     }
 }
 
+void TerminalClient::executeAndReport(const std::function<CommandResult()>& exec,
+                                      const std::string& sessionId,
+                                      const std::string& command,
+                                      const std::string& clientId,
+                                      const char* context) {
+    try {
+        const CommandResult result = exec();
+        if (!result.clientResults.empty()) {
+            refreshClientStatuses(result.clientResults);
+        }
+        if (result.exitCode != 0) {
+            printError("Command failed with exit code " + std::to_string(result.exitCode));
+        }
+    } catch (const std::exception& ex) {
+        Logger::getInstance().log(
+            LogLevel::ERROR,
+            LogContext{
+                .pid = psx::os::currentProcessId(), .sessionId = sessionId, .clientId = clientId, .command = command},
+            std::string(context) + ": " + ex.what());
+        printError(formatTerminalError(ex.what()));
+    }
+}
+
 bool TerminalClient::promptPasswordRequired() {
     std::lock_guard<std::mutex> lock(outputMutex);
     for (;;) {
@@ -257,36 +278,13 @@ bool TerminalClient::handleClientCommand(const std::string& command) {
 
         const auto clients = clientManager.selectClients(std::make_optional(identifier));
         const std::string sessionId = "interactive-" + std::to_string(psx::os::currentProcessId());
-        std::atomic<bool> done(false);
         CommandExecutor executor;
         auto streamCallback = [&](const std::string& line, bool isStdout) {
             printColored(line + "\n", isStdout ? COLOR_RESET : COLOR_RED);
         };
-
-        std::thread execThread([&, clients, remoteCommand, sessionId]() {
-            try {
-                auto result = executor.executeOnClients(remoteCommand, clients, sessionId, streamCallback, 0);
-                refreshClientStatuses(result.clientResults);
-                if (result.exitCode != 0) {
-                    printError("Command failed with exit code " + std::to_string(result.exitCode));
-                }
-            } catch (const std::exception& ex) {
-                const std::string userMessage = formatTerminalError(ex.what());
-                Logger::getInstance().log(LogLevel::ERROR,
-                                          LogContext{.pid = psx::os::currentProcessId(),
-                                                     .sessionId = sessionId,
-                                                     .clientId = identifier,
-                                                     .command = remoteCommand},
-                                          std::string("Targeted client execution failed: ") + ex.what());
-                printError(userMessage);
-            }
-            done = true;
-        });
-
-        while (!done) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-        execThread.join();
+        executeAndReport(
+            [&] { return executor.executeOnClients(remoteCommand, clients, sessionId, streamCallback, 0); }, sessionId,
+            remoteCommand, identifier, "Targeted client execution failed");
         return true;
     }
     if (startsWith(command, "run ")) {
@@ -302,36 +300,13 @@ bool TerminalClient::handleClientCommand(const std::string& command) {
         }
 
         const std::string sessionId = "interactive-" + std::to_string(psx::os::currentProcessId());
-        std::atomic<bool> done(false);
         CommandExecutor executor;
         auto streamCallback = [&](const std::string& line, bool isStdout) {
             printColored(line + "\n", isStdout ? COLOR_RESET : COLOR_RED);
         };
-
-        std::thread execThread([&, clients, remoteCommand, sessionId]() {
-            try {
-                auto result = executor.executeOnClients(remoteCommand, clients, sessionId, streamCallback, 0);
-                refreshClientStatuses(result.clientResults);
-                if (result.exitCode != 0) {
-                    printError("Command failed with exit code " + std::to_string(result.exitCode));
-                }
-            } catch (const std::exception& ex) {
-                const std::string userMessage = formatTerminalError(ex.what());
-                Logger::getInstance().log(LogLevel::ERROR,
-                                          LogContext{.pid = psx::os::currentProcessId(),
-                                                     .sessionId = sessionId,
-                                                     .clientId = "-",
-                                                     .command = remoteCommand},
-                                          std::string("Broadcast client execution failed: ") + ex.what());
-                printError(userMessage);
-            }
-            done = true;
-        });
-
-        while (!done) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-        execThread.join();
+        executeAndReport(
+            [&] { return executor.executeOnClients(remoteCommand, clients, sessionId, streamCallback, 0); }, sessionId,
+            remoteCommand, "-", "Broadcast client execution failed");
         return true;
     }
 
@@ -359,42 +334,17 @@ void TerminalClient::handleCommand(const std::string& command) {
     // contains passwords. Routing through executeOnClients() avoids that loss.
     const auto configuredClients = clientManager.entries();
 
-    std::atomic<bool> done(false);
     CommandExecutor executor;
     auto streamCallback = [&](const std::string& line, bool isStdout) {
         printColored(line + "\n", isStdout ? COLOR_RESET : COLOR_RED);
     };
-
-    std::thread execThread([&, configuredClients]() {
-        try {
-            CommandResult result;
-            if (!configuredClients.empty()) {
-                result = executor.executeOnClients(command, configuredClients, sessionId, streamCallback, 0);
-            } else {
-                result = executor.execute(command, sessionId, streamCallback, 0);
-            }
-            if (!result.clientResults.empty()) {
-                refreshClientStatuses(result.clientResults);
-            }
-            if (result.exitCode != 0) {
-                printError("Command failed with exit code " + std::to_string(result.exitCode));
-            }
-        } catch (const std::exception& ex) {
-            const std::string userMessage = formatTerminalError(ex.what());
-            Logger::getInstance().log(
-                LogLevel::ERROR,
-                LogContext{
-                    .pid = psx::os::currentProcessId(), .sessionId = sessionId, .clientId = "-", .command = command},
-                std::string("Interactive command failed: ") + ex.what());
-            printError(userMessage);
-        }
-        done = true;
-    });
-
-    while (!done) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-    execThread.join();
+    executeAndReport(
+        [&] {
+            return configuredClients.empty()
+                       ? executor.execute(command, sessionId, streamCallback, 0)
+                       : executor.executeOnClients(command, configuredClients, sessionId, streamCallback, 0);
+        },
+        sessionId, command, "-", "Interactive command failed");
 }
 
 void TerminalClient::run() {
