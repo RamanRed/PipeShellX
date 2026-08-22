@@ -6,6 +6,7 @@
 #include "psx/os/pipe.hpp"
 #include "psx/os/process.hpp"
 #include "psx/stream/spool_buffer.hpp"
+#include "ssh_transport.hpp"
 
 #include "psx/runtime/backoff.hpp"
 #include "psx/runtime/reactor.hpp"
@@ -44,9 +45,7 @@ constexpr std::uint64_t kLocalAddressSpaceBytes = 64ULL * 1024 * 1024;
 constexpr std::chrono::seconds kDrainGrace{2};
 
 // Descriptor at which a password-backed worker finds its secret (sshpass -d).
-constexpr int kPasswordFd = 3;
 // Largest secret that fits a fresh pipe without blocking on every platform.
-constexpr std::size_t kMaxPasswordBytes = 4096;
 
 [[noreturn]] void fail(const std::string& what, const psx::Error& error) {
     throw std::runtime_error(what + ": " + error.message());
@@ -759,46 +758,31 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
                                     .stageId = "s" + std::to_string(index)};
     }
 
+    SshTransport transport(SshTransport::Options{.controlPath = options.controlPath});
     auto spawnRemote = [&](std::size_t index) {
         const ClientEntry& client = clients[index];
         Worker& worker = workers[index];
 
-        // Passwords never touch argv: sshpass reads the secret from an inherited
-        // pipe created here (non-inheritable everywhere else).
-        Pipe passwordPipe;
-        SpawnSpec spec;
-        if (!client.password.empty()) {
-            if (client.password.size() >= kMaxPasswordBytes) {
-                worker.failToStart("password too long for secure hand-off\n");
-                return;
-            }
-            auto created = Pipe::create();
-            if (!created.ok()) {
-                fail("password pipe creation failed for " + worker.clientId, created.error());
-            }
-            passwordPipe = std::move(created.value());
-            const std::string secret = client.password + "\n";
-            auto written = psx::os::write(passwordPipe.writer, std::span<const char>(secret.data(), secret.size()));
-            if (!written.ok() || written.value() != secret.size()) {
-                fail("password pipe write failed for " + worker.clientId,
-                     written.ok() ? psx::Error{psx::ErrorClass::Other, 0, "write"} : written.error());
-            }
-            passwordPipe.writer.close();
-            spec.extraHandles = {{&passwordPipe.reader, kPasswordFd}};
+        // `prepared` owns the secret hand-off pipe; its reader is borrowed by
+        // spec.extraHandles, so it must outlive spawnWorker (it does — it lives
+        // to the end of this lambda). A prepare() error is a fatal resource
+        // failure; a per-host validation failure is reported on `prepared`.
+        SshTransport::Prepared prepared;
+        if (auto ready = transport.prepare(client, remoteCommand, prepared); !ready.ok()) {
+            fail("ssh transport prepare failed for " + worker.clientId, ready.error());
         }
-        SshOptions sshOptions;
-        sshOptions.controlPath = options.controlPath;
-        spec.argv =
-            buildSshCommandArguments(client, remoteCommand, client.password.empty() ? -1 : kPasswordFd, sshOptions);
-        spec.program = spec.argv.front();
+        if (!prepared.failure.empty()) {
+            worker.failToStart(prepared.failure);
+            return;
+        }
 
-        spawnWorker(worker, std::move(spec), false);
+        spawnWorker(worker, std::move(prepared.spec), false);
         if (worker.process.running()) {
             LogContext created = worker.context;
             created.pid = worker.process.id();
             Logger::getInstance().log(LogLevel::INFO, created, "Remote SSH worker created");
         }
-        // passwordPipe closes here: only the child holds the secret now.
+        // prepared (and the password pipe) closes here: only the child holds the secret now.
     };
 
     WorkerRun run(reactor(/*withSignals=*/options.cancellable), workers, options.timeoutSec, options.sink,

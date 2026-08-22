@@ -69,6 +69,7 @@ add_library(pipeshellx_lib
     logger.cpp
     process_manager.cpp
     ssh_auth.cpp
+    ssh_transport.cpp
 )
 add_library(pipeshellx::lib ALIAS pipeshellx_lib)
 

@@ -50,6 +50,7 @@ add_executable(pipeshellx_tests
     test_process_manager_golden.cpp
     test_main.cpp
     test_ssh_auth.cpp
+    test_ssh_transport.cpp
 )
 
 target_include_directories(pipeshellx_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
