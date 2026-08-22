@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <netinet/in.h>
 #include <optional>
 #include <stdexcept>
@@ -120,6 +121,72 @@ public:
 private:
     int fd_ = -1;
     std::uint16_t port_ = 0;
+};
+
+// Puts fake `ssh` and `sshpass` executables first on PATH for the lifetime
+// of the object, so the remote-execution path can be exercised without a
+// network. The fake ssh is driven by the remote command it receives:
+//   ok           -> "host=<target>" on stdout, exit 0
+//   fail N       -> "failing" on stderr, exit N
+//   refused      -> OpenSSH's "Connection refused" text, exit 255
+//   denied       -> "Permission denied (publickey)." exit 255
+//   hostkey      -> "Host key verification failed." exit 255
+//   hang         -> sleeps 30 s
+//   pw           -> "pw=<password>" as delivered by the fake sshpass over its fd
+//   big          -> 200 000 bytes on stdout and 100 000 on stderr
+class FakeSshOnPath {
+public:
+    FakeSshOnPath() {
+        dir_ = std::filesystem::temp_directory_path() / ("pipeshellx-fakessh-" + std::to_string(::getpid()));
+        std::filesystem::create_directories(dir_);
+        writeScript("ssh", R"sh(#!/bin/sh
+prev=""; last=""
+for a in "$@"; do prev="$last"; last="$a"; done
+case "$last" in
+  ok)       echo "host=$prev"; exit 0 ;;
+  fail*)    echo "failing" >&2; exit "${last#fail }" ;;
+  refused)  echo "ssh: connect to host $prev port 22: Connection refused" >&2; exit 255 ;;
+  denied)   echo "$prev: Permission denied (publickey)." >&2; exit 255 ;;
+  hostkey)  echo "Host key verification failed." >&2; exit 255 ;;
+  hang)     sleep 30; exit 0 ;;
+  pw)       echo "pw=$PSX_FAKE_PW"; exit 0 ;;
+  big)      head -c 200000 /dev/zero | tr '\0' 'o'; head -c 100000 /dev/zero | tr '\0' 'e' >&2; exit 0 ;;
+  *)        echo "fake ssh: unknown command '$last'" >&2; exit 9 ;;
+esac
+)sh");
+        writeScript("sshpass", R"sh(#!/bin/sh
+[ "$1" = "-d" ] || { echo "fake sshpass: expected -d, got $1" >&2; exit 9; }
+fd=$2; shift 2
+eval "pw=\$(cat <&$fd)"
+PSX_FAKE_PW="$pw" exec "$@"
+)sh");
+        const char* previous = std::getenv("PATH");
+        previousPath_ = previous != nullptr ? std::string(previous) : std::string();
+        ::setenv("PATH", (dir_.string() + ":" + previousPath_).c_str(), 1);
+    }
+
+    ~FakeSshOnPath() {
+        ::setenv("PATH", previousPath_.c_str(), 1);
+        std::error_code ignored;
+        std::filesystem::remove_all(dir_, ignored);
+    }
+
+    FakeSshOnPath(const FakeSshOnPath&) = delete;
+    FakeSshOnPath& operator=(const FakeSshOnPath&) = delete;
+
+private:
+    void writeScript(const char* name, const char* body) {
+        const auto path = dir_ / name;
+        {
+            std::ofstream out(path);
+            out << body;
+        }
+        std::filesystem::permissions(path, std::filesystem::perms::owner_all | std::filesystem::perms::group_read |
+                                               std::filesystem::perms::group_exec);
+    }
+
+    std::filesystem::path dir_;
+    std::string previousPath_;
 };
 
 } // namespace test_support

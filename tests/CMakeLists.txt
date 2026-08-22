@@ -31,6 +31,7 @@ add_executable(pipeshellx_tests
     test_ipc.cpp
     test_logger.cpp
     test_process_manager.cpp
+    test_process_manager_golden.cpp
     test_ssh_auth.cpp
 )
 
