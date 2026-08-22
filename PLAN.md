@@ -9,7 +9,7 @@ anonymous pipes on one host, backpressured mTLS streams between hosts — with t
 carried forward in Appendix A). This document is the single source of truth for scope; update it
 in the same PR as any scope change.
 **Baseline date:** 2026-08-22, commit `2e10869`.
-**Phase status:** Phase 0 complete (2026-08-22, `v0.1.0`); Phase 1 complete (2026-08-22, `v0.2.0`) → **active phase: Phase 2**.
+**Phase status:** Phase 0 complete (2026-08-22, `v0.1.0`); Phase 1 complete (2026-08-22, `v0.2.0`); Phase 2 functionally complete + reviewed (2026-08-23, `v0.3.0`) — its docker 100-container exit criterion is an environment exception (no Docker daemon here), and the per-node circuit breaker is deferred as premature → **next phase: Phase 3 (Windows), which cannot be built/tested in this macOS environment** (needs an MSVC/clang-cl Windows toolchain).
 
 ---
 
