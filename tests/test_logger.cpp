@@ -33,6 +33,7 @@ protected:
         auto& logger = Logger::getInstance();
         logger.setLevel(LogLevel::INFO);
         logger.setConsoleMirror(false);
+        logger.setRotation(0, 5); // no rotation unless a test opts in
         ASSERT_TRUE(logger.setLogFile(logFile_.string()));
     }
 
@@ -40,6 +41,7 @@ protected:
         auto& logger = Logger::getInstance();
         logger.setConsoleMirror(false);
         logger.setLevel(LogLevel::INFO);
+        logger.setRotation(0, 5);
         logger.setLogFile(""); // release the file before the temp dir goes away
     }
 
@@ -48,6 +50,51 @@ protected:
 };
 
 } // namespace
+
+TEST_F(LoggerTest, RotatesWhenTheFileExceedsMaxBytes) {
+    namespace fs = std::filesystem;
+    auto& logger = Logger::getInstance();
+    logger.setRotation(300, 2); // rotate past 300 bytes, keep 2 old generations
+    for (int i = 0; i < 40; ++i) {
+        logger.log(LogLevel::INFO, "rotation-line-" + std::to_string(i));
+    }
+    EXPECT_TRUE(fs::exists(logFile_));
+    EXPECT_TRUE(fs::exists(logFile_.string() + ".1"));
+    EXPECT_TRUE(fs::exists(logFile_.string() + ".2"));
+    EXPECT_FALSE(fs::exists(logFile_.string() + ".3")) << "keep=2: no third generation";
+    // The newest line is in the current file, or in .1 if the last write just
+    // triggered a rotation (rotate-after-write leaves the current file fresh).
+    auto current = readLines(logFile_);
+    auto gen1 = readLines(logFile_.string() + ".1");
+    const bool newestFound = (!current.empty() && current.back().find("rotation-line-39") != std::string::npos) ||
+                             (!gen1.empty() && gen1.back().find("rotation-line-39") != std::string::npos);
+    EXPECT_TRUE(newestFound) << "newest line should be in test.log or test.log.1";
+    // Every generation is bounded near the rotation threshold.
+    EXPECT_LE(fs::file_size(logFile_.string() + ".1"), 700U);
+}
+
+TEST_F(LoggerTest, NoRotationWhenMaxBytesIsZero) {
+    namespace fs = std::filesystem;
+    auto& logger = Logger::getInstance();
+    logger.setRotation(0, 5); // off
+    for (int i = 0; i < 50; ++i) {
+        logger.log(LogLevel::INFO, "line-" + std::to_string(i));
+    }
+    EXPECT_FALSE(fs::exists(logFile_.string() + ".1"));
+    EXPECT_EQ(readLines(logFile_).size(), 50U);
+}
+
+TEST_F(LoggerTest, RotationAccountsForAPreexistingFileSize) {
+    namespace fs = std::filesystem;
+    auto& logger = Logger::getInstance();
+    // The file already has content from setLogFile(append); reopening must not
+    // reset the size accounting to zero (else a large file never rotates).
+    logger.log(LogLevel::INFO, std::string(500, 'x'));
+    logger.setLogFile(logFile_.string()); // reopen (append)
+    logger.setRotation(300, 2);
+    logger.log(LogLevel::INFO, "trigger");
+    EXPECT_TRUE(fs::exists(logFile_.string() + ".1")) << "reopen kept the existing size";
+}
 
 TEST_F(LoggerTest, WritesStructuredLinesToFile) {
     auto& logger = Logger::getInstance();

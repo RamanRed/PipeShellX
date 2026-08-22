@@ -36,8 +36,34 @@ bool Logger::setLogFile(const std::string& filename) {
         std::filesystem::create_directories(parent, ignored);
     }
 
+    logFilePath_ = filename;
+    std::error_code sizeError;
+    const auto existing = std::filesystem::file_size(filename, sizeError);
+    logFileBytes_ = sizeError ? 0 : existing;
+
     logFile.open(filename, std::ios::app);
     return logFile.is_open();
+}
+
+void Logger::setRotation(std::uintmax_t maxBytes, int keep) noexcept {
+    std::lock_guard<std::mutex> lock(logMutex);
+    maxBytes_ = maxBytes;
+    keepFiles_ = keep < 1 ? 1 : keep;
+}
+
+void Logger::rotateLocked() {
+    if (logFile.is_open()) {
+        logFile.close();
+    }
+    std::error_code ec;
+    // Drop the oldest, then shift each generation up: .(keep-1)->.keep … .1->.2.
+    std::filesystem::remove(logFilePath_ + "." + std::to_string(keepFiles_), ec);
+    for (int i = keepFiles_ - 1; i >= 1; --i) {
+        std::filesystem::rename(logFilePath_ + "." + std::to_string(i), logFilePath_ + "." + std::to_string(i + 1), ec);
+    }
+    std::filesystem::rename(logFilePath_, logFilePath_ + ".1", ec);
+    logFile.open(logFilePath_, std::ios::trunc);
+    logFileBytes_ = 0;
 }
 
 void Logger::setLevel(LogLevel level) noexcept {
@@ -119,6 +145,12 @@ void Logger::log(LogLevel level, const LogContext& context, const std::string& m
     if (logFile.is_open()) {
         logFile << logMsg << std::endl;
         wroteToFile = logFile.good(); // a failed write/flush (ENOSPC, EIO) sticks: fall back from now on
+        if (wroteToFile) {
+            logFileBytes_ += logMsg.size() + 1; // + newline
+            if (maxBytes_ != 0 && logFileBytes_ >= maxBytes_) {
+                rotateLocked();
+            }
+        }
     }
     if (!wroteToFile || consoleMirror()) {
         std::cerr << logMsg << std::endl;

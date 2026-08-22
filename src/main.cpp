@@ -24,6 +24,7 @@ void initLogging(const CliOptions& options) {
     auto& logger = Logger::getInstance();
     logger.setLevel(options.verbose ? LogLevel::DEBUG : LogLevel::INFO);
     logger.setConsoleMirror(options.verbose);
+    logger.setRotation(10ULL * 1024 * 1024, 5); // 10 MiB per file, keep 5 generations
     const std::string logFile = options.logFile.empty() ? Logger::defaultLogFilePath() : options.logFile;
     if (!logger.setLogFile(logFile)) {
         std::cerr << "PipeShellX: warning: cannot open " << logFile << "; logging to stderr instead\n";

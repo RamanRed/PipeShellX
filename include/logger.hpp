@@ -39,6 +39,11 @@ public:
     void setConsoleMirror(bool enabled) noexcept;
     bool consoleMirror() const noexcept;
 
+    // Size-based log rotation. When the current file passes `maxBytes` it is
+    // renamed to `<path>.1` (shifting `.1`→`.2` … and dropping `.<keep>`), and
+    // a fresh file is opened. maxBytes 0 (the default) disables rotation.
+    void setRotation(std::uintmax_t maxBytes, int keep) noexcept;
+
     // True when a message of `level` would be emitted; lets callers skip
     // building expensive messages/contexts on hot paths.
     bool enabled(LogLevel level) const noexcept;
@@ -55,7 +60,13 @@ private:
     Logger();
     ~Logger();
 
+    void rotateLocked(); // caller holds logMutex
+
     std::ofstream logFile;
+    std::string logFilePath_;
+    std::uintmax_t logFileBytes_ = 0;
+    std::uintmax_t maxBytes_ = 0;
+    int keepFiles_ = 5;
     std::mutex logMutex;
     std::atomic<LogLevel> currentLevel;
     std::atomic<bool> mirrorToConsole;

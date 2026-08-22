@@ -128,8 +128,10 @@ Each log line includes:
 - client ID
 - command
 
-Rotation is not implemented yet; use `logrotate` (`copytruncate`) or a
-supervisor that rotates files.
+The log file rotates by size: when it passes 10 MiB it is renamed to
+`<path>.1` (shifting `.1`→`.2` … and dropping `.5`) and a fresh file is
+opened, so at most six generations (~60 MiB) are kept. External rotation is
+not required.
 
 ## Descriptor Budget
 
@@ -186,5 +188,5 @@ cmake --install build
 ## Known Deployment Constraints
 
 - current terminal client is interactive-first, not a daemon or network service
-- log rotation and JSON output are not implemented yet
+- JSON log output is not implemented yet (size-based rotation is)
 - sandboxing is not strong enough yet for hostile multi-tenant environments
