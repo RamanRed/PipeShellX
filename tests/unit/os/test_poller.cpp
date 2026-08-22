@@ -255,6 +255,36 @@ TEST_P(PollerTest, ClosingARegisteredHandleAfterRemoveIsSafe) {
     EXPECT_TRUE(waitTokens(0ms).empty());
 }
 
+TEST_P(PollerTest, NoReadyEdgeIsLostWhenMoreFdsAreReadyThanTheEventBatch) {
+    // Register many readable pipes and drain them with a deliberately small
+    // events span: an edge-triggered backend must not consume-and-drop the
+    // overflow (which would strand those fds forever). Every token must appear.
+    constexpr std::uint64_t kCount = 100;
+    std::vector<Pipe> pipes;
+    for (std::uint64_t token = 0; token < kCount; ++token) {
+        auto pipe = Pipe::create();
+        ASSERT_TRUE(pipe.ok());
+        ASSERT_TRUE(pipe.value().reader.setNonBlocking(true).ok());
+        ASSERT_TRUE(poller_->add(pipe.value().reader, Interest::Readable, token).ok());
+        writeText(pipe.value().writer, "x"); // all ready at once
+        pipes.push_back(std::move(pipe.value()));
+    }
+
+    std::set<std::uint64_t> seen;
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (seen.size() < kCount && std::chrono::steady_clock::now() < deadline) {
+        std::array<Event, 8> events{}; // span smaller than the ready set
+        auto count = poller_->wait(events, 1000ms);
+        ASSERT_TRUE(count.ok()) << count.error().message();
+        for (std::size_t i = 0; i < count.value(); ++i) {
+            seen.insert(events[i].token);
+            // Drain so an edge-triggered fd goes quiet until written again.
+            drainAll(pipes[events[i].token].reader);
+        }
+    }
+    EXPECT_EQ(seen.size(), kCount) << "an edge-triggered backend dropped ready fds it could not deliver";
+}
+
 INSTANTIATE_TEST_SUITE_P(Backends, PollerTest, ::testing::ValuesIn(availableBackends()), backendName);
 
 TEST(PollerFactoryTest, PollIsAlwaysAvailableAndAutoPrefersTheNativeBackend) {

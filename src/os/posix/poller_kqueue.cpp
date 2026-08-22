@@ -69,7 +69,10 @@ public:
         if (events.empty()) {
             return std::size_t{0};
         }
-        raw_.resize(events.size() + 1); // one slot for a possible wake-up
+        // Retrieve no more than we can deliver: kevent with EV_CLEAR clears an
+        // event's edge on retrieval, so an undelivered one would be lost. Any
+        // ready filter we do not fetch stays queued for the next kevent().
+        raw_.resize(events.size());
         timespec ts{};
         const timespec* tsPtr = nullptr;
         if (timeout) {

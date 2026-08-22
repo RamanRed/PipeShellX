@@ -474,12 +474,17 @@ Result<Process> Process::spawn(const SpawnSpec& spec) {
     return Process(static_cast<ProcessId>(pid), static_cast<ProcessId>(pid));
 }
 
-Process::~Process() {
+void Process::terminate() noexcept {
     if (owns_) {
         (void)::kill(-static_cast<pid_t>(group_), SIGKILL);
         (void)::kill(static_cast<pid_t>(id_), SIGKILL);
         reapQuietly(static_cast<pid_t>(id_));
+        owns_ = false;
     }
+}
+
+Process::~Process() {
+    terminate();
 }
 
 Process::Process(Process&& other) noexcept
@@ -487,7 +492,9 @@ Process::Process(Process&& other) noexcept
 
 Process& Process::operator=(Process&& other) noexcept {
     if (this != &other) {
-        this->~Process();
+        // Kill/reap the child we currently own, then take over `other`'s — no
+        // explicit destructor call, so no member is written after its lifetime.
+        terminate();
         id_ = other.id_;
         group_ = other.group_;
         owns_ = std::exchange(other.owns_, false);

@@ -85,7 +85,10 @@ public:
         if (events.empty()) {
             return std::size_t{0};
         }
-        raw_.resize(events.size() + 1);
+        // Retrieve no more than we can deliver: an event pulled from the kernel
+        // consumes its edge (EPOLLET), so an undelivered one would be lost. The
+        // kernel keeps any ready fd we do not fetch and returns it next wait().
+        raw_.resize(events.size());
         const int ready = ::epoll_wait(epfd_, raw_.data(), static_cast<int>(raw_.size()), timeoutMs(timeout));
         if (ready == -1) {
             if (errno == EINTR) {

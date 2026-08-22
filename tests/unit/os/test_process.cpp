@@ -346,6 +346,25 @@ TEST(OsProcessTest, DestructorKillsAndReapsARunningChild) {
     EXPECT_EQ(errno, ECHILD);
 }
 
+TEST(OsProcessTest, MoveAssignKillsTheOverwrittenChildAndTakesOverTheOther) {
+    auto victim = Process::spawn(shell("sleep 30"));
+    auto survivor = Process::spawn(shell("exit 7"));
+    ASSERT_TRUE(victim.ok() && survivor.ok());
+    const auto victimGroup = victim.value().groupId();
+
+    // Overwrite `victim` with `survivor`: the sleeping child must be killed and
+    // reaped, and `victim` now owns the exit-7 process.
+    victim.value() = std::move(survivor.value());
+    EXPECT_TRUE(groupGone(victimGroup)) << "the overwritten child must be killed";
+    EXPECT_FALSE(survivor.value().running());
+
+    auto status = victim.value().wait();
+    ASSERT_TRUE(status.ok()) << status.error().message();
+    EXPECT_EQ(status.value().kind, ExitStatus::Kind::Exited);
+    EXPECT_EQ(status.value().code, 7);
+    EXPECT_TRUE(noUnreapedChildren());
+}
+
 TEST(OsProcessTest, ReleaseDetachesOwnership) {
     auto process = Process::spawn(shell("exit 0"));
     ASSERT_TRUE(process.ok());

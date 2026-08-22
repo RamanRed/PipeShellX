@@ -102,6 +102,18 @@ public:
     WorkerRun(Reactor& reactor, std::vector<Worker>& workers, int timeoutSec, psx::sink::Sink* sink)
         : reactor_(reactor), workers_(workers), timeoutSec_(timeoutSec), sink_(sink) {}
 
+    // The reactor is cached and reused across runs; a timer left in it after
+    // this WorkerRun is destroyed would fire into freed memory. Cancel any
+    // that did not fire (cancel of an already-fired/absent timer is a no-op).
+    ~WorkerRun() {
+        if (deadlineTimer_ != 0) {
+            reactor_.cancel(deadlineTimer_);
+        }
+        if (drainTimer_ != 0) {
+            reactor_.cancel(drainTimer_);
+        }
+    }
+
     bool anyTimedOut() const noexcept { return anyTimedOut_; }
 
     void run() {
@@ -111,7 +123,7 @@ public:
             account(worker); // workers that failed to start are already complete
         }
         if (timeoutSec_ > 0) {
-            reactor_.after(std::chrono::seconds(timeoutSec_), [this] { onDeadline(); });
+            deadlineTimer_ = reactor_.after(std::chrono::seconds(timeoutSec_), [this] { onDeadline(); });
         }
         // Reactor::run() returns immediately if account() already called stop().
         if (auto ran = reactor_.run(); !ran.ok()) {
@@ -270,6 +282,7 @@ private:
     }
 
     void onDeadline() {
+        deadlineTimer_ = 0; // fired: nothing to cancel later
         for (auto& worker : workers_) {
             if (worker.complete()) {
                 continue;
@@ -286,10 +299,11 @@ private:
             Logger::getInstance().log(LogLevel::ERROR, worker.context,
                                       "Command timed out; sent SIGKILL to process group");
         }
-        reactor_.after(kDrainGrace, [this] { onDrainExpired(); });
+        drainTimer_ = reactor_.after(kDrainGrace, [this] { onDrainExpired(); });
     }
 
     void onDrainExpired() {
+        drainTimer_ = 0; // fired
         for (auto& worker : workers_) {
             if (worker.complete()) {
                 continue;
@@ -313,6 +327,8 @@ private:
     int timeoutSec_;
     psx::sink::Sink* sink_ = nullptr;
     std::size_t remaining_ = 0;
+    psx::runtime::TimerId deadlineTimer_ = 0;
+    psx::runtime::TimerId drainTimer_ = 0;
     bool anyTimedOut_ = false;
 };
 

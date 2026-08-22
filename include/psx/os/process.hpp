@@ -108,6 +108,7 @@ public:
 
 private:
     Process(ProcessId id, ProcessId group) noexcept : id_(id), group_(group), owns_(true) {}
+    void terminate() noexcept; // kill the whole group and reap; idempotent
 
     ProcessId id_ = 0;
     ProcessId group_ = 0;

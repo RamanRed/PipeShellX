@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <set>
 #include <sys/wait.h>
+#include <thread>
 #include <unistd.h>
 
 class ProcessManagerTest : public ::testing::Test {};
@@ -179,5 +180,30 @@ TEST_F(ProcessManagerTest, FastCommandsThatExitBeforeBeingWatchedStillSucceed) {
         auto result = pm.execute({"true"}, context);
         ASSERT_FALSE(result.timedOut) << "iteration " << i;
         ASSERT_EQ(result.exitCode, 0) << "iteration " << i << ": " << result.stderrData;
+    }
+}
+
+// A ProcessManager caches its reactor; reusing it across runs must not let a
+// prior run's deadline timer fire into freed WorkerRun memory. Run A leaves a
+// 1 s timer, we let it become past-due, then run B reuses the reactor — its
+// first tick would fire A's stale timer (use-after-free) without cancellation.
+TEST_F(ProcessManagerTest, ReusingTheManagerDoesNotFireAStaleDeadlineTimer) {
+    ProcessManager pm;
+    LogContext context{getpid(), "reuse", "-", "echo"};
+
+    auto a = pm.execute({"echo", "A"}, context, "", 1);
+    ASSERT_EQ(a.exitCode, 0);
+    ASSERT_FALSE(a.timedOut);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100)); // A's 1 s timer is now past due
+
+    auto b = pm.execute({"echo", "B"}, context, "", 5);
+    ASSERT_EQ(b.exitCode, 0) << b.stderrData;
+    EXPECT_EQ(b.stdoutData, "B\n");
+    EXPECT_FALSE(b.timedOut) << "B must not be marked timed out by A's stale timer";
+
+    // A few more quick reuses for good measure.
+    for (int i = 0; i < 5; ++i) {
+        auto r = pm.execute({"echo", "reuse"}, context, "", 2);
+        ASSERT_EQ(r.exitCode, 0);
     }
 }
