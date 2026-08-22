@@ -470,3 +470,13 @@ TEST_F(GoldenRemoteTest, RetryBackoffColludingWithTheDeadlineStillTerminates) {
     EXPECT_TRUE(result.clientResults[0].timedOut);
     EXPECT_LT(elapsed, std::chrono::seconds(4)) << "the run hung (worker resurrected past its final count)";
 }
+
+// A changed remote host key is surfaced distinctly (possible MITM), with
+// remediation, rather than as a generic verification failure.
+TEST_F(GoldenRemoteTest, AChangedHostKeyIsReportedDistinctly) {
+    auto result = pm_.executeRemote({client("u", "h")}, "hostkeychg", context("hostkeychg"), {.timeoutSec = 10});
+    ASSERT_EQ(result.clientResults.size(), 1U);
+    EXPECT_EQ(
+        result.clientResults[0].errorMessage,
+        "ERROR: host key changed (possible MITM) — verify the new key, then clear the old one with ssh-keygen -R");
+}

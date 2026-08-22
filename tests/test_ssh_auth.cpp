@@ -184,10 +184,11 @@ TEST(SshAuthTest, ClassifiesSshFailuresInPrecedenceOrder) {
               "unreachable host");
     EXPECT_EQ(classifySshFailure("nobody@host: Permission denied (publickey)."), "authentication failed");
     EXPECT_EQ(classifySshFailure("Host key verification failed."), "host key verification failed");
-    // A changed key also mentions "permission"/"connection" words in its banner; host key wins.
+    // A changed key prints both banners; the graver "changed" classification wins,
+    // and mentions the remediation.
     EXPECT_EQ(classifySshFailure("WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\n"
                                  "Host key verification failed.\nConnection closed by remote host"),
-              "host key verification failed");
+              "host key changed (possible MITM) — verify the new key, then clear the old one with ssh-keygen -R");
     EXPECT_FALSE(classifySshFailure("").has_value());
     EXPECT_FALSE(classifySshFailure("uptime: command not found").has_value());
 }
@@ -199,6 +200,15 @@ TEST(SshAuthTest, DetectsHostKeyVerificationFailures) {
                                     "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n"));
     EXPECT_FALSE(isSshHostKeyFailure("Permission denied (publickey)."));
     EXPECT_FALSE(isSshHostKeyFailure(""));
+}
+
+TEST(SshAuthTest, DistinguishesAChangedHostKeyFromAGenericFailure) {
+    EXPECT_TRUE(isSshHostKeyChanged("WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!"));
+    // A first-time/failed verification is not a *changed* key.
+    EXPECT_FALSE(isSshHostKeyChanged("Host key verification failed."));
+    EXPECT_FALSE(isSshHostKeyChanged("Permission denied (publickey)."));
+    // isSshHostKeyChanged is a subset of isSshHostKeyFailure.
+    EXPECT_TRUE(isSshHostKeyFailure("WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!"));
 }
 
 TEST(SshAuthTest, RetryableFailuresAreTransientTransportOnly) {

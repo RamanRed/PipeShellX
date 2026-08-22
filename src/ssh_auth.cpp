@@ -10,8 +10,11 @@
 namespace {
 
 // Needles are lower-case; the text is lowered once per classification.
-constexpr std::array<std::string_view, 2> kHostKeyNeedles{"host key verification failed",
-                                                          "remote host identification has changed"};
+// A *changed* key (possible MITM) is graver than a first-time/failed verification
+// and needs explicit operator action, so it is classified separately. ssh prints
+// both banners when a key changes, so the "changed" needle is checked first.
+constexpr std::array<std::string_view, 1> kHostKeyChangedNeedles{"remote host identification has changed"};
+constexpr std::array<std::string_view, 1> kHostKeyFailedNeedles{"host key verification failed"};
 constexpr std::array<std::string_view, 3> kUnreachableNeedles{"could not resolve hostname", "name or service not known",
                                                               "temporary failure in name resolution"};
 constexpr std::array<std::string_view, 6> kConnectionNeedles{"connection refused", "connection timed out",
@@ -121,7 +124,10 @@ std::vector<std::string> buildSshCommandArguments(const ClientEntry& client,
 
 std::optional<std::string> classifySshFailure(const std::string& stderrText) {
     const std::string lowered = toLowerCopy(stderrText);
-    if (containsAny(lowered, kHostKeyNeedles)) {
+    if (containsAny(lowered, kHostKeyChangedNeedles)) {
+        return "host key changed (possible MITM) — verify the new key, then clear the old one with ssh-keygen -R";
+    }
+    if (containsAny(lowered, kHostKeyFailedNeedles)) {
         return "host key verification failed";
     }
     if (containsAny(lowered, kUnreachableNeedles)) {
@@ -141,7 +147,12 @@ bool isSshAuthenticationFailure(const std::string& stderrText) {
 }
 
 bool isSshHostKeyFailure(const std::string& stderrText) {
-    return containsAny(toLowerCopy(stderrText), kHostKeyNeedles);
+    const std::string lowered = toLowerCopy(stderrText);
+    return containsAny(lowered, kHostKeyChangedNeedles) || containsAny(lowered, kHostKeyFailedNeedles);
+}
+
+bool isSshHostKeyChanged(const std::string& stderrText) {
+    return containsAny(toLowerCopy(stderrText), kHostKeyChangedNeedles);
 }
 
 bool isRetryableSshFailure(const std::string& stderrText) {

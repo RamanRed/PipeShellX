@@ -44,3 +44,7 @@ bool isSshHostKeyFailure(const std::string& stderrText);
 // failed/refused/reset connection). Auth and host-key failures are permanent
 // and return false — retrying them is futile.
 bool isRetryableSshFailure(const std::string& stderrText);
+
+// True when ssh reports the remote host key has CHANGED (possible MITM) — a
+// graver, distinctly-reported subset of isSshHostKeyFailure().
+bool isSshHostKeyChanged(const std::string& stderrText);

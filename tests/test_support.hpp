@@ -153,6 +153,7 @@ case "$cmd" in
   refused)  echo "ssh: connect to host $target port 22: Connection refused" >&2; exit 255 ;;
   denied)   echo "$target: Permission denied (publickey)." >&2; exit 255 ;;
   hostkey)  echo "Host key verification failed." >&2; exit 255 ;;
+  hostkeychg) echo "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!" >&2; echo "Host key verification failed." >&2; exit 255 ;;
   hang)     sleep 30; exit 0 ;;
   pw)       echo "pw=$PSX_FAKE_PW"; exit 0 ;;
   big)      head -c 200000 /dev/zero | tr '\0' 'o'; head -c 100000 /dev/zero | tr '\0' 'e' >&2; exit 0 ;;
