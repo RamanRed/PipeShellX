@@ -24,6 +24,7 @@ add_executable(pipeshellx_tests
     unit/os/test_process.cpp
     unit/os/test_result.cpp
     unit/os/test_signal_source.cpp
+    unit/runtime/test_reactor.cpp
     test_cli_options.cpp
     test_client_config.cpp
     test_command_executor.cpp

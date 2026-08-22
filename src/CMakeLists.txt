@@ -32,6 +32,7 @@ endif()
 # Core library
 add_library(pipeshellx_lib
     ${PIPESHELLX_OS_SOURCES}
+    runtime/reactor.cpp
     cli_options.cpp
     client_config.cpp
     client_manager.cpp
