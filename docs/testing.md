@@ -143,6 +143,17 @@ ctest --test-dir build-asan --output-on-failure
 
 `PIPESHELLX_SANITIZE=thread` is used for reactor tests from Phase 2 on.
 
+### Backend and soak knobs
+
+- `PIPESHELLX_POLLER=poll|epoll|kqueue` forces the reactor backend. CTest
+  runs the golden, `ProcessManager` and `CommandExecutor` suites a second
+  time with `PIPESHELLX_POLLER=poll` (`golden_on_poll_backend`), which is how
+  the Phase 1 criterion "poll backend removable without behaviour change" is
+  checked on every run.
+- `PIPESHELLX_SOAK=1` lengthens the spawn and `execute()` soaks to 10 000
+  cycles (descriptor count and zombie checks); the default is a few hundred.
+- `./scripts/check_layering.sh` is the layering lint (also a CI job).
+
 ### Continuous integration
 
 `.github/workflows/ci.yml` runs on every push and pull request:

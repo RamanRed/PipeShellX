@@ -4,6 +4,7 @@
 #include "posix_error.hpp"
 
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstring>
 #include <fcntl.h>
@@ -496,6 +497,32 @@ Result<void> Process::signal(StopSignal how) {
         return {}; // the group is gone but the leader may still be reapable
     }
     return posix::fromErrno("kill", errno);
+}
+
+Result<ExitStatus> Process::stop(std::chrono::milliseconds grace) {
+    if (status_) {
+        return *status_;
+    }
+    if (!owns_) {
+        return Error{ErrorClass::NoSuchProcess, ECHILD, "stop"};
+    }
+    (void)signal(StopSignal::Graceful); // ESRCH: already gone, the wait below tells
+    const auto deadline = std::chrono::steady_clock::now() + grace;
+    while (true) {
+        auto reaped = tryWait();
+        if (!reaped.ok()) {
+            return reaped.error();
+        }
+        if (reaped.value().has_value()) {
+            return *reaped.value();
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            break;
+        }
+        ::usleep(5000);
+    }
+    (void)signal(StopSignal::Kill);
+    return wait();
 }
 
 Result<ExitStatus> Process::wait() {

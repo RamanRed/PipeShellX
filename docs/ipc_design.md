@@ -2,135 +2,98 @@
 
 ## IPC Model
 
-The system uses unnamed POSIX pipes for communication between the parent process and each child process created for command execution.
+The controller talks to every child — a local command or an `ssh` worker —
+through unnamed pipes owned by `psx::os::Pipe` (`include/psx/os/pipe.hpp`):
 
-Three pipes are created per command:
-
-- stdin pipe: parent writes, child reads
+- stdin pipe: parent writes, child reads (only when the command has input;
+  otherwise the child's stdin is `/dev/null`)
 - stdout pipe: child writes, parent reads
 - stderr pipe: child writes, parent reads
 
-These pipes are created in `ProcessManager::setupPipes()` in `src/process_manager.cpp`.
+Both ends of every pipe are **non-inheritable at creation** (`pipe2(O_CLOEXEC)`
+on Linux, `pipe` + `FD_CLOEXEC` on Darwin). The child receives exactly the
+ends it needs through `posix_spawn` file actions (`dup2` onto descriptors
+0–2 clears the close-on-exec flag for the copy only), so a child can never
+see a sibling's pipes, the log file, or the reactor's descriptors. This is
+verified by listing `/dev/fd` inside a spawned child
+(`tests/unit/os/test_process.cpp`).
 
 ## Pipe Topology
 
-For a single command execution:
-
 ```text
-Parent stdinPipe[1]  ---->  stdinPipe[0] Child STDIN
-Child stdoutPipe[1]  ---->  stdoutPipe[0] Parent
-Child stderrPipe[1]  ---->  stderrPipe[0] Parent
+Parent stdinWriter   ---->  fd 0 of the child      (optional)
+Child  fd 1          ---->  stdoutReader in the parent
+Child  fd 2          ---->  stderrReader in the parent
+Parent passwordPipe  ---->  fd 3 of sshpass        (password-backed SSH workers only)
 ```
 
-After `fork()`:
+After `Process::spawn()` returns, the parent-side `Pipe` temporaries close the
+child's ends; the parent keeps `stdinWriter`, `stdoutReader` and
+`stderrReader` as `Handle`s for the duration of the run.
 
-- the child maps its pipe ends to standard file descriptors using `dup2()`
-- the parent closes the ends it does not own
-- the child closes the original inherited pipe descriptors after redirection
+## Draining Without Deadlocks
 
-## Parent to Child Communication
+A child that fills a pipe buffer blocks on `write(2)`; a parent that waits
+for process exit before reading would then wait forever. PipeShellX never
+does that: every parent-side handle is non-blocking and registered with the
+`runtime::Reactor`, which demultiplexes all pipes of all workers on one
+thread (`epoll` / `kqueue` / `poll`, see `docs/os_abstraction.md`).
 
-The parent sends optional input through the write end of the stdin pipe.
+On readiness the owner drains the pipe **until `WouldBlock`** (edge-triggered
+discipline; required by `EPOLLET` / `EV_CLEAR` and harmless under `poll`).
+End of stream is a zero-byte read or a hang-up with nothing left to read;
+the handle is then unregistered and closed. Input is written on
+writability and the writer closed after the last byte, so the child sees EOF.
 
-Behavior:
+Bounded buffering with backpressure (stop reading a stream whose buffer is
+full so the producer blocks) arrives with the L2 `Stream` in Phase 2; today
+the per-worker `std::string` still grows with the output.
 
-- parent writes to `stdinPipe[1]`
-- child receives data on `STDIN_FILENO` after `dup2(stdinPipe[0], STDIN_FILENO)`
-- once input is fully written, parent closes `stdinPipe[1]` to signal EOF
+## Child Exit and Timeouts
 
-The current terminal client does not provide user input forwarding to the child, so most commands run with an empty stdin stream.
+Child exits are reactor events too: the `ChildExitSource` (`pidfd` on Linux,
+`kqueue EVFILT_PROC` on Darwin) makes `waitpid` a single call per child, made
+by its owner after the notification — no `WNOHANG` polling, no `waitpid(-1)`.
 
-## Child to Parent Communication
-
-The child writes stdout and stderr normally through `STDOUT_FILENO` and `STDERR_FILENO`. Because these file descriptors are redirected to pipe write ends, the parent receives command output through:
-
-- `stdoutPipe[0]`
-- `stderrPipe[0]`
-
-The parent reads both streams using nonblocking I/O and `poll()` to avoid deadlocks.
-
-## Why `poll()` Is Used
-
-The parent must read stdout and stderr while the child is still running.
-
-If the parent waited for process exit before reading:
-
-- the child could fill a pipe buffer
-- the child would then block on write
-- the parent would block waiting for process exit
-- the command would deadlock
-
-The current implementation avoids this by:
-
-- making the parent-side pipe FDs nonblocking
-- polling readable/writable events
-- draining stdout and stderr incrementally
+A run's deadline is a reactor timer. When it fires, every incomplete worker's
+**process group** is `SIGKILL`ed (descendants included, even if the leader
+already exited), the worker is marked timed out, and a 2-second drain grace
+timer starts; whatever still holds the pipes afterwards (a daemonised
+grandchild outside the group) is abandoned and the run completes.
 
 ## FD Ownership Rules
 
-### Parent Owns
+| Descriptor | Owner after spawn | Closed by |
+|---|---|---|
+| child's 0/1/2 (and 3 for `sshpass`) | the child | exec/exit |
+| `stdinWriter` | parent `Worker` | reactor handler after the last byte, or at the drain deadline |
+| `stdoutReader`, `stderrReader` | parent `Worker` | reactor handler at end of stream, or at the drain deadline |
+| password pipe (both ends) | parent, momentarily | immediately after spawn — only the child holds the secret |
+| reactor internals (`kqueue`/`epoll`/self-pipe, child-exit and signal sources) | `ProcessManager`'s cached `Reactor` | when the manager is destroyed |
 
-- `stdinPipe[1]`
-- `stdoutPipe[0]`
-- `stderrPipe[0]`
-
-### Child Owns Before `dup2()`
-
-- `stdinPipe[0]`
-- `stdoutPipe[1]`
-- `stderrPipe[1]`
-
-### Parent Closes
-
-- `stdinPipe[0]`
-- `stdoutPipe[1]`
-- `stderrPipe[1]`
-
-### Child Closes
-
-After `dup2()`, the child closes all original pipe descriptors because standard input/output/error now refer to the redirected FDs.
+`psx::os::handleStats()` counts every `Handle` created and closed; the soak
+tests assert the open count is unchanged after thousands of cycles.
 
 ## Stability Measures
 
-The IPC path includes several protections:
-
-- nonblocking reads and writes
-- `poll()`-driven event loop
-- retry on `EINTR`
-- cleanup on exceptions
-- timeout-based process group termination
-- RAII-style descriptor cleanup in destructors and helper functions
+- every read/write retries `EINTR`; `SIGPIPE` is an ordinary `BrokenPipe` error
+- a child that cannot be started is reported synchronously (exit 127 with the
+  reason on stderr) and never leaves a zombie
+- exceptions cannot run in a forked child (the fork fallback uses an error
+  pipe and `_exit`)
+- a `Process` that is still running when its owner goes away is killed and
+  reaped by the destructor
 
 ## Logging Coverage
 
-IPC-related logging now includes:
-
-- pipe creation
-- child creation
-- stdin closure
-- stdout bytes read
-- stderr bytes read
-- timeout events
-- cleanup failures
-
-Each log entry includes timestamp, PID, session ID, and command context.
-
-## Standalone Pipe Utility
-
-The repository also includes a reusable `Pipe` class in:
-
-- `include/ipc_engine.h`
-- `src/ipc_engine.cpp`
-
-It demonstrates:
-
-- RAII pipe closure
-- nonblocking mode control
-- optional logging support
-
-This helper is currently not used by the active command execution path.
+IPC-related log lines: pipe creation, child creation, bytes read per stream
+(DEBUG, skipped entirely when DEBUG is disabled), stdin completion, timeout,
+drain-grace expiry, and exit status — each with timestamp, PID, session ID,
+client ID and command context.
 
 ## Current Limitations
 
-- The terminal-facing callback path is not true live streaming yet; output is still surfaced after process execution returns.
-- IPC is robust for the tested command model, but commands with interactive stdin requirements are not a primary use case in the current interface.
+- Output is still delivered to the terminal after the run completes; live
+  `--stream` rendering is a Phase 2 deliverable on top of the same reactor.
+- Per-worker output buffers are unbounded until the L2 `Stream` lands.
+- Interactive stdin (a TTY for the child) is not a supported use case.

@@ -2,15 +2,15 @@
 
 ## Purpose
 
-This project is a remote command execution system built to demonstrate core operating system concepts:
+This project is a remote command execution system built on explicit operating-system primitives:
 
-- process creation with `fork()`
-- command execution with `execvp()`
-- parent/child communication with unnamed pipes
-- I/O redirection with `dup2()`
-- multi-session behavior through terminal-based usage
+- process creation with `posix_spawn()` (no `fork()` on the hot path)
+- parent/child communication with unnamed pipes that are non-inheritable at creation
+- I/O redirection with `posix_spawn` file actions
+- event demultiplexing with `epoll` / `kqueue` / `poll` behind one single-threaded reactor
+- pollable child exits (`pidfd`, `kqueue EVFILT_PROC`) and operator signals as events
 
-The current system is implemented as a small layered C++ application with a terminal client on top of a command execution and process-management core.
+The current system is a layered C++20 application: a terminal client on top of a command execution and process-management core, which in turn sits on the `psx` OS-abstraction and runtime layers described in `docs/os_abstraction.md`. `PLAN.md` §3 describes where the layering is going (streams, transports, pipelines).
 
 ## High-Level Layers
 
@@ -47,36 +47,26 @@ Responsible for:
 
 Responsible for:
 
-- creating stdin/stdout/stderr pipes
-- calling `fork()`
-- wiring child process stdio with `dup2()`
-- executing the target program with `execvp()`
-- draining child output using nonblocking I/O and `poll()`
-- enforcing timeouts and killing process groups on failure
-- reaping children with `waitpid()`
+- creating the stdio pipes of each worker (`psx::os::Pipe`)
+- spawning local commands and `ssh` workers (`psx::os::Process`)
+- draining output and feeding input as reactor events, edge-triggered
+- enforcing the run deadline: `SIGKILL` to each worker's process group, a bounded drain grace
+- reaping every child exactly once when the exit source reports it
+- grouping per-client output and normalizing remote failures
 
-### Session Layer
+### Runtime Layer (L1)
 
-- `include/session_manager.hpp`
-- `src/session_manager.cpp`
+- `include/psx/runtime/reactor.hpp`
+- `src/runtime/reactor.cpp`
 
-Provides asynchronous session tracking on top of `CommandExecutor`. Each session owns:
+A single-threaded event loop composed from the L0 primitives: a `Poller`, a `ChildExitSource`, an optional `SignalSource` and a timer queue. Handlers run on the calling thread and may re-enter the reactor; `stop()`/`wake()` are thread-safe. Platform-agnostic: it includes `psx` headers only.
 
-- a session ID
-- worker thread
-- captured output
-- captured error
-- exit code
-- active state
+### OS Abstraction Layer (L0)
 
-This layer is prepared for multi-session orchestration but is not yet the primary path used by the interactive client.
+- `include/psx/os/*.hpp`, `include/psx/result.hpp`
+- `src/os/posix/*.cpp`
 
-### IPC Utility Layer
-
-- `include/ipc_engine.h`
-- `src/ipc_engine.cpp`
-
-Contains a standalone `Pipe` abstraction for unnamed pipe management. It demonstrates RAII pipe ownership but is currently separate from the active `ProcessManager` execution path.
+`Handle`, `Pipe`, byte I/O, `Process`, `Poller` (`poll`/`kqueue`/`epoll`), `ChildExitSource`, `SignalSource`, `Console`, `paths`, `system`. Public headers use `std::` types only; this directory is the only place platform headers may appear (enforced in CI). See `docs/os_abstraction.md`.
 
 ### Logging Layer
 
@@ -109,17 +99,13 @@ Provides centralized logging with:
 
 ### ProcessManager
 
-- IPC creation and cleanup
-- process lifecycle control
-- timeout handling
-- child reaping
-- low-level execution reliability
+- worker lifecycle on the reactor (spawn, drain, exit, deadline)
+- per-client result aggregation and error classification
 
-### SessionManager
+### psx::runtime::Reactor / psx::os
 
-- background session tracking
-- thread ownership
-- session result retention
+- event demultiplexing, timers, child-exit and signal delivery
+- the kernel-facing primitives with the non-inheritable-handle invariant
 
 ### Logger
 
@@ -130,35 +116,27 @@ Provides centralized logging with:
 
 ```text
 main
-  -> Logger
-  -> TerminalClient
-       -> CommandExecutor
+  -> Logger                    (psx::os::paths, psx::os::system)
+  -> TerminalClient            (psx::os::Console for the hidden password prompt)
+       -> CommandExecutor      (psx::os::isExecutableFile for trusted-path lookup)
             -> ProcessManager
-                 -> fork
-                 -> pipe
-                 -> dup2
-                 -> execvp
-                 -> poll
-                 -> waitpid
-
-SessionManager
-  -> CommandExecutor
-       -> ProcessManager
-
-Pipe
-  -> pipe
-  -> read/write
-  -> fcntl
+                 -> psx::runtime::Reactor
+                      -> psx::os::Poller          epoll | kqueue | poll
+                      -> psx::os::ChildExitSource pidfd | EVFILT_PROC | SIGCHLD
+                      -> psx::os::SignalSource    signalfd | EVFILT_SIGNAL
+                 -> psx::os::Process              posix_spawn (+ fork fallback for limits)
+                 -> psx::os::Pipe / io            pipe2(O_CLOEXEC), read/write
 ```
 
 ## Current Design Notes
 
 - The runtime command path does not use a shell. This is intentional and reduces injection risk.
-- `ProcessManager` uses direct POSIX primitives instead of the `Pipe` helper. That keeps the active execution path explicit, but it also means there are two IPC abstractions in the repository.
-- Logging is now execution-aware and includes process/session context across the major layers.
+- There is exactly one IPC abstraction (`psx::os::Pipe`) and one process abstraction (`psx::os::Process`); the former standalone `Pipe` helper and the thread-per-session `SessionManager` were removed in Phase 1 (git history keeps them).
+- Errors in L0/L1 are `psx::Result` values (ADR-005); the application layers above still use exceptions.
+- Logging is execution-aware and includes process/session context across the major layers.
 
 ## Known Architectural Limitations
 
-- The terminal client still behaves synchronously from the user’s perspective even though it uses a worker thread.
-- `SessionManager` is not yet integrated as the primary orchestration path for interactive execution.
-- Output callbacks are still invoked after command completion rather than as truly live streamed events.
+- The terminal client still runs each command on a worker thread and spin-waits; Phase 2 rewrites it as a thin client over the reactor-driven `Run`.
+- Output callbacks are still invoked after command completion rather than as truly live streamed events (Phase 2 `--stream`).
+- Per-worker output buffers are unbounded until the L2 `Stream` with backpressure lands (Phase 2).

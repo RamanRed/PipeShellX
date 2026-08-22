@@ -139,13 +139,13 @@ Parent owns:
 
 Child owns:
 
-- worker stdout write end
-- worker stderr write end
+- worker stdout write end (as its descriptor 1)
+- worker stderr write end (as its descriptor 2)
+- descriptor 3: the password pipe, for `sshpass -d 3` workers only
 
-After redirection:
-
-- child closes inherited descriptors
-- parent closes write ends
+Every other descriptor of the controller is non-inheritable, so a worker
+cannot see its siblings' pipes. The parent closes the write ends as soon as
+`posix_spawn` returns.
 
 ## Parallel Execution Flow
 
@@ -153,17 +153,15 @@ The parent process does the following:
 
 1. load all configured clients
 2. for each client:
-   - create stdout/stderr pipes
-   - `fork()` a worker
-3. child worker:
-   - create its own process group
-   - redirect stdout/stderr
-   - run SSH using `execvp()`
-4. parent:
-   - poll all worker pipes
-   - read remote stdout/stderr as it becomes available
-   - call `waitpid(..., WNOHANG)` for each worker
-   - build per-client results
+   - create stdout/stderr pipes (`psx::os::Pipe`)
+   - for a password-backed client, create the password pipe and write the secret into it
+   - `psx::os::Process::spawn()` the `ssh` (or `sshpass -d 3 ssh`) worker in its own process group, stdio wired through `posix_spawn` file actions
+3. register every worker's pipes and exit with the `psx::runtime::Reactor`
+4. run the reactor until all workers are complete:
+   - readable pipes are drained edge-triggered
+   - each exit is reaped once when the `ChildExitSource` reports it
+   - at the deadline every incomplete worker's process group is `SIGKILL`ed, then a 2 s drain grace applies
+5. build per-client results and classify failures
 
 This ensures all remote commands start in parallel rather than one after another.
 

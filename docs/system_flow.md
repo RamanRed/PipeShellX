@@ -31,7 +31,7 @@ For interactive usage, the terminal client derives a synthetic session ID:
 interactive-<pid>
 ```
 
-This is used for logging and tracing even though the terminal path does not currently use `SessionManager`.
+This is used for logging and tracing.
 
 ### 4. Command Execution Request
 
@@ -86,17 +86,6 @@ The returned output is split into lines and passed to the terminal callback:
 - reports non-zero exit codes as user-visible errors
 - returns to the prompt
 
-## SessionManager Flow
-
-When `SessionManager` is used:
-
-1. `startSession()` creates a session object
-2. a unique session ID is generated
-3. a worker thread is launched
-4. the worker calls `CommandExecutor::execute(...)`
-5. output, error, and exit code are stored in the session
-6. `active` is set to false on completion
-
 ## Logging Flow
 
 Execution logs now exist at four levels:
@@ -121,9 +110,13 @@ User input
   -> TerminalClient
   -> CommandExecutor
   -> ProcessManager
-  -> fork()
-     -> Child: dup2 + execvp
-     -> Parent: poll + read pipes + waitpid
+       -> psx::os::Pipe::create()            stdout/stderr (+ stdin when there is input)
+       -> psx::os::Process::spawn()          posix_spawn, own process group, stdio via file actions
+       -> psx::runtime::Reactor::run()
+            readable  -> drain the pipe until WouldBlock
+            writable  -> feed input, close stdin after the last byte
+            child exit-> Process::tryWait() (one waitpid per child)
+            deadline  -> SIGKILL the process group, 2 s drain grace
   -> CommandResult
   -> Terminal output
 ```
@@ -134,17 +127,16 @@ Typical failure points:
 
 - parse error
 - validation failure
-- missing executable
+- missing executable (`posix_spawn` fails synchronously: exit 127 and the reason on stderr)
 - pipe creation failure
-- fork failure
-- `dup2()` failure
-- `execvp()` failure
+- spawn failure
 - timeout
-- `waitpid()` or `poll()` failure
+- event-loop failure
 
 Current behavior:
 
-- low-level failures become exceptions in the parent
-- child setup failures write to stderr and exit
+- L0/L1 failures are `psx::Result` values; `ProcessManager` turns the
+  unrecoverable ones (no pipes, no event loop) into exceptions and the
+  per-child ones (cannot start) into results
 - terminal-level failures are shown to the user
 - all major failure paths are logged

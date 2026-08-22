@@ -75,12 +75,35 @@ rebuild and O(N) `waitpid(WNOHANG)` calls per wake-up — i.e. controller CPU
 proportional to N × ready events. T3 (1 000 hosts ≤ 12 s, ≤ 1 core) is the
 number to beat in Phase 2.
 
+## Phase 1 — `v0.2.0` (2026-08-22)
+
+Same machine, **loaded** (load average ≈ 10 from unrelated desktop work),
+Release build, `pipeshellx_bench_baseline --spawn 2000`:
+
+| Metric | v0.1.0 (quiet) | v0.2.0 (loaded) | Note |
+|---|---|---|---|
+| p50 / p90 / p99 | 3.21 / 4.43 / 55.3 ms | **1.74 / 2.31 / 3.74 ms** | `posix_spawn` + reactor; the 50 ms idle-poll cliff is gone |
+| mean / max | 4.99 / 122 ms | 1.88 / 15.1 ms | |
+| throughput | 200 spawns/s | **531 spawns/s** | second run on the same loaded box: 407/s |
+| open descriptors before / after | 3 / 3 | 5 / 5 | the two extra are the cached reactor's kqueue + child-exit source |
+| peak RSS | 1.6 MiB | 1.7 MiB | |
+
+Reading the numbers: the p99 collapsed from 55 ms to under 4 ms because a
+child's exit is now a reactor event (`pidfd` / `EVFILT_PROC`) instead of a
+`waitpid(WNOHANG)` checked after an up-to-50 ms idle `poll()`; p50 roughly
+halved because the remaining fork fallback (Darwin, needed only for the
+`RLIMIT_CPU` cap on local commands) is the only `fork()` left and the
+reactor's descriptors are created once per `ProcessManager` rather than per
+command. T1's target (≤ 0.5 ms p50) still needs the Phase 2 removal of the
+per-command pipe setup and the Linux `posix_spawn` path measured in CI.
+
 ## Per-release results
 
 | Release | Platform | T1 p50 / p99 | T3 (1 000 × `uptime`) | T11 descriptors | Notes |
 |---|---|---|---|---|---|
 | `v0.1.0` | macOS arm64 (M4) | 3.21 ms / 55.3 ms | not measured | 3 → 3 | baseline; fan-out requires `sshd` |
 | `v0.1.0` | ubuntu-latest (CI) | *pending nightly* | *pending nightly* | | first `bench.yml` run |
+| `v0.2.0` | macOS arm64 (M4), loaded | 1.74 ms / 3.74 ms | not measured | 5 → 5 | reactor + `posix_spawn`; fan-out still needs `sshd` |
 
 Later phases add the scenarios from §7.2 (cold vs warm SSH, backplane
 fan-out, throughput sink, overload, chaos, framing property test, size and

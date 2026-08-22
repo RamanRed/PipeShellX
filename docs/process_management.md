@@ -2,118 +2,104 @@
 
 ## Overview
 
-Process lifecycle control is implemented in `ProcessManager`.
+Child processes are owned by `psx::os::Process` (`include/psx/os/process.hpp`);
+`ProcessManager` (`src/process_manager.cpp`) composes them with the
+`runtime::Reactor` to run one local command or N `ssh` workers to completion.
 
 Primary responsibilities:
 
-- create child processes with `fork()`
-- isolate child stdio using pipes and `dup2()`
-- execute commands using `execvp()`
-- monitor child execution
-- enforce time limits
-- reap children using `waitpid()`
-- prevent zombie processes
+- create children with `posix_spawn()` — no `fork()` on the hot path
+- wire stdio through `posix_spawn` file actions (`dup2` onto 0–2, `/dev/null`
+  where nothing is connected, extra handles such as the `sshpass` password
+  pipe at a fixed descriptor)
+- put every child in its own process group; kill the whole group on timeout
+- observe exits through a pollable source and reap each child exactly once
+- report a tagged `ExitStatus` (`Exited(code)`, `Signaled(sig)`, `Terminated`)
 
 ## Lifecycle Steps
 
 ### 1. Validate Inputs
 
-`ProcessManager::execute()` requires a non-empty argument vector. Command parsing and validation occur earlier in `CommandExecutor`.
+`ProcessManager::execute()` requires a non-empty argument vector. Command
+parsing and validation occur earlier in `CommandExecutor`. `Process::spawn()`
+additionally validates the `SpawnSpec` (valid stdio handles, descriptor
+targets ≥ 3, an existing working directory) before anything is created.
 
 ### 2. Create Pipes
 
-`setupPipes()` creates three unnamed pipes for stdin, stdout, and stderr.
+`psx::os::Pipe::create()` makes the stdout and stderr pipes (and a stdin pipe
+when the command has input), all non-inheritable.
 
-### 3. Fork
+### 3. Spawn
 
-`fork()` splits execution into:
+`Process::spawn()` builds `posix_spawn_file_actions` (`dup2` for the stdio
+handles, `addopen("/dev/null")` for unconnected streams, `addchdir` for a
+working directory, glibc's `closefrom(3)` where available) and attributes:
 
-- parent branch
-- child branch
+- `POSIX_SPAWN_SETPGROUP` — a new process group whose id is the child's pid
+- `POSIX_SPAWN_SETSIGMASK` (empty) and `POSIX_SPAWN_SETSIGDEF` (all) — the
+  child starts with default signal handling whatever the parent ignores
+- Darwin: `POSIX_SPAWN_CLOEXEC_DEFAULT` as belt and braces
 
-If `fork()` fails:
+`posix_spawnp` performs the `PATH` lookup when the program has no `/`. A
+missing program, directory or permission fails **synchronously** — the
+caller gets `NotFound`/`PermissionDenied`, and no reapable child exists.
 
-- pipes are closed
-- the error is logged
-- an exception is thrown
+Resource limits (`Limits{cpuSeconds, addressSpaceBytes, openHandles}`) are
+applied with `prlimit()` right after the spawn on Linux. Darwin has no
+`prlimit`; when limits are requested the spawn goes through a **fork
+fallback** whose child runs only async-signal-safe calls (`sigprocmask`,
+`setpgid`, `chdir`, `setrlimit`, `dup2`, `execv`) and reports an exec failure
+through a close-on-exec error pipe, then `_exit(127)`. `RLIMIT_AS` is advisory
+(Darwin refuses it); `RLIMIT_CPU` and `RLIMIT_NOFILE` are strict.
 
-### 4. Child Initialization
+Local commands keep the v0.1.0 caps (`RLIMIT_CPU` 5 s, `RLIMIT_AS` 64 MiB);
+per-stage limits become configurable in Phase 6.
 
-In the child:
+### 4. Run
 
-- `setpgid(0, 0)` creates a separate process group
-- `dup2()` maps pipe ends onto `STDIN_FILENO`, `STDOUT_FILENO`, and `STDERR_FILENO`
-- original pipe descriptors are closed
-- resource limits are applied with `setrlimit()`
-- `execvp()` replaces the child image with the target executable
+`ProcessManager` registers the parent-side pipe handles with the reactor,
+asks the `ChildExitSource` to watch the child, and schedules the deadline
+timer. Output is drained edge-triggered on readiness, input written on
+writability, and the exit handled when the source reports it (see
+`docs/ipc_design.md`).
 
-If any child-side setup step fails:
+### 5. Reap
 
-- the child writes an error to stderr
-- exits immediately with `_exit(...)`
-
-## Why `_exit()` Is Used
-
-The child must not unwind C++ state inherited from the parent after `fork()`.
-
-Using `_exit()` instead of `exit()` avoids:
-
-- double flushing stdio buffers
-- invoking parent-owned cleanup code
-- undefined behavior in partially copied runtime state
-
-## Parent Execution Loop
-
-In the parent:
-
-- child-side pipe ends are closed immediately
-- parent-side pipe FDs are set nonblocking
-- `poll()` waits for pipe readiness
-- stdout/stderr are drained while the child runs
-- `waitpid(..., WNOHANG)` checks for child termination without blocking
-
-This design prevents both deadlocks and zombie accumulation during normal execution.
+The exit handler calls `Process::tryWait()` — exactly one `waitpid` per
+child, for that child's pid only. `waitpid(-1)` is never used, so reaping
+one child can never steal another's status (regression-tested).
 
 ## Timeout Handling
 
-If a timeout is configured and exceeded:
+When the deadline timer fires, every incomplete worker receives
+`Process::signal(StopSignal::Kill)`: `SIGKILL` to the **process group**,
+which still works after the group leader exited and was reaped — a
+`sh -c 'sleep 30 & exit 0'` dies together with its backgrounded `sleep`.
+`StopSignal::Graceful` sends `SIGTERM` the same way; Phase 2 wires the
+TERM → KILL grace into operator cancellation (first Ctrl-C graceful, second
+hard).
 
-- the parent sends `SIGKILL` to the child process group using `kill(-childPid, SIGKILL)`
-
-Using the process group rather than only the direct child helps clean up subprocesses spawned by the command.
-
-## Reaping Strategy
-
-Zombie prevention relies on:
-
-- `waitpid(..., WNOHANG)` during the event loop
-- synchronous cleanup in exceptional paths
-- destructor cleanup via `reapChild(true)` if a child is still active
-
-The implementation also installs a `SIGCHLD` handler once per process so child termination interrupts blocking operations promptly.
-
-## Session-Level Process Management
-
-`SessionManager` adds thread-level lifecycle tracking around command execution:
-
-- creates a session record
-- launches a worker thread
-- stores output, error, and exit code
-- joins threads during shutdown or explicit session end
-
-This is session orchestration, not direct OS process control. The actual child lifecycle remains owned by `ProcessManager`.
+After the kill a 2-second drain grace collects remaining output; a holder
+outside the process group (e.g. a `setsid` daemon) cannot stall the run
+beyond that.
 
 ## Safety Properties
 
-Current process management explicitly avoids:
+Current process management explicitly guarantees:
 
-- shell execution through `system()`
-- leaving active child descriptors open after execution
-- waiting for child exit before draining output
-- ignoring child cleanup during exception paths
+- no shell on the execution path (`posix_spawn` with an argument vector)
+- no descriptor other than 0–2 (plus explicitly granted extra handles) is
+  visible to any child
+- no zombie: every child is reaped by its owner, and a `Process` still
+  running when its owner is destroyed is killed and reaped
+- no C++ code runs in a forked child
+- a parent exception never unwinds into a child (fork fallback has a
+  `catch`-free, `_exit`-only child path)
 
 ## Remaining Gaps
 
-- The system does not yet expose explicit user-facing cancellation controls.
-- Resource limits are hardcoded rather than configurable.
-- Session management does not currently expose child PID ownership in a way that supports external supervision or advanced orchestration.
+- Resource limits are still hardcoded for local commands (Phase 6).
+- Operator cancellation (Ctrl-C) is not wired yet (Phase 2; the
+  `SignalSource` that delivers it already exists).
+- Windows process creation (`CreateProcessW` + Job Objects) is Phase 3.

@@ -255,6 +255,30 @@ TEST(OsProcessTest, GracefulSignalLetsTheChildExitCleanly) {
     EXPECT_EQ(status.value().code, 7);
 }
 
+TEST(OsProcessTest, StopIsGracefulFirstAndHardAfterTheGracePeriod) {
+    auto polite = Process::spawn(shell("trap 'exit 7' TERM; while :; do sleep 0.1; done"));
+    ASSERT_TRUE(polite.ok());
+    std::this_thread::sleep_for(std::chrono::milliseconds(150)); // let the trap install
+    auto politeStatus = polite.value().stop(std::chrono::seconds(3));
+    ASSERT_TRUE(politeStatus.ok()) << politeStatus.error().message();
+    EXPECT_EQ(politeStatus.value().kind, ExitStatus::Kind::Exited);
+    EXPECT_EQ(politeStatus.value().code, 7);
+
+    auto stubborn = Process::spawn(shell("trap '' TERM; while :; do sleep 0.1; done"));
+    ASSERT_TRUE(stubborn.ok());
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    const auto start = std::chrono::steady_clock::now();
+    auto stubbornStatus = stubborn.value().stop(std::chrono::milliseconds(300));
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    ASSERT_TRUE(stubbornStatus.ok());
+    EXPECT_EQ(stubbornStatus.value().kind, ExitStatus::Kind::Signaled);
+    EXPECT_EQ(stubbornStatus.value().code, SIGKILL);
+    EXPECT_GE(elapsed, std::chrono::milliseconds(290));
+    EXPECT_LT(elapsed, std::chrono::seconds(3));
+    EXPECT_FALSE(stubborn.value().running());
+    EXPECT_EQ(stubborn.value().stop(std::chrono::milliseconds(1)).value().code, SIGKILL) << "cached after reaping";
+}
+
 TEST(OsProcessTest, TryWaitDoesNotBlockAndWaitIsIdempotentAfterReaping) {
     auto process = Process::spawn(shell("sleep 0.3; exit 5"));
     ASSERT_TRUE(process.ok());

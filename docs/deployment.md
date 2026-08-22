@@ -131,6 +131,14 @@ Each log line includes:
 Rotation is not implemented yet; use `logrotate` (`copytruncate`) or a
 supervisor that rotates files.
 
+## Descriptor Budget
+
+At startup PipeShellX raises its soft open-file limit to the hard limit
+(capped by `OPEN_MAX` on macOS) and logs the result at DEBUG level. Each SSH
+worker costs two pipes (four descriptors in the controller until they close)
+plus the `ssh` process itself; size `ulimit -n` accordingly for large fleets
+until the Phase 2 scheduler bounds concurrency automatically.
+
 ## Operational Recommendations
 
 ### Run as a Dedicated User

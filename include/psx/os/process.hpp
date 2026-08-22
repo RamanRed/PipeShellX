@@ -7,6 +7,7 @@
 #include "psx/os/handle.hpp"
 #include "psx/result.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -93,6 +94,10 @@ public:
     // Signals the whole process group; still valid after the leader was
     // reaped (descendants that stayed in the group). NoSuchProcess when empty.
     Result<void> signal(StopSignal how);
+
+    // Graceful stop with a hard deadline: SIGTERM to the group, then SIGKILL
+    // if the child has not exited within `grace`; reaps and returns the status.
+    Result<ExitStatus> stop(std::chrono::milliseconds grace);
 
     // Reaps the child. Cached after the first success; retries EINTR.
     Result<ExitStatus> wait();
