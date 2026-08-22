@@ -123,7 +123,7 @@ void Logger::log(LogLevel level, const std::string& msg) {
     if (!enabled(level)) {
         return;
     }
-    log(level, LogContext{psx::os::currentProcessId(), "-", "-", "-"}, msg);
+    log(level, LogContext{.pid = psx::os::currentProcessId(), .sessionId = "-", .clientId = "-", .command = "-"}, msg);
 }
 
 void Logger::log(LogLevel level, const LogContext& context, const std::string& msg) {
@@ -137,7 +137,14 @@ void Logger::log(LogLevel level, const LogContext& context, const std::string& m
               << "[pid=" << context.pid << "] "
               << "[session=" << (context.sessionId.empty() ? "-" : context.sessionId) << "] "
               << "[client=" << (context.clientId.empty() ? "-" : context.clientId) << "] "
-              << "[command=" << (context.command.empty() ? "-" : context.command) << "] " << msg;
+              << "[command=" << (context.command.empty() ? "-" : context.command) << "] ";
+    if (!context.runId.empty()) {
+        formatted << "[run=" << context.runId << "] ";
+    }
+    if (!context.stageId.empty()) {
+        formatted << "[stage=" << context.stageId << "] ";
+    }
+    formatted << msg;
     const std::string logMsg = formatted.str();
 
     std::lock_guard<std::mutex> lock(logMutex);

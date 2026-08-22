@@ -84,7 +84,8 @@ int pingSubcommand(const PingInvocation& invocation, std::ostream& out, std::ost
     }
 
     ProcessManager manager;
-    const LogContext context{psx::os::currentProcessId(), "ping", "-", "echo connected"};
+    const LogContext context{
+        .pid = psx::os::currentProcessId(), .sessionId = "ping", .clientId = "-", .command = "echo connected"};
     const auto result =
         manager.executeRemote(resolved.clients, "echo connected", context, {.timeoutSec = invocation.timeoutSec});
 

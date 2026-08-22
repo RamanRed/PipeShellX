@@ -691,9 +691,12 @@ ProcessManager::Result ProcessManager::execute(const std::vector<std::string>& a
         Logger::getInstance().log(LogLevel::DEBUG, context, "Creating IPC pipes");
         spawnWorker(worker, std::move(spec), feedInput);
         if (worker.process.running()) {
-            Logger::getInstance().log(
-                LogLevel::INFO, LogContext{worker.process.id(), context.sessionId, context.clientId, context.command},
-                "Child process created");
+            Logger::getInstance().log(LogLevel::INFO,
+                                      LogContext{.pid = worker.process.id(),
+                                                 .sessionId = context.sessionId,
+                                                 .clientId = context.clientId,
+                                                 .command = context.command},
+                                      "Child process created");
         }
     };
 
@@ -721,8 +724,12 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
     for (std::size_t index = 0; index < clients.size(); ++index) {
         Worker& worker = workers[index];
         worker.clientId = clients[index].clientId();
-        worker.context = LogContext{context.pid, context.sessionId, clients[index].clientId(),
-                                    "ssh " + clients[index].clientId() + " " + remoteCommand};
+        worker.context = LogContext{.pid = context.pid,
+                                    .sessionId = context.sessionId,
+                                    .clientId = clients[index].clientId(),
+                                    .command = "ssh " + clients[index].clientId() + " " + remoteCommand,
+                                    .runId = context.runId,
+                                    .stageId = "s" + std::to_string(index)};
     }
 
     auto spawnRemote = [&](std::size_t index) {

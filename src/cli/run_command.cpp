@@ -8,6 +8,7 @@
 #include "psx/os/paths.hpp"
 #include "psx/os/system.hpp"
 #include "psx/policy/policy.hpp"
+#include "psx/runtime/ids.hpp"
 #include "psx/sink/group_sink.hpp"
 #include "psx/sink/json_sink.hpp"
 #include "psx/sink/stream_sink.hpp"
@@ -247,7 +248,9 @@ int runSubcommand(const RunInvocation& invocation, std::ostream& out, std::ostre
 
     auto sink = makeSink(invocation, out, err, colourTty);
     ProcessManager manager;
-    const LogContext context{psx::os::currentProcessId(), "run", "-", remoteCommand};
+    const std::string runId = psx::runtime::newRunId();
+    const LogContext context{
+        .pid = psx::os::currentProcessId(), .sessionId = "run", .command = remoteCommand, .runId = runId};
     const auto result = manager.executeRemote(clients, remoteCommand, context,
                                               {.timeoutSec = invocation.timeoutSec,
                                                .sink = sink.get(),

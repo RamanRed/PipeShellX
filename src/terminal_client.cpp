@@ -273,7 +273,10 @@ bool TerminalClient::handleClientCommand(const std::string& command) {
             } catch (const std::exception& ex) {
                 const std::string userMessage = formatTerminalError(ex.what());
                 Logger::getInstance().log(LogLevel::ERROR,
-                                          LogContext{psx::os::currentProcessId(), sessionId, identifier, remoteCommand},
+                                          LogContext{.pid = psx::os::currentProcessId(),
+                                                     .sessionId = sessionId,
+                                                     .clientId = identifier,
+                                                     .command = remoteCommand},
                                           std::string("Targeted client execution failed: ") + ex.what());
                 printError(userMessage);
             }
@@ -315,7 +318,10 @@ bool TerminalClient::handleClientCommand(const std::string& command) {
             } catch (const std::exception& ex) {
                 const std::string userMessage = formatTerminalError(ex.what());
                 Logger::getInstance().log(LogLevel::ERROR,
-                                          LogContext{psx::os::currentProcessId(), sessionId, "-", remoteCommand},
+                                          LogContext{.pid = psx::os::currentProcessId(),
+                                                     .sessionId = sessionId,
+                                                     .clientId = "-",
+                                                     .command = remoteCommand},
                                           std::string("Broadcast client execution failed: ") + ex.what());
                 printError(userMessage);
             }
@@ -375,8 +381,11 @@ void TerminalClient::handleCommand(const std::string& command) {
             }
         } catch (const std::exception& ex) {
             const std::string userMessage = formatTerminalError(ex.what());
-            Logger::getInstance().log(LogLevel::ERROR, LogContext{psx::os::currentProcessId(), sessionId, "-", command},
-                                      std::string("Interactive command failed: ") + ex.what());
+            Logger::getInstance().log(
+                LogLevel::ERROR,
+                LogContext{
+                    .pid = psx::os::currentProcessId(), .sessionId = sessionId, .clientId = "-", .command = command},
+                std::string("Interactive command failed: ") + ex.what());
             printError(userMessage);
         }
         done = true;

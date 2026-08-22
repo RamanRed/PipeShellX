@@ -18,7 +18,7 @@ class ProcessManagerTest : public ::testing::Test {};
 TEST_F(ProcessManagerTest, ExecuteValidCommand) {
     ProcessManager pm;
     std::vector<std::string> args = {"echo", "HelloWorld"};
-    LogContext context{getpid(), "test", "-", "echo HelloWorld"};
+    LogContext context{.pid = getpid(), .sessionId = "test", .clientId = "-", .command = "echo HelloWorld"};
     auto result = pm.execute(args, context);
     ASSERT_EQ(result.exitCode, 0);
     ASSERT_NE(result.stdoutData.find("HelloWorld"), std::string::npos);
@@ -28,7 +28,7 @@ TEST_F(ProcessManagerTest, ExecuteValidCommand) {
 TEST_F(ProcessManagerTest, ExecuteInvalidCommand) {
     ProcessManager pm;
     std::vector<std::string> args = {"nonexistent_command"};
-    LogContext context{getpid(), "test", "-", "nonexistent_command"};
+    LogContext context{.pid = getpid(), .sessionId = "test", .clientId = "-", .command = "nonexistent_command"};
     auto result = pm.execute(args, context);
     ASSERT_NE(result.exitCode, 0);
     ASSERT_TRUE(result.stdoutData.empty());
@@ -38,7 +38,7 @@ TEST_F(ProcessManagerTest, ExecuteInvalidCommand) {
 TEST_F(ProcessManagerTest, CommandTimeout) {
     ProcessManager pm;
     std::vector<std::string> args = {"sleep", "10"};
-    LogContext context{getpid(), "test", "-", "sleep 10"};
+    LogContext context{.pid = getpid(), .sessionId = "test", .clientId = "-", .command = "sleep 10"};
     auto result = pm.execute(args, context, "", 1); // 1 second timeout
     ASSERT_TRUE(result.timedOut);
 }
@@ -48,7 +48,7 @@ TEST_F(ProcessManagerTest, CommandTimeout) {
 TEST_F(ProcessManagerTest, FastRemoteFailureIsNotReportedAsTimeout) {
     ProcessManager pm;
     const ClientEntry client = test_support::refusedLoopbackClient();
-    LogContext context{getpid(), "test", client.clientId(), "ssh true"};
+    LogContext context{.pid = getpid(), .sessionId = "test", .clientId = client.clientId(), .command = "ssh true"};
 
     const auto start = std::chrono::steady_clock::now();
     const auto result = pm.executeRemote({client}, "true", context, {.timeoutSec = 10});
@@ -73,7 +73,7 @@ TEST_F(ProcessManagerTest, RemoteTimeoutStillFiresForHungWorker) {
     client.user = "nobody";
     client.host = "127.0.0.1";
     client.port = listener.port();
-    LogContext context{getpid(), "test", client.clientId(), "ssh true"};
+    LogContext context{.pid = getpid(), .sessionId = "test", .clientId = client.clientId(), .command = "ssh true"};
 
     const auto start = std::chrono::steady_clock::now();
     const auto result = pm.executeRemote({client}, "true", context, {.timeoutSec = 1});
@@ -98,7 +98,7 @@ TEST_F(ProcessManagerTest, InterruptCancelsAnInFlightRun) {
     client.user = "nobody";
     client.host = "127.0.0.1";
     client.port = listener.port();
-    LogContext context{getpid(), "test", client.clientId(), "ssh true"};
+    LogContext context{.pid = getpid(), .sessionId = "test", .clientId = client.clientId(), .command = "ssh true"};
 
     const pid_t self = getpid();
     std::thread killer([self] {
@@ -135,7 +135,7 @@ TEST_F(ProcessManagerTest, InterruptCancelsAnInFlightRun) {
 TEST_F(ProcessManagerTest, TimeoutKillsGrandchildrenHoldingThePipes) {
     ProcessManager pm;
     std::vector<std::string> args = {"/bin/sh", "-c", "sleep 30 & exit 0"};
-    LogContext context{getpid(), "test", "-", "sh -c 'sleep 30 & exit 0'"};
+    LogContext context{.pid = getpid(), .sessionId = "test", .clientId = "-", .command = "sh -c 'sleep 30 & exit 0'"};
 
     const auto start = std::chrono::steady_clock::now();
     auto result = pm.execute(args, context, "", 1);
@@ -156,7 +156,7 @@ TEST_F(ProcessManagerTest, TimeoutAbandonsPipesHeldOutsideTheProcessGroup) {
     // the drain grace period must bound the wait instead.
     std::vector<std::string> args = {"/bin/sh", "-c",
                                      "python3 -c 'import os,time; os.setsid(); time.sleep(8)' & exit 0"};
-    LogContext context{getpid(), "test", "-", "sh -c 'detached holder'"};
+    LogContext context{.pid = getpid(), .sessionId = "test", .clientId = "-", .command = "sh -c 'detached holder'"};
 
     const auto start = std::chrono::steady_clock::now();
     auto result = pm.execute(args, context, "", 1);
@@ -172,7 +172,7 @@ TEST_F(ProcessManagerTest, ExecuteSoakLeaksNeitherDescriptorsNorZombies) try {
     const int cycles = std::getenv("PIPESHELLX_SOAK") != nullptr ? 10000 : 300;
     (void)psx::os::raiseHandleLimit();
     ProcessManager pm;
-    LogContext context{getpid(), "soak", "-", "echo"};
+    LogContext context{.pid = getpid(), .sessionId = "soak", .clientId = "-", .command = "echo"};
     // The reactor and its event sources are created on first use and kept for
     // the manager's lifetime; take the baseline after that one-time setup.
     ASSERT_EQ(pm.execute({"echo", "warm-up"}, context).exitCode, 0);
@@ -217,7 +217,7 @@ TEST_F(ProcessManagerTest, ExecuteSoakLeaksNeitherDescriptorsNorZombies) try {
 // spawn→exit→watch window and require every run to complete cleanly.
 TEST_F(ProcessManagerTest, FastCommandsThatExitBeforeBeingWatchedStillSucceed) {
     ProcessManager pm;
-    LogContext context{getpid(), "race", "-", "true"};
+    LogContext context{.pid = getpid(), .sessionId = "race", .clientId = "-", .command = "true"};
     for (int i = 0; i < 100; ++i) {
         auto result = pm.execute({"true"}, context);
         ASSERT_FALSE(result.timedOut) << "iteration " << i;
@@ -231,7 +231,7 @@ TEST_F(ProcessManagerTest, FastCommandsThatExitBeforeBeingWatchedStillSucceed) {
 // first tick would fire A's stale timer (use-after-free) without cancellation.
 TEST_F(ProcessManagerTest, ReusingTheManagerDoesNotFireAStaleDeadlineTimer) {
     ProcessManager pm;
-    LogContext context{getpid(), "reuse", "-", "echo"};
+    LogContext context{.pid = getpid(), .sessionId = "reuse", .clientId = "-", .command = "echo"};
 
     auto a = pm.execute({"echo", "A"}, context, "", 1);
     ASSERT_EQ(a.exitCode, 0);

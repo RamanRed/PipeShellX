@@ -146,7 +146,7 @@ std::string ms(double value) {
 
 void runSpawnBenchmark(int iterations) {
     ProcessManager manager;
-    const LogContext context{getpid(), "bench", "-", "true"};
+    const LogContext context{.pid = getpid(), .sessionId = "bench", .clientId = "-", .command = "true"};
     const std::vector<std::string> args{"true"};
 
     for (int i = 0; i < 20; ++i) { // warm-up
@@ -188,7 +188,8 @@ void runFanoutBenchmark(const std::vector<int>& sizes, const std::string& user) 
     // rather than the operator's ~/.ssh/known_hosts.
     ClientEntry probe = ClientConfig::parseEntry(user + "@localhost");
     probe.knownHostsFile = (std::filesystem::temp_directory_path() / "pipeshellx-bench.known_hosts").string();
-    const LogContext context{getpid(), "bench", "localhost", "ssh localhost"};
+    const LogContext context{
+        .pid = getpid(), .sessionId = "bench", .clientId = "localhost", .command = "ssh localhost"};
 
     std::cout << "\n### SSH fan-out (`ssh localhost uptime`, agentless)\n\n";
     const auto probeResult = manager.executeRemote({probe}, "true", context, {.timeoutSec = 10});

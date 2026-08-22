@@ -11,10 +11,12 @@
 enum class LogLevel { DEBUG, INFO, ERROR };
 
 struct LogContext {
-    std::int64_t pid;
+    std::int64_t pid = 0;
     std::string sessionId;
     std::string clientId;
     std::string command;
+    std::string runId;   // unique token per run invocation (empty = not set)
+    std::string stageId; // stage within the run (empty = not set)
 };
 
 class Logger {

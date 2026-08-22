@@ -35,7 +35,7 @@ ClientEntry client(const std::string& user, const std::string& host) {
 }
 
 LogContext context(const std::string& command) {
-    return LogContext{getpid(), "golden", "-", command};
+    return LogContext{.pid = getpid(), .sessionId = "golden", .clientId = "-", .command = command};
 }
 
 class GoldenRemoteTest : public ::testing::Test {

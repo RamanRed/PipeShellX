@@ -202,7 +202,7 @@ CommandResult CommandExecutor::executeRemoteCommand(const std::string& command,
                                                     const std::string& sessionId,
                                                     OutputCallback streamCallback,
                                                     int timeoutSec) {
-    LogContext context{psx::os::currentProcessId(), sessionId, "-", command};
+    LogContext context{.pid = psx::os::currentProcessId(), .sessionId = sessionId, .clientId = "-", .command = command};
     Logger::getInstance().log(LogLevel::INFO, context, "Received command for execution");
 
     auto args = parseCommand(command);
@@ -265,7 +265,7 @@ CommandResult CommandExecutor::execute(const std::string& command,
                                        const std::string& sessionId,
                                        OutputCallback streamCallback,
                                        int timeoutSec) {
-    LogContext context{psx::os::currentProcessId(), sessionId, "-", command};
+    LogContext context{.pid = psx::os::currentProcessId(), .sessionId = sessionId, .clientId = "-", .command = command};
     Logger::getInstance().log(LogLevel::INFO, context, "Received command for execution");
 
     auto args = parseCommand(command);

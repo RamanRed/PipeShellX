@@ -99,7 +99,8 @@ TEST_F(LoggerTest, RotationAccountsForAPreexistingFileSize) {
 TEST_F(LoggerTest, WritesStructuredLinesToFile) {
     auto& logger = Logger::getInstance();
     logger.log(LogLevel::INFO, "plain message");
-    logger.log(LogLevel::ERROR, LogContext{42, "sess", "host-a", "uptime"}, "with context");
+    logger.log(LogLevel::ERROR, LogContext{.pid = 42, .sessionId = "sess", .clientId = "host-a", .command = "uptime"},
+               "with context");
 
     const auto lines = readLines(logFile_);
     ASSERT_EQ(lines.size(), 2U);
@@ -112,10 +113,29 @@ TEST_F(LoggerTest, WritesStructuredLinesToFile) {
 }
 
 TEST_F(LoggerTest, EmptyContextFieldsRenderAsDash) {
-    Logger::getInstance().log(LogLevel::INFO, LogContext{1, "", "", ""}, "dashes");
+    Logger::getInstance().log(LogLevel::INFO, LogContext{.pid = 1, .sessionId = "", .clientId = "", .command = ""},
+                              "dashes");
     const auto lines = readLines(logFile_);
     ASSERT_EQ(lines.size(), 1U);
     EXPECT_NE(lines[0].find("[session=-] [client=-] [command=-] dashes"), std::string::npos);
+}
+
+TEST_F(LoggerTest, RunAndStageAppearOnlyWhenSet) {
+    auto& logger = Logger::getInstance();
+    logger.log(
+        LogLevel::INFO,
+        LogContext{
+            .pid = 7, .sessionId = "run", .clientId = "h1", .command = "uptime", .runId = "abc123", .stageId = "s0"},
+        "tagged");
+    logger.log(LogLevel::INFO, LogContext{.pid = 8, .sessionId = "run", .clientId = "h2", .command = "uptime"},
+               "untagged");
+    const auto lines = readLines(logFile_);
+    ASSERT_GE(lines.size(), 2U);
+    EXPECT_NE(lines[lines.size() - 2].find("[command=uptime] [run=abc123] [stage=s0] tagged"), std::string::npos)
+        << lines[lines.size() - 2];
+    // No run/stage token is emitted when they are unset.
+    EXPECT_NE(lines[lines.size() - 1].find("[command=uptime] untagged"), std::string::npos) << lines.back();
+    EXPECT_EQ(lines[lines.size() - 1].find("[run="), std::string::npos);
 }
 
 TEST_F(LoggerTest, FiltersMessagesBelowConfiguredLevel) {
@@ -203,7 +223,8 @@ TEST_F(LoggerTest, ConcurrentWritersNeverInterleaveLines) {
     for (int t = 0; t < kThreads; ++t) {
         workers.emplace_back([&logger, t]() {
             for (int i = 0; i < kLinesPerThread; ++i) {
-                logger.log(LogLevel::INFO, LogContext{0, "t" + std::to_string(t), "-", "-"},
+                logger.log(LogLevel::INFO,
+                           LogContext{.pid = 0, .sessionId = "t" + std::to_string(t), .clientId = "-", .command = "-"},
                            "line-" + std::to_string(t) + "-" + std::to_string(i));
             }
         });
