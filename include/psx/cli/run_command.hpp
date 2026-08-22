@@ -36,6 +36,7 @@ struct RunInvocation {
     int concurrency = 64; // -c / --concurrency: workers in flight (0 = all at once)
     psx::stream::OverflowPolicy policy = psx::stream::OverflowPolicy::Block; // --policy
     std::size_t ringBytes = 0;        // --ring SIZE (0 = unbounded capture, the default)
+    std::string policyPath;           // --policy FILE: restrict the command (empty = unrestricted)
     bool colour = true;               // --no-color turns it off
     std::vector<std::string> command; // the argv after `--`
 };

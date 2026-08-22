@@ -61,6 +61,12 @@ pipeshellx run -i fleet.ini -g web --stream -- tail -F /var/log/nginx/access.log
 pipeshellx run -i fleet.ini --json -- df -h
 ```
 
+`--policy FILE` restricts what may run: a line-based file of `allow <cmd>`,
+`max-args <n>`, and `allow-shell-metacharacters` directives — the command is
+validated (allowed name, no explicit path, no shell metacharacters, arg count)
+before any host is contacted, and rejected with exit `2`. Without it, `run` is
+an unrestricted operator tool.
+
 Host selection is `-g GROUP`, `-t TAG`, `-H h1,h2,…`, or all (see
 `docs/authentication.md` for the inventory format). `-c N` bounds how many
 hosts run at once (default 64, `0` = all): a large fan-out spawns ssh

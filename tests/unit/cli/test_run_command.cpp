@@ -71,6 +71,12 @@ TEST(ParseRunTest, ConcurrencyFlag) {
     EXPECT_THROW(static_cast<void>(psx::cli::parseRun({"-c", "x", "--", "id"})), std::runtime_error);
 }
 
+TEST(ParseRunTest, PolicyFileFlag) {
+    EXPECT_TRUE(psx::cli::parseRun({"--", "id"}).policyPath.empty());
+    EXPECT_EQ(psx::cli::parseRun({"--policy", "/etc/psx.policy", "--", "id"}).policyPath, "/etc/psx.policy");
+    EXPECT_THROW(static_cast<void>(psx::cli::parseRun({"--policy", "--", "id"})), std::runtime_error);
+}
+
 TEST(ParseRunTest, NoColorIsHonoured) {
     EXPECT_FALSE(parseRun({"--no-color", "--stream", "--", "id"}).colour);
     EXPECT_TRUE(parseRun({"--stream", "--", "id"}).colour);
@@ -161,4 +167,42 @@ TEST(HostsSubcommandTest, ListsHostsWithGroupsAndTags) {
     EXPECT_NE(out.str().find("web"), std::string::npos) << out.str();
     EXPECT_NE(out.str().find("db"), std::string::npos) << out.str();
     EXPECT_NE(out.str().find("canary"), std::string::npos) << out.str();
+}
+
+TEST(RunSubcommandTest, PolicyFileRestrictsTheCommand) {
+    test_support::ScopedTempCwd cwd("run-policy");
+    test_support::FakeSshOnPath fakeSsh;
+    {
+        std::ofstream ini("fleet.ini");
+        ini << "[web]\nu@h1\n";
+    }
+    {
+        std::ofstream pol("policy.txt");
+        pol << "allow echo\n";
+    }
+    // An allowed command runs.
+    psx::cli::RunInvocation ok;
+    ok.inventoryPath = "fleet.ini";
+    ok.policyPath = "policy.txt";
+    ok.command = {"echo", "hi"};
+    std::ostringstream out1, err1;
+    EXPECT_EQ(psx::cli::runSubcommand(ok, out1, err1, false), 0) << err1.str();
+
+    // A disallowed command is rejected before anything runs (exit 2).
+    psx::cli::RunInvocation bad = ok;
+    bad.command = {"rm", "-rf", "/"};
+    std::ostringstream out2, err2;
+    EXPECT_EQ(psx::cli::runSubcommand(bad, out2, err2, false), 2);
+    EXPECT_NE(err2.str().find("not allowed"), std::string::npos) << err2.str();
+    EXPECT_TRUE(out2.str().empty()) << "nothing runs when the policy rejects";
+}
+
+TEST(RunSubcommandTest, MissingPolicyFileIsExitCode2) {
+    test_support::ScopedTempCwd cwd("run-nopolicy");
+    psx::cli::RunInvocation inv;
+    inv.policyPath = "does-not-exist.txt";
+    inv.command = {"id"};
+    std::ostringstream out, err;
+    EXPECT_EQ(psx::cli::runSubcommand(inv, out, err, false), 2);
+    EXPECT_NE(err.str().find("cannot open"), std::string::npos) << err.str();
 }

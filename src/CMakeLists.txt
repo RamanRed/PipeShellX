@@ -13,6 +13,9 @@ else()
     set(PIPESHELLX_INVENTORY_SOURCES
         inventory/inventory.cpp
     )
+    set(PIPESHELLX_POLICY_SOURCES
+        policy/policy.cpp
+    )
     set(PIPESHELLX_SINK_SOURCES
         sink/group_sink.cpp
         sink/json_sink.cpp
@@ -52,6 +55,7 @@ add_library(pipeshellx_lib
     ${PIPESHELLX_STREAM_SOURCES}
     ${PIPESHELLX_SINK_SOURCES}
     ${PIPESHELLX_INVENTORY_SOURCES}
+    ${PIPESHELLX_POLICY_SOURCES}
     runtime/reactor.cpp
     cli/hosts_command.cpp
     cli/ping_command.cpp

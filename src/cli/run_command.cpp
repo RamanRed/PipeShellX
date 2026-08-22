@@ -6,6 +6,7 @@
 #include "psx/cli/selection.hpp"
 #include "psx/os/paths.hpp"
 #include "psx/os/system.hpp"
+#include "psx/policy/policy.hpp"
 #include "psx/sink/group_sink.hpp"
 #include "psx/sink/json_sink.hpp"
 #include "psx/sink/stream_sink.hpp"
@@ -144,6 +145,8 @@ RunInvocation parseRun(const std::vector<std::string>& args) {
             invocation.policy = parsePolicy(valueFor(i, arg));
         } else if (arg == "--ring") {
             invocation.ringBytes = parseSize(valueFor(i, arg));
+        } else if (arg == "--policy") {
+            invocation.policyPath = valueFor(i, arg);
         } else if (arg == "--stream") {
             setSink(invocation, SinkMode::Stream, sinkSet);
         } else if (arg == "--group") {
@@ -187,6 +190,19 @@ makeSink(const RunInvocation& invocation, std::ostream& out, std::ostream& err, 
 } // namespace
 
 int runSubcommand(const RunInvocation& invocation, std::ostream& out, std::ostream& err, bool colourTty) {
+    if (!invocation.policyPath.empty()) {
+        try {
+            const auto policy = psx::policy::Policy::loadFromFile(invocation.policyPath);
+            if (auto rejected = policy.validate(invocation.command); rejected.has_value()) {
+                err << "pipeshellx run: " << *rejected << "\n";
+                return 2;
+            }
+        } catch (const std::exception& ex) {
+            err << "pipeshellx run: " << ex.what() << "\n";
+            return 2;
+        }
+    }
+
     const ResolvedHosts resolved = resolveHosts(invocation.inventoryPath, invocation.selector, err);
     if (!resolved.ok()) {
         return resolved.exitCode;
