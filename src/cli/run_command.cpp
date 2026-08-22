@@ -12,7 +12,9 @@
 #include "psx/sink/stream_sink.hpp"
 
 #include <charconv>
+#include <filesystem>
 #include <memory>
+#include <system_error>
 
 namespace psx::cli {
 
@@ -153,6 +155,8 @@ RunInvocation parseRun(const std::vector<std::string>& args) {
             setSink(invocation, SinkMode::Group, sinkSet);
         } else if (arg == "--json") {
             setSink(invocation, SinkMode::Json, sinkSet);
+        } else if (arg == "--reuse") {
+            invocation.reuse = true;
         } else if (arg == "--no-color" || arg == "--no-colour") {
             invocation.colour = false;
         } else {
@@ -226,12 +230,22 @@ int runSubcommand(const RunInvocation& invocation, std::ostream& out, std::ostre
         remoteCommand += '\'';
     }
 
+    // ControlMaster reuse: a persisted master socket per user@host:port under
+    // the state dir lets repeated runs skip the TCP+KEX handshake.
+    std::string controlPath;
+    if (invocation.reuse) {
+        const std::filesystem::path dir = std::filesystem::path(psx::os::stateDirectory("pipeshellx")) / "control";
+        std::error_code ignored;
+        std::filesystem::create_directories(dir, ignored);
+        controlPath = (dir / "cm-%r@%h:%p").string();
+    }
+
     auto sink = makeSink(invocation, out, err, colourTty);
     ProcessManager manager;
     const LogContext context{psx::os::currentProcessId(), "run", "-", remoteCommand};
     const auto result = manager.executeRemote(clients, remoteCommand, context, invocation.timeoutSec, sink.get(),
                                               static_cast<std::size_t>(invocation.concurrency), invocation.policy,
-                                              invocation.ringBytes);
+                                              invocation.ringBytes, controlPath);
     return result.exitCode == 0 ? 0 : 1;
 }
 

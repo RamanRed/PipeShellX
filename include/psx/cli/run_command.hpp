@@ -37,6 +37,7 @@ struct RunInvocation {
     psx::stream::OverflowPolicy policy = psx::stream::OverflowPolicy::Block; // --policy
     std::size_t ringBytes = 0;        // --ring SIZE (0 = unbounded capture, the default)
     std::string policyPath;           // --policy FILE: restrict the command (empty = unrestricted)
+    bool reuse = false;               // --reuse: ssh ControlMaster connection reuse
     bool colour = true;               // --no-color turns it off
     std::vector<std::string> command; // the argv after `--`
 };

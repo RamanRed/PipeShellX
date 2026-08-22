@@ -141,6 +141,35 @@ TEST(SshAuthTest, KeyClientNeverInvokesSshpass) {
     EXPECT_EQ(ignored, args);
 }
 
+TEST(SshAuthTest, NoControlMasterByDefault) {
+    const auto args = buildSshBaseArguments(keyClient());
+    EXPECT_FALSE(hasOption(args, "ControlMaster=auto"));
+    for (const auto& arg : args) {
+        EXPECT_EQ(arg.rfind("ControlPath=", 0), std::string::npos) << arg;
+        EXPECT_EQ(arg.rfind("ControlPersist=", 0), std::string::npos) << arg;
+    }
+}
+
+TEST(SshAuthTest, ControlMasterOptionsWhenReuseIsEnabled) {
+    SshOptions options;
+    options.controlPath = "/run/psx/cm-%r@%h:%p";
+    options.controlPersistSeconds = 30;
+    const auto args = buildSshBaseArguments(keyClient(), options);
+    EXPECT_TRUE(hasOption(args, "ControlMaster=auto"));
+    EXPECT_TRUE(hasOption(args, "ControlPersist=30s"));
+    // Quoted for the option parser, but the %r/%h/%p tokens are preserved
+    // (unlike UserKnownHostsFile, whose % is doubled to a literal).
+    EXPECT_TRUE(hasOption(args, "ControlPath=\"/run/psx/cm-%r@%h:%p\""));
+}
+
+TEST(SshAuthTest, ControlMasterFlowsThroughTheCommandBuilder) {
+    SshOptions options;
+    options.controlPath = "/run/psx/cm-%r@%h:%p";
+    const auto args = buildSshCommandArguments(keyClient(), "uptime", -1, options);
+    EXPECT_TRUE(hasOption(args, "ControlMaster=auto"));
+    EXPECT_EQ(args.back(), "uptime");
+}
+
 TEST(SshAuthTest, DetectsCommonAuthenticationFailures) {
     EXPECT_TRUE(isSshAuthenticationFailure("Permission denied (publickey,password)."));
     EXPECT_TRUE(isSshAuthenticationFailure("No more authentication methods available"));

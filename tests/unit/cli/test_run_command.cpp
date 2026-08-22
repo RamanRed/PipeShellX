@@ -77,6 +77,11 @@ TEST(ParseRunTest, PolicyFileFlag) {
     EXPECT_THROW(static_cast<void>(psx::cli::parseRun({"--policy", "--", "id"})), std::runtime_error);
 }
 
+TEST(ParseRunTest, ReuseFlag) {
+    EXPECT_FALSE(psx::cli::parseRun({"--", "id"}).reuse);
+    EXPECT_TRUE(psx::cli::parseRun({"--reuse", "--", "id"}).reuse);
+}
+
 TEST(ParseRunTest, NoColorIsHonoured) {
     EXPECT_FALSE(parseRun({"--no-color", "--stream", "--", "id"}).colour);
     EXPECT_TRUE(parseRun({"--stream", "--", "id"}).colour);

@@ -40,15 +40,17 @@ bool containsAny(const std::string& loweredText, const std::array<std::string_vi
 }
 
 // OpenSSH parses `-o Key=Value` exactly like a config line: the value is
-// split on whitespace and `%` sequences are expanded. Quoting it and doubling
-// `%` makes a path literal; a double quote cannot be represented at all.
-std::string quoteSshOptionValue(const std::string& value) {
+// split on whitespace and `%` sequences are expanded. Quoting it handles
+// whitespace; a double quote cannot be represented at all. `escapePercent`
+// doubles `%` to a literal (paths like UserKnownHostsFile); leave it off where
+// the `%` tokens are wanted (ControlPath's %r/%h/%p).
+std::string quoteSshOptionValue(const std::string& value, bool escapePercent = true) {
     std::string quoted = "\"";
     for (char c : value) {
         if (c == '"' || c == '\n' || c == '\r') {
             throw std::invalid_argument("ssh option value contains an unrepresentable character: " + value);
         }
-        if (c == '%') {
+        if (c == '%' && escapePercent) {
             quoted += "%%";
         } else {
             quoted += c;
@@ -65,10 +67,15 @@ void addOption(std::vector<std::string>& args, const std::string& option) {
 
 } // namespace
 
-std::vector<std::string> buildSshBaseArguments(const ClientEntry& client) {
+std::vector<std::string> buildSshBaseArguments(const ClientEntry& client, const SshOptions& options) {
     std::vector<std::string> args{"ssh"}; // resolved from PATH by execvp
 
     addOption(args, "StrictHostKeyChecking=accept-new");
+    if (!options.controlPath.empty()) {
+        addOption(args, "ControlMaster=auto");
+        addOption(args, "ControlPersist=" + std::to_string(options.controlPersistSeconds) + "s");
+        addOption(args, "ControlPath=" + quoteSshOptionValue(options.controlPath, /*escapePercent=*/false));
+    }
     if (!client.knownHostsFile.empty()) {
         addOption(args, "UserKnownHostsFile=" + quoteSshOptionValue(client.knownHostsFile));
     }
@@ -92,8 +99,10 @@ std::vector<std::string> buildSshBaseArguments(const ClientEntry& client) {
     return args;
 }
 
-std::vector<std::string>
-buildSshCommandArguments(const ClientEntry& client, const std::string& remoteCommand, int passwordFd) {
+std::vector<std::string> buildSshCommandArguments(const ClientEntry& client,
+                                                  const std::string& remoteCommand,
+                                                  int passwordFd,
+                                                  const SshOptions& options) {
     std::vector<std::string> args;
     if (!client.password.empty()) {
         if (passwordFd < 0) {
@@ -104,7 +113,7 @@ buildSshCommandArguments(const ClientEntry& client, const std::string& remoteCom
         args.push_back(std::to_string(passwordFd));
     }
 
-    auto sshArgs = buildSshBaseArguments(client);
+    auto sshArgs = buildSshBaseArguments(client, options);
     args.insert(args.end(), sshArgs.begin(), sshArgs.end());
     args.push_back(remoteCommand);
     return args;

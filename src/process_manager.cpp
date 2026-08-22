@@ -514,7 +514,8 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
                                                      psx::sink::Sink* sink,
                                                      std::size_t concurrency,
                                                      psx::stream::OverflowPolicy policy,
-                                                     std::size_t ringBytes) {
+                                                     std::size_t ringBytes,
+                                                     const std::string& controlPath) {
     if (clients.empty()) {
         throw std::runtime_error("no clients configured for remote execution");
     }
@@ -554,7 +555,10 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
             passwordPipe.writer.close();
             spec.extraHandles = {{&passwordPipe.reader, kPasswordFd}};
         }
-        spec.argv = buildSshCommandArguments(client, remoteCommand, client.password.empty() ? -1 : kPasswordFd);
+        SshOptions sshOptions;
+        sshOptions.controlPath = controlPath;
+        spec.argv =
+            buildSshCommandArguments(client, remoteCommand, client.password.empty() ? -1 : kPasswordFd, sshOptions);
         spec.program = spec.argv.front();
 
         spawnWorker(worker, std::move(spec), false);

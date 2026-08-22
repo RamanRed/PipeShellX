@@ -74,7 +74,8 @@ public:
                          psx::sink::Sink* sink = nullptr,
                          std::size_t concurrency = 64,
                          psx::stream::OverflowPolicy policy = psx::stream::OverflowPolicy::Block,
-                         std::size_t ringBytes = 0);
+                         std::size_t ringBytes = 0,
+                         const std::string& controlPath = {});
 
 private:
     psx::runtime::Reactor& reactor();
