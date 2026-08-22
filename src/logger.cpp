@@ -1,15 +1,29 @@
-
 #include "logger.hpp"
+
 #include <unistd.h>
+
 #include <chrono>
+#include <cstdlib>
+#include <ctime>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 
-Logger::Logger() : currentLevel(LogLevel::INFO) {}
+namespace {
+
+std::string nonEmptyEnv(const char* name) {
+    const char* value = std::getenv(name);
+    return value != nullptr ? std::string(value) : std::string();
+}
+
+} // namespace
+
+Logger::Logger() : currentLevel(LogLevel::INFO), mirrorToConsole(false) {}
 
 Logger::~Logger() {
-    if (logFile.is_open()) logFile.close();
+    if (logFile.is_open())
+        logFile.close();
 }
 
 Logger& Logger::getInstance() {
@@ -17,16 +31,56 @@ Logger& Logger::getInstance() {
     return instance;
 }
 
-void Logger::setLogFile(const std::string& filename) {
+bool Logger::setLogFile(const std::string& filename) {
     std::lock_guard<std::mutex> lock(logMutex);
-    if (logFile.is_open()) logFile.close();
-    logFile.open(filename, std::ios::app);
-    if (!logFile.is_open()) {
-        std::cerr << "[Logger] Failed to open log file: " << filename << std::endl;
+    if (logFile.is_open())
+        logFile.close();
+    if (filename.empty()) {
+        return true;
     }
+
+    const auto parent = std::filesystem::path(filename).parent_path();
+    if (!parent.empty()) {
+        std::error_code ignored; // a failure here surfaces as the open() below failing
+        std::filesystem::create_directories(parent, ignored);
+    }
+
+    logFile.open(filename, std::ios::app);
+    return logFile.is_open();
 }
 
-std::string Logger::getTimestamp() const {
+void Logger::setLevel(LogLevel level) noexcept {
+    currentLevel.store(level, std::memory_order_relaxed);
+}
+
+LogLevel Logger::level() const noexcept {
+    return currentLevel.load(std::memory_order_relaxed);
+}
+
+void Logger::setConsoleMirror(bool enabled) noexcept {
+    mirrorToConsole.store(enabled, std::memory_order_relaxed);
+}
+
+bool Logger::consoleMirror() const noexcept {
+    return mirrorToConsole.load(std::memory_order_relaxed);
+}
+
+bool Logger::enabled(LogLevel level) const noexcept {
+    return level >= currentLevel.load(std::memory_order_relaxed);
+}
+
+std::string Logger::defaultLogFilePath() {
+    namespace fs = std::filesystem;
+    if (const std::string xdgState = nonEmptyEnv("XDG_STATE_HOME"); !xdgState.empty()) {
+        return (fs::path(xdgState) / "pipeshellx" / "pipeshellx.log").string();
+    }
+    if (const std::string home = nonEmptyEnv("HOME"); !home.empty()) {
+        return (fs::path(home) / ".local" / "state" / "pipeshellx" / "pipeshellx.log").string();
+    }
+    return "pipeshellx.log";
+}
+
+std::string Logger::getTimestamp() {
     auto now = std::chrono::system_clock::now();
     auto t = std::chrono::system_clock::to_time_t(now);
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
@@ -43,33 +97,46 @@ std::string Logger::getTimestamp() const {
     return oss.str();
 }
 
-std::string Logger::levelToString(LogLevel level) const {
+std::string Logger::levelToString(LogLevel level) {
     switch (level) {
-        case LogLevel::INFO:  return "INFO";
-        case LogLevel::DEBUG: return "DEBUG";
-        case LogLevel::ERROR: return "ERROR";
-        default:              return "UNKNOWN";
+        case LogLevel::DEBUG:
+            return "DEBUG";
+        case LogLevel::INFO:
+            return "INFO";
+        case LogLevel::ERROR:
+            return "ERROR";
     }
+    return "UNKNOWN";
 }
 
 void Logger::log(LogLevel level, const std::string& msg) {
+    if (!enabled(level)) {
+        return;
+    }
     log(level, LogContext{getpid(), "-", "-", "-"}, msg);
 }
 
 void Logger::log(LogLevel level, const LogContext& context, const std::string& msg) {
-    std::lock_guard<std::mutex> lock(logMutex);
+    if (!enabled(level)) {
+        return;
+    }
+
     std::ostringstream formatted;
     formatted << "[" << getTimestamp() << "] "
               << "[" << levelToString(level) << "] "
               << "[pid=" << context.pid << "] "
               << "[session=" << (context.sessionId.empty() ? "-" : context.sessionId) << "] "
               << "[client=" << (context.clientId.empty() ? "-" : context.clientId) << "] "
-              << "[command=" << (context.command.empty() ? "-" : context.command) << "] "
-              << msg;
+              << "[command=" << (context.command.empty() ? "-" : context.command) << "] " << msg;
     const std::string logMsg = formatted.str();
+
+    std::lock_guard<std::mutex> lock(logMutex);
+    bool wroteToFile = false;
     if (logFile.is_open()) {
         logFile << logMsg << std::endl;
-    } else {
-        std::cout << logMsg << std::endl;
+        wroteToFile = logFile.good(); // a failed write/flush (ENOSPC, EIO) sticks: fall back from now on
+    }
+    if (!wroteToFile || consoleMirror()) {
+        std::cerr << logMsg << std::endl;
     }
 }

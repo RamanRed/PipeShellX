@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: ${{ matrix.os }} · ${{ matrix.compiler }} · ${{ matrix.build_type }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        compiler: [gcc, clang]
+        build_type: [Debug, Release]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select compiler
+        shell: bash
+        run: |
+          if [[ "${{ matrix.compiler }}" == "gcc" ]]; then
+            if [[ "${{ runner.os }}" == "macOS" ]]; then
+              # Homebrew GCC on the macOS runner image
+              GCC_BIN=$(ls /opt/homebrew/bin/g++-* /usr/local/bin/g++-* 2>/dev/null | sort -V | tail -1)
+              if [[ -z "${GCC_BIN}" ]]; then echo "no Homebrew g++ on this runner image"; exit 1; fi
+              echo "CXX=${GCC_BIN}" >> "$GITHUB_ENV"
+              echo "CC=${GCC_BIN/g++/gcc}" >> "$GITHUB_ENV"
+            else
+              echo "CXX=g++" >> "$GITHUB_ENV"
+              echo "CC=gcc" >> "$GITHUB_ENV"
+            fi
+          else
+            echo "CXX=clang++" >> "$GITHUB_ENV"
+            echo "CC=clang" >> "$GITHUB_ENV"
+          fi
+
+      - name: Install sshpass (macOS)
+        if: runner.os == 'macOS'
+        run: brew install sshpass || true
+
+      - name: Configure
+        run: cmake -S . -B build -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure --timeout 120
+
+      - name: Smoke test CLI
+        run: |
+          ./build/bin/PipeShellX --version
+          ./build/bin/PipeShellX --help
+          ! ./build/bin/PipeShellX --bogus
+
+  sanitizers:
+    name: ASan + UBSan (ubuntu, clang, Debug)
+    runs-on: ubuntu-latest
+    env:
+      CC: clang
+      CXX: clang++
+      ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DPIPESHELLX_SANITIZE=address,undefined
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure --timeout 180

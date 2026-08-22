@@ -1,0 +1,45 @@
+name: Nightly baseline benchmark
+
+# Publishes the numbers compared against PLAN.md §7. Best effort: the job
+# never blocks a merge; results are attached as an artifact.
+on:
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable ssh to localhost
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq openssh-server sshpass
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519
+          cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
+          chmod 600 ~/.ssh/authorized_keys
+          # Stock sshd rate-limits unauthenticated connections (MaxStartups 10:30:100);
+          # the fan-out opens N at once.
+          printf 'MaxStartups 256\nMaxSessions 256\n' | sudo tee /etc/ssh/sshd_config.d/99-pipeshellx-bench.conf
+          sudo systemctl restart ssh
+          ssh -o StrictHostKeyChecking=accept-new localhost true
+
+      - name: Configure and build (Release)
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel --target pipeshellx_bench_baseline
+
+      - name: Run baseline
+        run: |
+          ulimit -n 4096
+          ./build/bin/pipeshellx_bench_baseline --spawn 2000 --fanout 50,100 | tee baseline.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: baseline-${{ github.run_id }}
+          path: baseline.md

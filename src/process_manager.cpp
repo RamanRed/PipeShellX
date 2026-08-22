@@ -20,7 +20,6 @@
 #include <algorithm>
 #include <mutex>
 #include <utility>
-#include <cctype>
 
 namespace {
 
@@ -52,37 +51,76 @@ void closePipePair(std::array<int, 2>& pipePair) {
     closeFd(pipePair[1]);
 }
 
-[[noreturn]] void childExitWithError(const std::string& message, int code) {
-    const auto* data = message.c_str();
-    std::size_t remaining = message.size();
+// Writes the whole buffer, retrying on EINTR. Safe to call after fork().
+bool writeFully(int fd, const char* data, std::size_t remaining) {
     while (remaining > 0) {
-        const ssize_t written = ::write(STDERR_FILENO, data, remaining);
+        const ssize_t written = ::write(fd, data, remaining);
         if (written > 0) {
             data += written;
             remaining -= static_cast<std::size_t>(written);
+        } else if (written == -1 && errno == EINTR) {
             continue;
+        } else {
+            return false;
         }
-        if (written == -1 && errno == EINTR) {
-            continue;
-        }
-        break;
     }
+    return true;
+}
+
+// Largest secret that is guaranteed to fit in a fresh pipe without blocking
+// (every supported kernel has a pipe capacity of at least 4 KiB).
+constexpr std::size_t kMaxPasswordBytes = 4096;
+
+[[noreturn]] void childExitWithError(const std::string& message, int code) {
+    static_cast<void>(writeFully(STDERR_FILENO, message.data(), message.size()));
     _exit(code);
 }
 
-int calculatePollTimeoutMs(const std::chrono::steady_clock::time_point deadline) {
-    if (deadline == std::chrono::steady_clock::time_point::max()) {
-        return -1;
+// After SIGKILLing a timed-out process group, how long to keep draining its
+// pipes before giving up on a holder outside the group (a daemonised
+// grandchild) that would otherwise keep the run alive indefinitely.
+constexpr int kDrainGraceSec = 2;
+
+// Absolute deadline derived from a timeout in seconds ("no timeout" is the
+// far-future time point). Both poll loops use it so that the rule "an idle
+// poll() is not a timeout; only the clock is" lives in exactly one place.
+class Deadline {
+public:
+    // "No deadline": expired() is never true and poll() blocks (or idles).
+    static Deadline none() { return after(0); }
+
+    static Deadline after(int timeoutSec) {
+        return Deadline{timeoutSec > 0 ? std::chrono::steady_clock::now() + std::chrono::seconds(timeoutSec)
+                                       : std::chrono::steady_clock::time_point::max()};
     }
 
-    const auto now = std::chrono::steady_clock::now();
-    if (now >= deadline) {
-        return 0;
+    bool expired() const {
+        return at_ != std::chrono::steady_clock::time_point::max() && std::chrono::steady_clock::now() >= at_;
     }
 
-    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
-    return static_cast<int>(remaining.count());
-}
+    // poll() timeout in milliseconds: -1 (block) without a deadline, else the
+    // remaining time. With nothing to poll (`idle`: pipes at EOF, child not yet
+    // reaped) the wait is capped so the loop keeps checking waitpid().
+    int pollTimeoutMs(bool idle) const {
+        int timeoutMs = -1;
+        if (at_ != std::chrono::steady_clock::time_point::max()) {
+            const auto now = std::chrono::steady_clock::now();
+            timeoutMs = now >= at_ ? 0
+                                   : static_cast<int>(
+                                         std::chrono::duration_cast<std::chrono::milliseconds>(at_ - now).count());
+        }
+        if (idle) {
+            // Never 0 here: an expired deadline with nothing to poll would spin.
+            timeoutMs = timeoutMs == -1 ? kIdlePollMs : std::clamp(timeoutMs, 1, kIdlePollMs);
+        }
+        return timeoutMs;
+    }
+
+private:
+    static constexpr int kIdlePollMs = 50;
+    explicit Deadline(std::chrono::steady_clock::time_point at) : at_(at) {}
+    std::chrono::steady_clock::time_point at_;
+};
 
 } // namespace
 
@@ -291,51 +329,22 @@ std::string ProcessManager::classifyRemoteError(const ClientResult& clientResult
         return "ERROR: command timed out";
     }
 
-    auto containsInsensitive = [](const std::string& text, const std::string& needle) {
-        auto toLower = [](unsigned char c) { return static_cast<char>(std::tolower(c)); };
-        std::string lowerText;
-        lowerText.reserve(text.size());
-        for (char c : text) {
-            lowerText.push_back(toLower(static_cast<unsigned char>(c)));
-        }
-
-        std::string lowerNeedle;
-        lowerNeedle.reserve(needle.size());
-        for (char c : needle) {
-            lowerNeedle.push_back(toLower(static_cast<unsigned char>(c)));
-        }
-
-        return lowerText.find(lowerNeedle) != std::string::npos;
-    };
-
+    // Messages written by our own worker child (childExitWithError) have a
+    // fixed spelling; everything else on stderr came from ssh/sshpass.
     const std::string& stderrText = clientResult.stderrData;
-    if (containsInsensitive(stderrText, "execvp failed")) {
+    if (stderrText.find("execvp failed") != std::string::npos) {
         return "ERROR: command execution failed";
     }
-
-    if (containsInsensitive(stderrText, "dup2 failed") ||
-        containsInsensitive(stderrText, "open(/dev/null) failed") ||
-        containsInsensitive(stderrText, "setpgid failed")) {
+    if (stderrText.find("dup2 failed") != std::string::npos ||
+        stderrText.find("open(/dev/null) failed") != std::string::npos ||
+        stderrText.find("setpgid failed") != std::string::npos ||
+        stderrText.find("password pipe") != std::string::npos ||
+        stderrText.find("password too long") != std::string::npos) {
         return "ERROR: remote worker setup failed";
     }
 
-    if (containsInsensitive(stderrText, "could not resolve hostname") ||
-        containsInsensitive(stderrText, "name or service not known") ||
-        containsInsensitive(stderrText, "temporary failure in name resolution")) {
-        return "ERROR: unreachable host";
-    }
-
-    if (containsInsensitive(stderrText, "connection refused") ||
-        containsInsensitive(stderrText, "connection timed out") ||
-        containsInsensitive(stderrText, "no route to host") ||
-        containsInsensitive(stderrText, "operation not permitted") ||
-        containsInsensitive(stderrText, "connection reset") ||
-        containsInsensitive(stderrText, "connection closed")) {
-        return "ERROR: connection failed";
-    }
-
-    if (isSshAuthenticationFailure(stderrText)) {
-        return "ERROR: authentication failed";
+    if (const auto sshFailure = classifySshFailure(stderrText); sshFailure.has_value()) {
+        return "ERROR: " + *sshFailure;
     }
 
     if (clientResult.exitCode != 0) {
@@ -363,7 +372,7 @@ ProcessManager::Result ProcessManager::execute(const std::vector<std::string>& a
         throw std::runtime_error("fork() failed: " + std::string(std::strerror(errno)));
     }
 
-    if (childPid == 0) {
+    if (childPid == 0) try {
         if (setpgid(0, 0) == -1) {
             childExitWithError("setpgid failed: " + std::string(std::strerror(errno)) + "\n", 126);
         }
@@ -393,7 +402,15 @@ ProcessManager::Result ProcessManager::execute(const std::vector<std::string>& a
             "execvp failed for '" + args[0] + "': " + std::string(std::strerror(errno)) + "\n",
             127
         );
+    } catch (...) {
+        // Never let an exception unwind the fork()ed copy of the parent's frames.
+        childExitWithError("worker setup failed: unexpected exception\n", 126);
     }
+
+    // Mirror the child's setpgid() so that kill(-processGroup) is valid even
+    // before the child has run; processGroup outlives childPid (reset on reap).
+    (void)setpgid(childPid, childPid);
+    const pid_t processGroup = childPid;
 
     Logger::getInstance().log(
         LogLevel::INFO,
@@ -433,9 +450,8 @@ ProcessManager::Result ProcessManager::execute(const std::vector<std::string>& a
             Logger::getInstance().log(LogLevel::DEBUG, context, "Closed stdin pipe after sending input");
         }
 
-        const auto deadline = timeoutSec > 0
-            ? std::chrono::steady_clock::now() + std::chrono::seconds(timeoutSec)
-            : std::chrono::steady_clock::time_point::max();
+        const auto deadline = Deadline::after(timeoutSec);
+        Deadline drainDeadline = Deadline::none(); // armed once the deadline fires
 
         while (!childExited || !stdoutClosed || !stderrClosed) {
             std::vector<pollfd> pollFds;
@@ -451,10 +467,7 @@ ProcessManager::Result ProcessManager::execute(const std::vector<std::string>& a
                 pollFds.push_back(pollfd{stderrPipe[0], POLLIN | POLLHUP, 0});
             }
 
-            int pollTimeoutMs = calculatePollTimeoutMs(deadline);
-            if (pollFds.empty()) {
-                pollTimeoutMs = pollTimeoutMs == -1 ? 50 : std::min(pollTimeoutMs, 50);
-            }
+            const int pollTimeoutMs = (timedOut ? drainDeadline : deadline).pollTimeoutMs(pollFds.empty());
             const int pollResult = poll(pollFds.data(), static_cast<nfds_t>(pollFds.size()), pollTimeoutMs);
             if (pollResult == -1) {
                 if (errno == EINTR) {
@@ -463,10 +476,21 @@ ProcessManager::Result ProcessManager::execute(const std::vector<std::string>& a
                 throw std::runtime_error("poll failed: " + std::string(std::strerror(errno)));
             }
 
-            if (pollResult == 0 && deadline != std::chrono::steady_clock::time_point::max()) {
+            if (!timedOut && deadline.expired()) {
                 timedOut = true;
-                (void)kill(-childPid, SIGKILL);
+                (void)kill(-processGroup, SIGKILL);
                 Logger::getInstance().log(LogLevel::ERROR, context, "Command timed out; sent SIGKILL to process group");
+                drainDeadline = Deadline::after(kDrainGraceSec);
+            } else if (timedOut && drainDeadline.expired() && (!stdinClosed || !stdoutClosed || !stderrClosed)) {
+                // Something outside the process group still holds our pipes; stop waiting for it.
+                closeFd(stdinPipe[1]);
+                stdinClosed = true;
+                closeFd(stdoutPipe[0]);
+                stdoutClosed = true;
+                closeFd(stderrPipe[0]);
+                stderrClosed = true;
+                Logger::getInstance().log(LogLevel::ERROR, context,
+                                          "Pipes still open after the SIGKILL grace period; abandoning remaining output");
             }
 
             for (const auto& pollFd : pollFds) {
@@ -488,7 +512,7 @@ ProcessManager::Result ProcessManager::execute(const std::vector<std::string>& a
                     } else if (stdoutClosed) {
                         closeFd(stdoutPipe[0]);
                     }
-                    if (stdoutData.size() > before) {
+                    if (stdoutData.size() > before && Logger::getInstance().enabled(LogLevel::DEBUG)) {
                         Logger::getInstance().log(
                             LogLevel::DEBUG,
                             context,
@@ -504,7 +528,7 @@ ProcessManager::Result ProcessManager::execute(const std::vector<std::string>& a
                     } else if (stderrClosed) {
                         closeFd(stderrPipe[0]);
                     }
-                    if (stderrData.size() > before) {
+                    if (stderrData.size() > before && Logger::getInstance().enabled(LogLevel::DEBUG)) {
                         Logger::getInstance().log(
                             LogLevel::DEBUG,
                             context,
@@ -518,11 +542,13 @@ ProcessManager::Result ProcessManager::execute(const std::vector<std::string>& a
                 const pid_t waitResult = waitpid(childPid, &status, WNOHANG);
                 if (waitResult == childPid) {
                     childExited = true;
-                    Logger::getInstance().log(
-                        LogLevel::DEBUG,
-                        LogContext{waitResult, context.sessionId, context.clientId, context.command},
-                        "Child process reaped with waitpid"
-                    );
+                    if (Logger::getInstance().enabled(LogLevel::DEBUG)) {
+                        Logger::getInstance().log(
+                            LogLevel::DEBUG,
+                            LogContext{waitResult, context.sessionId, context.clientId, context.command},
+                            "Child process reaped with waitpid"
+                        );
+                    }
                     childPid = -1;
                 } else if (waitResult == -1) {
                     Logger::getInstance().log(LogLevel::ERROR, context, "waitpid failed: " + std::string(std::strerror(errno)));
@@ -591,7 +617,7 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
                 throw std::runtime_error("fork() failed for " + client.clientId() + ": " + std::string(std::strerror(errno)));
             }
 
-            if (pid == 0) {
+            if (pid == 0) try {
                 for (auto& existingWorker : workers) {
                     closePipePair(existingWorker.stdoutPipe);
                     closePipePair(existingWorker.stderrPipe);
@@ -616,7 +642,28 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
                 closePipePair(worker.stdoutPipe);
                 closePipePair(worker.stderrPipe);
 
-                std::vector<std::string> sshArgs = buildSshCommandArguments(client, remoteCommand);
+                // Passwords never touch argv: sshpass reads the secret from an
+                // inherited pipe (`sshpass -d <fd>`). The pipe is created in the
+                // child so that no other worker can ever inherit it; the read end
+                // is deliberately left inheritable across exec.
+                int passwordFd = -1;
+                if (!client.password.empty()) {
+                    if (client.password.size() >= kMaxPasswordBytes) {
+                        childExitWithError("password too long for secure hand-off\n", 126);
+                    }
+                    std::array<int, 2> passwordPipe{-1, -1};
+                    if (pipe(passwordPipe.data()) == -1) {
+                        childExitWithError("password pipe creation failed: " + std::string(std::strerror(errno)) + "\n", 126);
+                    }
+                    if (!writeFully(passwordPipe[1], client.password.data(), client.password.size()) ||
+                        !writeFully(passwordPipe[1], "\n", 1)) {
+                        childExitWithError("password pipe write failed: " + std::string(std::strerror(errno)) + "\n", 126);
+                    }
+                    closeFd(passwordPipe[1]);
+                    passwordFd = passwordPipe[0];
+                }
+
+                std::vector<std::string> sshArgs = buildSshCommandArguments(client, remoteCommand, passwordFd);
 
                 std::vector<char*> argv;
                 argv.reserve(sshArgs.size() + 1);
@@ -630,10 +677,15 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
                     "execvp failed for ssh client '" + client.clientId() + "': " + std::string(std::strerror(errno)) + "\n",
                     127
                 );
+            } catch (...) {
+                // A throw here would run the parent's cleanupWorkers() inside the
+                // child and SIGKILL every sibling worker's process group.
+                childExitWithError("worker setup failed: unexpected exception\n", 126);
             }
 
+            (void)setpgid(pid, pid); // see execute(): makes kill(-pid) valid immediately
             worker.pid = pid;
-            worker.logPid = pid;
+            worker.logPid = pid; // keeps the process-group id after worker.pid is reset on reap
             Logger::getInstance().log(
                 LogLevel::INFO,
                 LogContext{pid, context.sessionId, client.clientId(), "ssh " + client.clientId() + " " + remoteCommand},
@@ -647,9 +699,8 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
             workers.push_back(std::move(worker));
         }
 
-        const auto deadline = timeoutSec > 0
-            ? std::chrono::steady_clock::now() + std::chrono::seconds(timeoutSec)
-            : std::chrono::steady_clock::time_point::max();
+        const auto deadline = Deadline::after(timeoutSec);
+        Deadline drainDeadline = Deadline::none(); // armed once the deadline fires
 
         bool anyTimedOut = false;
 
@@ -677,10 +728,7 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
                 break;
             }
 
-            int pollTimeoutMs = calculatePollTimeoutMs(deadline);
-            if (pollFds.empty()) {
-                pollTimeoutMs = pollTimeoutMs == -1 ? 50 : std::min(pollTimeoutMs, 50);
-            }
+            const int pollTimeoutMs = (anyTimedOut ? drainDeadline : deadline).pollTimeoutMs(pollFds.empty());
 
             const int pollResult = poll(pollFds.data(), static_cast<nfds_t>(pollFds.size()), pollTimeoutMs);
             if (pollResult == -1) {
@@ -690,18 +738,37 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
                 throw std::runtime_error("poll failed during remote execution: " + std::string(std::strerror(errno)));
             }
 
-            if (pollResult == 0 && deadline != std::chrono::steady_clock::time_point::max()) {
+            if (!anyTimedOut && deadline.expired()) {
                 anyTimedOut = true;
                 for (auto& worker : workers) {
-                    if (!worker.childExited && worker.pid > 0) {
-                        worker.timedOut = true;
-                        (void)kill(-worker.pid, SIGKILL);
-                        Logger::getInstance().log(
-                            LogLevel::ERROR,
-                            LogContext{worker.logPid, context.sessionId, worker.client.clientId(), "ssh " + worker.client.clientId() + " " + remoteCommand},
-                            "Remote SSH worker timed out; sent SIGKILL to process group"
-                        );
+                    if (worker.childExited && worker.stdoutClosed && worker.stderrClosed) {
+                        continue; // finished in time
                     }
+                    worker.timedOut = true;
+                    if (worker.logPid > 0) {
+                        (void)kill(-worker.logPid, SIGKILL);
+                    }
+                    Logger::getInstance().log(
+                        LogLevel::ERROR,
+                        LogContext{worker.logPid, context.sessionId, worker.client.clientId(), "ssh " + worker.client.clientId() + " " + remoteCommand},
+                        "Remote SSH worker timed out; sent SIGKILL to process group"
+                    );
+                }
+                drainDeadline = Deadline::after(kDrainGraceSec);
+            } else if (anyTimedOut && drainDeadline.expired()) {
+                for (auto& worker : workers) {
+                    if (worker.stdoutClosed && worker.stderrClosed) {
+                        continue;
+                    }
+                    closeFd(worker.stdoutPipe[0]);
+                    worker.stdoutClosed = true;
+                    closeFd(worker.stderrPipe[0]);
+                    worker.stderrClosed = true;
+                    Logger::getInstance().log(
+                        LogLevel::ERROR,
+                        LogContext{worker.logPid, context.sessionId, worker.client.clientId(), "ssh " + worker.client.clientId() + " " + remoteCommand},
+                        "Pipes still open after the SIGKILL grace period; abandoning remaining output"
+                    );
                 }
             }
 
@@ -724,7 +791,7 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
                         closeFd(targetFd);
                     }
 
-                    if (targetOutput.size() > before) {
+                    if (targetOutput.size() > before && Logger::getInstance().enabled(LogLevel::DEBUG)) {
                         Logger::getInstance().log(
                             LogLevel::DEBUG,
                             LogContext{worker.logPid, context.sessionId, worker.client.clientId(), "ssh " + worker.client.clientId() + " " + remoteCommand},
@@ -740,11 +807,13 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
                     const pid_t waitResult = waitpid(worker.pid, &worker.status, WNOHANG);
                     if (waitResult == worker.pid) {
                         worker.childExited = true;
-                        Logger::getInstance().log(
-                            LogLevel::DEBUG,
-                            LogContext{waitResult, context.sessionId, worker.client.clientId(), "ssh " + worker.client.clientId() + " " + remoteCommand},
-                            "Remote SSH worker reaped with waitpid"
-                        );
+                        if (Logger::getInstance().enabled(LogLevel::DEBUG)) {
+                            Logger::getInstance().log(
+                                LogLevel::DEBUG,
+                                LogContext{waitResult, context.sessionId, worker.client.clientId(), "ssh " + worker.client.clientId() + " " + remoteCommand},
+                                "Remote SSH worker reaped with waitpid"
+                            );
+                        }
                         worker.pid = -1;
                     } else if (waitResult == -1) {
                         throw std::runtime_error("waitpid failed for client " + worker.client.clientId() + ": " + std::string(std::strerror(errno)));

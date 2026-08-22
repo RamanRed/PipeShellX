@@ -6,34 +6,66 @@ PipeShellX uses the system OpenSSH client for remote execution.
 
 Depending on the client and the current session state, authentication is handled in one of two ways:
 
-- plain `ssh` for OpenSSH-managed authentication
-- `sshpass -p <password> ssh ...` for password-backed clients added interactively
+- plain `ssh` for OpenSSH-managed authentication (keys, agent, certificates, `~/.ssh/config`)
+- `sshpass -d <fd> ssh ...` for password-backed clients added interactively
 
-PipeShellX does not implement its own SSH protocol stack or credential exchange.
+PipeShellX does not implement its own SSH protocol stack or credential exchange (see
+[ADR-002](adr/ADR-002-system-openssh-as-agentless-transport.md)).
+
+## The `ssh` invocation
+
+Every remote worker runs `ssh` resolved from `PATH` (OpenSSH ≥ 7.6 is required for
+`accept-new`) with these options (`src/ssh_auth.cpp`; each one is pinned by
+`tests/test_ssh_auth.cpp`):
+
+```text
+ssh -o StrictHostKeyChecking=accept-new \
+    -o UserKnownHostsFile=<inventory>.known_hosts \
+    -o BatchMode=yes \            # omitted for password-backed clients
+    -o ConnectTimeout=5 \
+    -o ServerAliveInterval=15 \
+    [-p <port>] [-i <identity>] user@host 'command'
+```
+
+| Option | Why |
+|---|---|
+| `StrictHostKeyChecking=accept-new` | unknown hosts are recorded on first contact; a host whose key **changes** is refused — this is what protects against man-in-the-middle after the first connection |
+| `UserKnownHostsFile="<inventory>.known_hosts"` | one trust store per inventory file (`clients.txt.known_hosts` next to `clients.txt`), so fleet keys stay out of `~/.ssh/known_hosts` and can be shipped with the inventory. The value is double-quoted with `%` doubled because OpenSSH parses `-o` values like config lines. Entries that were not loaded from an inventory (hand-built `ClientEntry` objects, e.g. the bench harness) carry no path and use OpenSSH's default `~/.ssh/known_hosts` |
+| `BatchMode=yes` | no interactive prompt can ever be answered, so a misconfigured host fails fast instead of hanging a worker; it is dropped only when `sshpass` has to answer a password prompt |
+| `ConnectTimeout=5` | unreachable hosts are reported within seconds |
+| `ServerAliveInterval=15` | a hung network is detected instead of waiting forever |
+
+### Host key changes
+
+When a recorded key no longer matches, OpenSSH prints its
+`REMOTE HOST IDENTIFICATION HAS CHANGED!` banner and exits. PipeShellX reports:
+
+```text
+CLIENT user@host
+ERROR: host key verification failed
+```
+
+Inspect the fingerprints, and if the change is legitimate remove the stale line
+from `<inventory>.known_hosts` (for example `ssh-keygen -R host -f clients.txt.known_hosts`).
+To pre-seed a trust store, run `ssh-keyscan` against the hosts, verify the
+fingerprints out of band, and save the output as `<inventory>.known_hosts`.
 
 ## Supported Authentication Methods
 
 ### Key-Based Authentication
 
-Key-based authentication works through the local OpenSSH client.
-
-If the remote host accepts the user’s SSH keys, PipeShellX simply executes:
-
-```text
-ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 user@host "command"
-```
-
-This covers:
+Key-based authentication works through the local OpenSSH client. If the remote
+host accepts the user's SSH keys, PipeShellX simply executes the `ssh` command
+above. This covers:
 
 - default private keys in `~/.ssh/`
-- explicit identity files stored in client configuration
+- explicit identity files stored in client configuration (`ssh://user@host?identity=/path/to/key`)
 - host-specific key selection configured by OpenSSH
 
 ### Password Authentication
 
-Password authentication is supported through `sshpass`, but the password must be supplied through the interactive shell.
-
-Example:
+Password authentication is supported through `sshpass`, but the password must be
+supplied through the interactive shell:
 
 ```text
 PipeShell > add-client user@192.168.1.10
@@ -41,25 +73,31 @@ Password required? (y/n) y
 Enter password:
 ```
 
-After the password is captured, the remote worker executes:
+After the password is captured, each remote worker child:
 
-```text
-sshpass -p <password> ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 user@host "command"
-```
+1. creates a pipe and writes the password (plus a newline) into it;
+2. leaves only the read end open across `exec`;
+3. runs `sshpass -d <fd> ssh ... user@host 'command'`.
 
-The password is stored only in memory for the lifetime of the running PipeShellX process.
+The password is therefore never part of a command line, never visible in `ps`,
+never written to `clients.txt`, and never written to the log. It is kept in
+memory only for the lifetime of the running PipeShellX process. Passwords of
+4 KiB or more are rejected.
+
+Password authentication is a compatibility feature; keys, agents, or
+certificates are recommended and the password path is scheduled for removal in
+1.0 (`PLAN.md` §3.6).
 
 ### ssh-agent Authentication
 
-If the user has a running `ssh-agent` and the correct key is loaded, PipeShellX works without any additional application-side configuration.
-
-OpenSSH discovers and uses the agent automatically when the worker runs `ssh`.
+If the user has a running `ssh-agent` and the correct key is loaded, PipeShellX
+works without any additional application-side configuration. OpenSSH discovers
+and uses the agent automatically when the worker runs `ssh`.
 
 ### ~/.ssh/config Support
 
-PipeShellX also inherits OpenSSH behavior from `~/.ssh/config`.
-
-This means the following can be managed outside the application:
+PipeShellX also inherits OpenSSH behavior from `~/.ssh/config`, so the following
+can be managed outside the application:
 
 - per-host usernames
 - identity files
@@ -68,7 +106,9 @@ This means the following can be managed outside the application:
 - host aliases
 - other OpenSSH connection settings
 
-If `~/.ssh/config` already allows a host to be reached with `ssh my-host`, PipeShellX benefits from the same OpenSSH resolution and authentication behavior when it invokes `ssh`.
+If `~/.ssh/config` already allows a host to be reached with `ssh my-host`,
+PipeShellX benefits from the same OpenSSH resolution and authentication
+behavior when it invokes `ssh`.
 
 ## Client Configuration Behavior
 
@@ -78,34 +118,34 @@ Persistent client configuration in `clients.txt` supports:
 - `ssh://user@host`
 - `ssh://user@host:port?identity=/path/to/key`
 
-Passwords are intentionally not allowed in `clients.txt`.
-
-If a configuration entry contains `password=...`, the loader rejects it. This prevents password persistence on disk.
+Passwords are intentionally not allowed in `clients.txt`. If a configuration
+entry contains `password=...`, the loader rejects it. This prevents password
+persistence on disk. The `known_hosts` location is derived from the inventory
+path at load time and is never written to the file.
 
 ## Verification and Status Checks
 
-When a client is added, PipeShellX verifies connectivity using the same authentication method currently attached to that client:
+When a client is added, PipeShellX verifies connectivity using the same
+authentication method currently attached to that client:
 
 - key / agent / SSH config: plain `ssh`
-- interactive password: `sshpass + ssh`
+- interactive password: `sshpass -d <fd>` + `ssh`
 
-The verification command is:
+The verification command is `echo connected`. If stdout contains `connected`,
+the client is marked `ONLINE`; otherwise it is marked `OFFLINE` with the
+normalized error. The `status` command uses the same client-scoped path.
 
-```text
-echo connected
-```
+## Failure Reporting
 
-If stdout contains `connected`, the client is marked `ONLINE`. Otherwise it is marked `OFFLINE`.
-
-The `status` command uses the same client-scoped authentication path.
-
-## Authentication Failure Reporting
-
-If SSH authentication fails, PipeShellX normalizes the output to:
+SSH failures are normalized to one of:
 
 ```text
-CLIENT user@host
+ERROR: unreachable host
+ERROR: connection failed
+ERROR: host key verification failed
 ERROR: authentication failed
+ERROR: command timed out
+ERROR: command failed with exit code N
 ```
 
 This applies to both connection verification and remote command execution.
@@ -114,13 +154,15 @@ This applies to both connection verification and remote command execution.
 
 Current security properties:
 
+- host keys are verified on every connection after the first (`accept-new`)
+- `ssh` is resolved from `PATH`, never a hard-coded path
 - passwords entered interactively are stored in memory only
-- passwords are not written to `clients.txt`
-- passwords are not printed to the terminal
-- passwords are not included in application log messages
+- passwords are passed to `sshpass` over a pipe, never on argv
+- passwords are not written to `clients.txt`, the terminal, or the log
 
-Current limitation:
+Remaining limitations:
 
-- `sshpass -p <password>` places the password in the child process argument vector while that process exists
-
-That is acceptable for the current implementation scope, but it is weaker than file-descriptor or environment-based secret passing. If stronger process-level secrecy is required, the `sshpass` invocation strategy should be upgraded.
+- the first connection to a host trusts whatever key it presents (TOFU) unless
+  `<inventory>.known_hosts` is pre-seeded
+- in-memory passwords live in ordinary `std::string` storage; `SecureString`
+  (`mlock`, zeroisation) arrives in Phase 6

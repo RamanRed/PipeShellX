@@ -16,7 +16,7 @@ constexpr std::size_t kMaxArgumentLength = 256;
 
 const std::unordered_set<std::string_view>& allowedCommands() {
     static const std::unordered_set<std::string_view> commands = {
-        "ls", "cat", "echo", "pwd", "whoami", "date", "uptime", "df", "du", "ps", "top", "id", "hostname"
+        "ls", "cat", "echo", "pwd", "whoami", "date", "uptime", "df", "du", "ps", "id", "hostname"
     };
     return commands;
 }

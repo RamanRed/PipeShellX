@@ -1,0 +1,2 @@
+add_executable(pipeshellx_bench_baseline baseline.cpp)
+target_link_libraries(pipeshellx_bench_baseline PRIVATE pipeshellx_lib pipeshellx_warnings)

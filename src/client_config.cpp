@@ -2,10 +2,12 @@
 
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
 #include <fstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -183,12 +185,28 @@ std::string ClientEntry::serialize() const {
     return serialized;
 }
 
+ClientConfig::ClientConfig(std::string inventoryPath) : inventoryPath_(std::move(inventoryPath)) {}
+
+const std::string& ClientConfig::inventoryPath() const noexcept {
+    return inventoryPath_;
+}
+
+ClientEntry ClientConfig::makeEntry(const std::string& specification) const {
+    ClientEntry entry = parseEntry(specification);
+    if (!inventoryPath_.empty()) {
+        entry.knownHostsFile = knownHostsPathFor(inventoryPath_);
+    }
+    return entry;
+}
+
 void ClientConfig::loadFromFile(const std::string& path) {
     std::ifstream input(path);
     if (!input.is_open()) {
         throw std::runtime_error("Failed to open client configuration file: " + path);
     }
 
+    inventoryPath_ = path;
+    const std::string knownHostsFile = knownHostsPathFor(path);
     std::vector<ClientEntry> loadedClients;
     std::unordered_set<std::string> seen;
     std::string line;
@@ -216,10 +234,20 @@ void ClientConfig::loadFromFile(const std::string& path) {
             );
         }
 
+        entry.knownHostsFile = knownHostsFile;
         loadedClients.push_back(std::move(entry));
     }
 
     clients_ = std::move(loadedClients);
+}
+
+std::string ClientConfig::knownHostsPathFor(const std::string& inventoryPath) {
+    std::error_code error;
+    std::filesystem::path absolute = std::filesystem::absolute(inventoryPath, error);
+    if (error) {
+        absolute = inventoryPath; // no usable CWD: keep the path as given
+    }
+    return absolute.lexically_normal().string() + ".known_hosts";
 }
 
 void ClientConfig::saveToFile(const std::string& path) const {

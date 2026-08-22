@@ -43,10 +43,11 @@ Only a fixed set of commands is allowed:
 - `df`
 - `du`
 - `ps`
-- `top`
 - `id`
+- `hostname`
 
-Any command outside this list is rejected.
+Any command outside this list is rejected. `top` was removed from the list
+because it is interactive and hangs the REPL.
 
 ### Trusted Executable Resolution
 
@@ -89,6 +90,34 @@ Child processes are constrained with:
 
 These limits reduce impact from abusive or malformed commands, although the values are currently hardcoded.
 
+### SSH Transport Defaults
+
+Remote execution spawns the system OpenSSH client with hardened defaults
+(`src/ssh_auth.cpp`, enforced by `tests/test_ssh_auth.cpp`):
+
+- `ssh` is resolved from `PATH`; no hard-coded `/usr/bin/ssh`.
+- `StrictHostKeyChecking=accept-new` (OpenSSH ≥ 7.6) with
+  `UserKnownHostsFile="<inventory>.known_hosts"`: the key of a host is recorded
+  on first contact in a trust store that lives next to the inventory file; a
+  changed key fails the host and is reported as `ERROR: host key verification
+  failed`. The old `StrictHostKeyChecking=no` (MITM-open) default is gone. The
+  path is quoted for OpenSSH's option parser so directories with spaces or `%`
+  cannot redirect the trust store.
+- On timeout the whole process group of a worker is SIGKILLed; output is
+  drained for at most 2 s afterwards so a daemonised grandchild holding the
+  pipes cannot keep a run alive.
+- `BatchMode=yes` whenever no password is in play, so nothing can hang on an
+  interactive prompt; `ConnectTimeout=5` and `ServerAliveInterval=15` always.
+- Passwords are never on a command line: the worker child creates a pipe,
+  writes the secret into it, and runs `sshpass -d <fd>`. The password is not
+  visible in `ps`, not written to `clients.txt`, and not written to the log.
+
+### Logging
+
+Logs default to a file (`$XDG_STATE_HOME/pipeshellx/pipeshellx.log` or
+`~/.local/state/pipeshellx/pipeshellx.log`; `--log-file` overrides). Command
+lines are logged; passwords and command output are not.
+
 ## Remaining Risks
 
 ### Allowlisted Command Scope
@@ -99,7 +128,7 @@ Some allowed commands expose system information:
 - `id`
 - `df`
 - `du`
-- `top`
+- `hostname`
 
 These are not injection risks, but they are policy risks. In a more restricted deployment, the allowlist should be narrower.
 
@@ -131,7 +160,8 @@ For stronger deployment:
 - add seccomp or platform sandboxing
 - restrict accessible filesystem locations
 - consider namespaces or container isolation
-- log to a file or centralized sink instead of only stdout
+- ship the log file to a centralized sink
+- prefer key, agent, or certificate authentication; password-backed hosts are a compatibility feature
 
 ## Security Posture Summary
 

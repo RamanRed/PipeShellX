@@ -1,0 +1,50 @@
+# PipeShellX code style — matches the existing sources; run `clang-format -i`
+# on files you touch (new code must be clean; wholesale reformatting of
+# untouched files is a separate commit).
+---
+Language: Cpp
+BasedOnStyle: LLVM
+Standard: c++20
+
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 120
+AccessModifierOffset: -4
+NamespaceIndentation: None
+IndentCaseLabels: true
+
+BreakBeforeBraces: Attach
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Empty
+AllowShortLambdasOnASingleLine: All
+
+PointerAlignment: Left
+ReferenceAlignment: Left
+DerivePointerAlignment: false
+
+AlignAfterOpenBracket: Align
+BinPackArguments: true
+BinPackParameters: false
+AlignOperands: Align
+AlignTrailingComments: true
+AlignConsecutiveAssignments: None
+
+BreakConstructorInitializers: BeforeColon
+ConstructorInitializerIndentWidth: 4
+ContinuationIndentWidth: 4
+
+IncludeBlocks: Preserve
+SortIncludes: CaseSensitive
+
+SpaceAfterTemplateKeyword: true
+SpaceBeforeParens: ControlStatements
+SpacesInParentheses: false
+Cpp11BracedListStyle: true
+
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+FixNamespaceComments: true
+...

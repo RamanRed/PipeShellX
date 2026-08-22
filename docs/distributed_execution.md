@@ -62,13 +62,18 @@ Each SSH invocation is executed directly through `execvp()` in a child worker pr
 
 The SSH worker currently uses:
 
-- `/usr/bin/ssh`
-- `-o StrictHostKeyChecking=no`
+- `ssh` resolved from `PATH`
+- `-o StrictHostKeyChecking=accept-new`
+- `-o UserKnownHostsFile=<inventory>.known_hosts` (one trust store per inventory file)
+- `-o BatchMode=yes` unless a password prompt must be answered by `sshpass`
 - `-o ConnectTimeout=5`
+- `-o ServerAliveInterval=15`
 
 Authentication is intentionally delegated to the system OpenSSH client. PipeShellX does not implement SSH authentication itself; it executes `ssh` and lets OpenSSH apply config files, agent state, keys, and other supported authentication mechanisms.
 
-If a client has a non-empty in-memory password captured through the interactive shell, the worker prepends `sshpass -p <password>` before the `ssh` invocation. Otherwise it uses plain `ssh`.
+If a client has a non-empty in-memory password captured through the interactive shell, the worker child creates a pipe, writes the password into it, and prepends `sshpass -d <fd>` before the `ssh` invocation, so the secret never appears on a command line. Otherwise it uses plain `ssh`.
+
+A host whose key has changed since it was recorded is refused by OpenSSH and reported as `ERROR: host key verification failed`.
 
 ## Multi-Client Architecture
 

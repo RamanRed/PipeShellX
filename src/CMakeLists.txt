@@ -1,43 +1,40 @@
 find_package(Threads REQUIRED)
 
-# Main library target
-add_library(remote_command_lib
+# Core library
+add_library(pipeshellx_lib
+    cli_options.cpp
     client_config.cpp
     client_manager.cpp
-    ipc_engine.cpp
-    process_manager.cpp
-    ssh_auth.cpp
     command_executor.cpp
-    session_manager.cpp
+    ipc_engine.cpp
     logger.cpp
+    process_manager.cpp
+    session_manager.cpp
+    ssh_auth.cpp
 )
+add_library(pipeshellx::lib ALIAS pipeshellx_lib)
 
-target_include_directories(remote_command_lib PUBLIC
+target_include_directories(pipeshellx_lib PUBLIC
     ${PROJECT_SOURCE_DIR}/include
 )
-target_link_libraries(remote_command_lib PUBLIC Threads::Threads)
+target_link_libraries(pipeshellx_lib
+    PUBLIC Threads::Threads
+    PRIVATE pipeshellx_warnings
+)
+target_compile_definitions(pipeshellx_lib PUBLIC
+    PIPESHELLX_VERSION="${PROJECT_VERSION}"
+)
 
-# Main executable
-add_executable(remote_command_app
+# Interactive executable
+add_executable(pipeshellx_app
     main.cpp
     terminal_client.cpp
 )
-set_target_properties(remote_command_app PROPERTIES OUTPUT_NAME PipeShellX)
-
-target_link_libraries(remote_command_app PRIVATE remote_command_lib)
-
-# Debug/Release flags
-target_compile_options(remote_command_lib PRIVATE
-    $<$<CONFIG:Debug>:-g -O0>
-    $<$<CONFIG:Release>:-O3>
-)
-target_compile_options(remote_command_app PRIVATE
-    $<$<CONFIG:Debug>:-g -O0>
-    $<$<CONFIG:Release>:-O3>
-)
+set_target_properties(pipeshellx_app PROPERTIES OUTPUT_NAME PipeShellX)
+target_link_libraries(pipeshellx_app PRIVATE pipeshellx_lib pipeshellx_warnings)
 
 # Install rules
-install(TARGETS remote_command_app remote_command_lib
+install(TARGETS pipeshellx_app pipeshellx_lib
     RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib

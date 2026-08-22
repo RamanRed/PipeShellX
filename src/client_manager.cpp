@@ -81,7 +81,7 @@ std::vector<Client> ClientManager::listClients() const {
 }
 
 void ClientManager::addClient(const std::string& specification, const std::optional<std::string>& password) {
-    ClientEntry entry = ClientConfig::parseEntry(specification);
+    ClientEntry entry = ClientConfig(configPath_).makeEntry(specification);
     if (password.has_value()) {
         entry.password = *password;
     }

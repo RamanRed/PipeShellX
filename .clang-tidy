@@ -1,0 +1,45 @@
+# Static-analysis baseline for PipeShellX. Run with
+#   clang-tidy -p build <file>      (compile_commands.json is exported by CMake)
+# Checks are advisory in Phase 0; the CI lint job is added in Phase 1.
+---
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  cert-err34-c,
+  cert-err52-cpp,
+  cert-err60-cpp,
+  clang-analyzer-*,
+  concurrency-*,
+  cppcoreguidelines-init-variables,
+  cppcoreguidelines-pro-type-cstyle-cast,
+  cppcoreguidelines-slicing,
+  misc-unused-parameters,
+  misc-unused-using-decls,
+  modernize-deprecated-headers,
+  modernize-loop-convert,
+  modernize-make-unique,
+  modernize-use-nullptr,
+  modernize-use-override,
+  modernize-use-using,
+  performance-*,
+  portability-*,
+  readability-container-size-empty,
+  readability-delete-null-pointer,
+  readability-misleading-indentation,
+  readability-redundant-string-cstr,
+  readability-redundant-string-init,
+  readability-simplify-boolean-expr
+
+WarningsAsErrors: ''
+HeaderFilterRegex: '^(include|src|tests|bench)/.*'
+FormatStyle: file
+
+CheckOptions:
+  - key: bugprone-unhandled-self-assignment.WarnOnlyIfThisHasSuspiciousField
+    value: false
+  - key: readability-identifier-naming.ClassCase
+    value: CamelCase
+  - key: readability-identifier-naming.FunctionCase
+    value: camelBack
+...

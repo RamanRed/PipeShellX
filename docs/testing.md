@@ -2,12 +2,28 @@
 
 ## Current Test Surface
 
-The repository includes:
+The GoogleTest suite lives in `tests/` and is built unconditionally: GoogleTest
+is fetched by CMake `FetchContent` (pinned to `v1.17.0`), so the tests can never
+be silently skipped. Each `TEST` is registered with CTest individually through
+`gtest_discover_tests`.
 
-- `tests/test_ipc.cpp`
-- `tests/test_prcoess_manager.cpp`
+| File | Covers |
+|---|---|
+| `test_cli_options.cpp` | `--verbose`, `--log-file` (both forms), `--version`, `--help`, rejection of unknown or incomplete arguments |
+| `test_client_config.cpp` | `clients.txt` parsing (legacy and `ssh://` forms), password rejection, duplicate detection, per-inventory `known_hosts` derivation, `ClientManager::addClient` persisting without secrets |
+| `test_command_executor.cpp` | allowlist (`top` rejected, `hostname` accepted), explicit paths, shell metacharacters, length bounds, quoting, exit-code propagation |
+| `test_ipc.cpp` | `Pipe` write/read, non-blocking mode, error handling |
+| `test_logger.cpp` | line format, level filtering, console mirror, stderr fallback, unwritable paths, parent-directory creation, default log path resolution, 4-thread interleaving check |
+| `test_process_manager.cpp` | local execution, invalid command, timeout; regression: fast remote failure is not a timeout; hung worker (silent loopback listener) does time out; timeout SIGKILLs the whole process group (grandchild holding the pipes); a holder outside the group is abandoned after the 2 s drain grace |
+| `test_ssh_auth.cpp` | hardened `ssh` argv (`PATH` lookup, `accept-new`, `UserKnownHostsFile`, `BatchMode`, `ServerAliveInterval`), `sshpass -d <fd>` with the password never on argv, auth and host-key failure classifiers |
 
-These cover basic pipe behavior and basic process execution behavior. Test build is conditional on GoogleTest availability.
+`tests/test_support.hpp` provides `ScopedTempCwd` (runs a test in a fresh
+temporary working directory so a stray `clients.txt` or log file cannot
+influence it), `ScopedEnv` (scoped environment overrides),
+`refusedLoopbackClient()` (127.0.0.1:1 — a deterministic, instant SSH
+"connection refused") and `SilentListener` (a loopback socket that never
+accepts, i.e. a deterministic hung host). No test depends on external network
+reachability.
 
 ## Existing Validation Areas
 
@@ -31,10 +47,8 @@ Current coverage includes:
 
 Automated coverage is still missing for:
 
-- `CommandExecutor` validation behavior
-- trusted executable resolution
-- `SessionManager`
-- logging behavior
+- end-to-end SSH execution against a real `sshd` (the docker-compose fleet arrives in Phase 2)
+- `SessionManager` (dormant; scheduled for removal in Phase 1)
 - high-volume stress execution
 - concurrent session execution
 - zombie-process regression tests
@@ -107,23 +121,43 @@ There was a previously fixed bug where the parent could continue looping after r
 
 ## Running Tests
 
-If GoogleTest is available:
-
 ```bash
-mkdir -p build
-cd build
-cmake ..
-make -j
-ctest --output-on-failure
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build
+ctest --test-dir build --output-on-failure
 ```
 
-If GoogleTest is not installed, the test target is skipped by CMake.
+Run a single test or group with `ctest --test-dir build -R LoggerTest`.
+`-DPIPESHELLX_SYSTEM_GTEST=ON` uses an installed GoogleTest instead of the
+fetched copy (for offline builds).
+
+### Sanitizers
+
+```bash
+cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DPIPESHELLX_SANITIZE=address,undefined
+cmake --build build-asan
+ctest --test-dir build-asan --output-on-failure
+```
+
+`PIPESHELLX_SANITIZE=thread` is used for reactor tests from Phase 2 on.
+
+### Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and pull request:
+
+- `{ubuntu-latest, macos-latest} × {gcc, clang} × {Debug, Release}` — configure,
+  build with `-Werror`, `ctest`, and a CLI smoke test (`--version`, `--help`,
+  unknown flag exits `2`);
+- an AddressSanitizer + UndefinedBehaviorSanitizer job (ubuntu, clang, Debug).
+
+`.github/workflows/bench.yml` runs the baseline harness nightly (see
+`docs/benchmarks.md`).
 
 ## Production-Readiness Testing Recommendations
 
 Before treating the system as operationally mature, add:
 
-- CI execution of unit and integration tests
+- integration tests against a real SSH fleet (Phase 2)
 - stress tests with larger command counts
 - failure-injection tests around `fork`, `pipe`, and `poll`
 - platform validation on target Linux environments
