@@ -9,6 +9,7 @@ else()
         os/posix/handle.cpp
         os/posix/io.cpp
         os/posix/pipe.cpp
+        os/posix/process.cpp
         os/posix/signal.cpp
     )
 endif()
