@@ -20,6 +20,7 @@ else()
         sink/group_sink.cpp
         sink/json_sink.cpp
         sink/stream_sink.cpp
+        audit/audit_log.cpp
     )
     set(PIPESHELLX_OS_SOURCES
         os/posix/child_exit.cpp

@@ -40,6 +40,7 @@ struct RunInvocation {
     bool reuse = false;               // --reuse: ssh ControlMaster connection reuse
     int retries = 0;                  // --retries N: extra attempts on a transient transport failure
     bool failFast = false;            // --fail-fast: abort the run on the first final failure
+    std::string auditPath;            // --audit-log FILE: append a JSONL audit trail (empty = off)
     bool colour = true;               // --no-color turns it off
     std::vector<std::string> command; // the argv after `--`
 };

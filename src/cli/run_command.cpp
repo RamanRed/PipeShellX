@@ -4,6 +4,7 @@
 #include "client_config.hpp"
 #include "logger.hpp"
 #include "process_manager.hpp"
+#include "psx/audit/audit_log.hpp"
 #include "psx/cli/selection.hpp"
 #include "psx/os/paths.hpp"
 #include "psx/os/system.hpp"
@@ -163,6 +164,8 @@ RunInvocation parseRun(const std::vector<std::string>& args) {
             invocation.retries = parseIntArg(valueFor(i, arg), "--retries");
         } else if (arg == "--fail-fast") {
             invocation.failFast = true;
+        } else if (arg == "--audit-log") {
+            invocation.auditPath = valueFor(i, arg);
         } else if (arg == "--no-color" || arg == "--no-colour") {
             invocation.colour = false;
         } else {
@@ -246,9 +249,23 @@ int runSubcommand(const RunInvocation& invocation, std::ostream& out, std::ostre
         controlPath = (dir / "cm-%r@%h:%p").string();
     }
 
+    const std::string runId = psx::runtime::newRunId();
+
+    // Optional JSONL audit trail (opt-in via --audit-log). An unwritable path
+    // degrades to no audit with a warning; it never aborts the run.
+    std::unique_ptr<psx::audit::AuditLog> audit;
+    if (!invocation.auditPath.empty()) {
+        audit = std::make_unique<psx::audit::AuditLog>(invocation.auditPath);
+        if (!audit->ok()) {
+            err << "pipeshellx run: warning: cannot open audit log " << invocation.auditPath << "\n";
+            audit.reset();
+        } else {
+            audit->runStarted(runId, remoteCommand, clients.size());
+        }
+    }
+
     auto sink = makeSink(invocation, out, err, colourTty);
     ProcessManager manager;
-    const std::string runId = psx::runtime::newRunId();
     const LogContext context{
         .pid = psx::os::currentProcessId(), .sessionId = "run", .command = remoteCommand, .runId = runId};
     const auto result = manager.executeRemote(clients, remoteCommand, context,
@@ -261,10 +278,32 @@ int runSubcommand(const RunInvocation& invocation, std::ostream& out, std::ostre
                                                .cancellable = true,
                                                .failFast = invocation.failFast,
                                                .maxRetries = invocation.retries});
-    if (result.cancelled) {
-        return kExitCancelled; // 130
+    const int exitCode = result.cancelled ? kExitCancelled : (result.exitCode == 0 ? 0 : 1);
+
+    if (audit) {
+        std::size_t succeeded = 0;
+        for (std::size_t i = 0; i < result.clientResults.size(); ++i) {
+            const auto& stage = result.clientResults[i];
+            const bool ok = stage.exitCode == 0 && !stage.timedOut && !stage.cancelled && !stage.aborted &&
+                            stage.errorMessage.empty();
+            succeeded += ok ? 1 : 0;
+            audit->stageFinished(runId, psx::audit::StageRecord{.host = stage.clientId,
+                                                                .stageId = "s" + std::to_string(i),
+                                                                .exitCode = stage.exitCode,
+                                                                .attempts = stage.attempts,
+                                                                .timedOut = stage.timedOut,
+                                                                .cancelled = stage.cancelled,
+                                                                .aborted = stage.aborted,
+                                                                .droppedBytes = stage.droppedBytes,
+                                                                .error = stage.errorMessage});
+        }
+        audit->runFinished(runId, psx::audit::RunRecord{.total = result.clientResults.size(),
+                                                        .succeeded = succeeded,
+                                                        .failed = result.clientResults.size() - succeeded,
+                                                        .cancelled = result.cancelled,
+                                                        .exitCode = exitCode});
     }
-    return result.exitCode == 0 ? 0 : 1;
+    return exitCode;
 }
 
 } // namespace psx::cli

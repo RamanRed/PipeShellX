@@ -1,51 +1,10 @@
 #include "psx/sink/json_sink.hpp"
 
-#include <cstdio>
+#include "psx/json/json.hpp"
 
 namespace psx::sink {
 
 namespace {
-
-// Minimal RFC 8259 string escaping into a JSON double-quoted string.
-std::string jsonString(std::string_view value) {
-    std::string out = "\"";
-    out.reserve(value.size() + 2);
-    for (const char c : value) {
-        switch (c) {
-            case '"':
-                out += "\\\"";
-                break;
-            case '\\':
-                out += "\\\\";
-                break;
-            case '\n':
-                out += "\\n";
-                break;
-            case '\r':
-                out += "\\r";
-                break;
-            case '\t':
-                out += "\\t";
-                break;
-            case '\b':
-                out += "\\b";
-                break;
-            case '\f':
-                out += "\\f";
-                break;
-            default:
-                if (static_cast<unsigned char>(c) < 0x20) {
-                    char buffer[8];
-                    std::snprintf(buffer, sizeof(buffer), "\\u%04x", static_cast<unsigned char>(c));
-                    out += buffer;
-                } else {
-                    out += c;
-                }
-        }
-    }
-    out += '"';
-    return out;
-}
 
 void appendLine(std::string& text, std::string_view line) {
     if (!text.empty()) {
@@ -65,11 +24,11 @@ void JsonSink::stageFinished(std::string_view stage, const StageResult& result) 
     const std::string key(stage);
     Buffered& buffered = buffers_[key];
 
-    out_ << "{\"stage\":" << jsonString(stage) << ",\"exit\":" << result.exitCode
+    out_ << "{\"stage\":" << psx::json::quote(stage) << ",\"exit\":" << result.exitCode
          << ",\"timed_out\":" << (result.timedOut ? "true" : "false")
-         << ",\"error\":" << jsonString(result.errorMessage) << ",\"dropped\":" << result.droppedBytes
-         << ",\"stdout\":" << jsonString(buffered.stdoutText) << ",\"stderr\":" << jsonString(buffered.stderrText)
-         << "}\n";
+         << ",\"error\":" << psx::json::quote(result.errorMessage) << ",\"dropped\":" << result.droppedBytes
+         << ",\"stdout\":" << psx::json::quote(buffered.stdoutText)
+         << ",\"stderr\":" << psx::json::quote(buffered.stderrText) << "}\n";
     buffers_.erase(key);
 }
 
