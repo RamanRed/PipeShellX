@@ -54,7 +54,8 @@ const char* kTopUsage = R"(Usage: pipeshellx <command> [options]
 
 Commands:
   run    [-i FILE] [-g GROUP|-t TAG|-H h1,h2] [--stream|--group|--json]
-         [--timeout S] [--no-color] -- <command...>   run a command on hosts
+         [-c N] [--timeout S] [--policy P] [--ring SIZE] [--no-color]
+         -- <command...>                              run a command on hosts
   ping   [-i FILE] [-g GROUP|-t TAG|-H h1,h2] [--timeout S]   probe reachability
   hosts  [-i FILE]                                     list inventory hosts
   shell  [--verbose] [--log-file PATH]                 interactive REPL (default)

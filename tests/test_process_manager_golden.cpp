@@ -13,6 +13,8 @@
 #include "psx/sink/stream_sink.hpp"
 #include "test_support.hpp"
 
+#include "psx/stream/bounded_buffer.hpp"
+
 #include <chrono>
 #include <sstream>
 
@@ -300,4 +302,48 @@ TEST_F(GoldenRemoteTest, TimeoutWithPendingWorkersDoesNotHang) {
     EXPECT_TRUE(result.timedOut);
     EXPECT_EQ(result.clientResults.size(), 6U);
     EXPECT_LT(elapsed, std::chrono::seconds(4)) << "must not wait for the un-spawned workers";
+}
+
+// --- Bounded output capture (--policy / --ring): flat RSS for streaming ---
+
+TEST_F(GoldenRemoteTest, DropOldestRingBoundsTheCapturedOutput) {
+    // `big` writes 200000 'o' to stdout and 100000 'e' to stderr. A 64 KiB ring
+    // with drop-oldest keeps only the newest 65536 bytes of each; the rest is
+    // dropped and counted.
+    auto result = pm_.executeRemote({client("u", "h")}, "big", context("big"), 20, nullptr, 1,
+                                    psx::stream::OverflowPolicy::DropOldest, 65536);
+    ASSERT_EQ(result.clientResults.size(), 1U);
+    EXPECT_EQ(result.clientResults[0].stdoutData.size(), 65536U);
+    EXPECT_EQ(result.clientResults[0].stderrData.size(), 65536U);
+    EXPECT_EQ(result.clientResults[0].droppedBytes, (200000U - 65536U) + (100000U - 65536U));
+}
+
+TEST_F(GoldenRemoteTest, DropNewestRingKeepsTheOldestBytes) {
+    auto result = pm_.executeRemote({client("u", "h")}, "big", context("big"), 20, nullptr, 1,
+                                    psx::stream::OverflowPolicy::DropNewest, 65536);
+    EXPECT_EQ(result.clientResults[0].stdoutData.size(), 65536U);
+    EXPECT_EQ(result.clientResults[0].droppedBytes, (200000U - 65536U) + (100000U - 65536U));
+}
+
+TEST_F(GoldenRemoteTest, BlockPolicyIgnoresTheRingAndCapturesEverything) {
+    auto result = pm_.executeRemote({client("u", "h")}, "big", context("big"), 20, nullptr, 1,
+                                    psx::stream::OverflowPolicy::Block, 65536);
+    EXPECT_EQ(result.clientResults[0].stdoutData.size(), 200000U);
+    EXPECT_EQ(result.clientResults[0].droppedBytes, 0U);
+}
+
+TEST_F(GoldenRemoteTest, ADropRingStillStreamsEveryByteToTheSink) {
+    // The sink sees the full output live even though the Result capture is
+    // capped — the ring bounds memory, not the stream.
+    std::ostringstream out;
+    std::ostringstream err;
+    psx::sink::StreamSink sink(out, err, false);
+    pm_.executeRemote({client("u", "h")}, "big", context("big"), 20, &sink, 1, psx::stream::OverflowPolicy::DropOldest,
+                      4096);
+    // 200000 'o' with no newline -> one host-tagged line of exactly that length.
+    const std::string prefix = "[u@h] ";
+    ASSERT_EQ(out.str().rfind(prefix, 0), 0U);
+    EXPECT_EQ(out.str().size(), prefix.size() + 200000U + 1U) << "sink received all 200000 bytes";
+    // The summary reports drops.
+    EXPECT_NE(err.str().find("dropped"), std::string::npos) << err.str();
 }

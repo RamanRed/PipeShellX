@@ -40,10 +40,13 @@ Between the remote process and the sink sit the L2 primitives
 - `Stream` — the `Open → HalfClosed → Closed` state machine that ties a bounded
   buffer to EOF/half-close; `writable()` is the backpressure signal.
 
-Wiring the bounded buffer into the run so that `--stream` keeps a flat
-controller RSS under a slow downstream (the §5.1 exit criterion) is the
-remaining piece of the streaming milestone; today output is streamed to the
-sink live but also captured unbounded in the run Result.
+`pipeshellx run --policy drop-oldest|drop-newest --ring SIZE` (e.g. `1MiB`,
+`256KiB`, `4096`) bounds the per-host output the run captures: with `--stream`
+the sink already holds nothing, so a bounded ring keeps the controller's RSS
+flat under an endless command like `tail -F` (drops are counted and reported
+in the summary). `--group`/`--json` still buffer each stage's full output by
+design (you asked for the complete block/object). The default `block` policy
+captures everything.
 
 ## Running
 

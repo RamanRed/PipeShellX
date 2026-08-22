@@ -70,8 +70,9 @@ struct Worker {
     bool stdinClosed = false;
     bool exited = false;
     bool timedOut = false;
-    bool counted = false; // WorkerRun: already subtracted from the remaining count
-    bool spawned = false; // WorkerRun: spawnFn has been invoked for this worker
+    std::uint64_t droppedBytes = 0; // bytes discarded from stdout/stderr by the ring
+    bool counted = false;           // WorkerRun: already subtracted from the remaining count
+    bool spawned = false;           // WorkerRun: spawnFn has been invoked for this worker
 
     bool complete() const noexcept { return exited && stdoutClosed && stderrClosed && stdinClosed; }
 
@@ -109,9 +110,13 @@ public:
               int timeoutSec,
               psx::sink::Sink* sink,
               std::size_t concurrency,
-              std::function<void(std::size_t)> spawn)
+              std::function<void(std::size_t)> spawn,
+              psx::stream::OverflowPolicy policy,
+              std::size_t ringBytes)
         : reactor_(reactor), workers_(workers), timeoutSec_(timeoutSec), sink_(sink),
-          concurrency_(concurrency == 0 ? workers.size() : concurrency), spawn_(std::move(spawn)) {}
+          concurrency_(concurrency == 0 ? workers.size() : concurrency), spawn_(std::move(spawn)),
+          // Block (or a 0 ring) captures everything; a drop policy bounds it.
+          outputCap_(policy == psx::stream::OverflowPolicy::Block ? 0 : ringBytes), outputPolicy_(policy) {}
 
     // The reactor is cached and reused across runs; a timer left in it after
     // this WorkerRun is destroyed would fire into freed memory. Cancel any
@@ -260,6 +265,16 @@ private:
             }
         }
 
+        if (outputCap_ != 0 && data.size() > outputCap_) {
+            const std::size_t over = data.size() - outputCap_;
+            if (outputPolicy_ == psx::stream::OverflowPolicy::DropOldest) {
+                data.erase(0, over); // keep the newest ring
+            } else {
+                data.resize(outputCap_); // DropNewest: keep the oldest ring
+            }
+            worker.droppedBytes += over;
+        }
+
         if (data.size() > before && Logger::getInstance().enabled(LogLevel::DEBUG)) {
             Logger::getInstance().log(LogLevel::DEBUG, worker.context,
                                       "Read " + std::to_string(data.size() - before) +
@@ -378,6 +393,8 @@ private:
     std::size_t remaining_ = 0;
     std::size_t nextToSpawn_ = 0;
     std::size_t inFlight_ = 0;
+    std::size_t outputCap_ = 0;
+    psx::stream::OverflowPolicy outputPolicy_ = psx::stream::OverflowPolicy::Block;
     bool filling_ = false;
     psx::runtime::TimerId deadlineTimer_ = 0;
     psx::runtime::TimerId drainTimer_ = 0;
@@ -481,7 +498,7 @@ ProcessManager::Result ProcessManager::execute(const std::vector<std::string>& a
         }
     };
 
-    WorkerRun run(reactor(), workers, timeoutSec, nullptr, 1, spawnLocal);
+    WorkerRun run(reactor(), workers, timeoutSec, nullptr, 1, spawnLocal, psx::stream::OverflowPolicy::Block, 0);
     run.run();
 
     Logger::getInstance().log(worker.exitCode() == 0 ? LogLevel::INFO : LogLevel::ERROR, context,
@@ -495,7 +512,9 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
                                                      const LogContext& context,
                                                      int timeoutSec,
                                                      psx::sink::Sink* sink,
-                                                     std::size_t concurrency) {
+                                                     std::size_t concurrency,
+                                                     psx::stream::OverflowPolicy policy,
+                                                     std::size_t ringBytes) {
     if (clients.empty()) {
         throw std::runtime_error("no clients configured for remote execution");
     }
@@ -547,7 +566,7 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
         // passwordPipe closes here: only the child holds the secret now.
     };
 
-    WorkerRun run(reactor(), workers, timeoutSec, sink, concurrency, spawnRemote);
+    WorkerRun run(reactor(), workers, timeoutSec, sink, concurrency, spawnRemote, policy, ringBytes);
     run.run();
 
     std::vector<ClientResult> clientResults;
@@ -563,7 +582,8 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
                                              std::move(worker.stdoutData),
                                              std::move(worker.stderrData),
                                              {},
-                                             worker.timedOut});
+                                             worker.timedOut,
+                                             worker.droppedBytes});
     }
 
     for (std::size_t index = 0; index < clientResults.size(); ++index) {
@@ -575,15 +595,17 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
 
     if (sink != nullptr) {
         std::size_t succeeded = 0;
+        std::uint64_t totalDropped = 0;
         for (const auto& clientResult : clientResults) {
             const bool ok = clientResult.exitCode == 0 && !clientResult.timedOut && clientResult.errorMessage.empty();
             succeeded += ok ? 1 : 0;
-            sink->stageFinished(
-                clientResult.clientId,
-                psx::sink::StageResult{clientResult.exitCode, clientResult.timedOut, clientResult.errorMessage, 0});
+            totalDropped += clientResult.droppedBytes;
+            sink->stageFinished(clientResult.clientId,
+                                psx::sink::StageResult{clientResult.exitCode, clientResult.timedOut,
+                                                       clientResult.errorMessage, clientResult.droppedBytes});
         }
-        sink->runFinished(psx::sink::RunSummary{clientResults.size(), succeeded, clientResults.size() - succeeded, 0,
-                                                /*cancelled=*/false});
+        sink->runFinished(psx::sink::RunSummary{clientResults.size(), succeeded, clientResults.size() - succeeded,
+                                                totalDropped, /*cancelled=*/false});
     }
 
     return Result{overallExitCode, formatClientResults(clientResults, true), formatClientResults(clientResults, false),

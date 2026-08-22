@@ -2,6 +2,7 @@
 
 #include "client_config.hpp"
 #include "logger.hpp"
+#include "psx/stream/bounded_buffer.hpp" // OverflowPolicy
 #include "ssh_auth.hpp"
 
 #include <cstddef>
@@ -29,6 +30,7 @@ public:
         std::string stderrData;
         std::string errorMessage;
         bool timedOut;
+        std::uint64_t droppedBytes = 0; // bytes discarded by a drop-policy ring
     };
 
     struct Result {
@@ -61,12 +63,18 @@ public:
     // `concurrency` bounds how many workers run at once (0 = all at once,
     // the default is 64): a large fan-out spawns ssh processes in a sliding
     // window rather than all at once.
+    // `policy`/`ringBytes` bound the captured output: a drop-policy ring keeps
+    // only the newest/oldest `ringBytes` of each stream (dropped bytes counted),
+    // so `--stream` over an endless command keeps a flat controller RSS; Block
+    // (or ringBytes 0) captures everything. The sink still sees every byte live.
     Result executeRemote(const std::vector<ClientEntry>& clients,
                          const std::string& remoteCommand,
                          const LogContext& context,
                          int timeoutSec = 0,
                          psx::sink::Sink* sink = nullptr,
-                         std::size_t concurrency = 64);
+                         std::size_t concurrency = 64,
+                         psx::stream::OverflowPolicy policy = psx::stream::OverflowPolicy::Block,
+                         std::size_t ringBytes = 0);
 
 private:
     psx::runtime::Reactor& reactor();

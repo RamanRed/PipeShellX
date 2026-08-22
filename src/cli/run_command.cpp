@@ -56,6 +56,48 @@ void setSelector(Selector& selector, SelectorKind kind, const std::string& raw) 
     }
 }
 
+psx::stream::OverflowPolicy parsePolicy(const std::string& value) {
+    if (value == "block") {
+        return psx::stream::OverflowPolicy::Block;
+    }
+    if (value == "drop-oldest") {
+        return psx::stream::OverflowPolicy::DropOldest;
+    }
+    if (value == "drop-newest") {
+        return psx::stream::OverflowPolicy::DropNewest;
+    }
+    throw CliError("--policy must be block, drop-oldest or drop-newest, got '" + value + "'");
+}
+
+// Parses a byte size: a decimal count with an optional K/M/G or KiB/MiB/GiB
+// (binary) suffix. "1MiB" == "1M" == 1048576.
+std::size_t parseSize(const std::string& value) {
+    std::size_t i = 0;
+    while (i < value.size() && (value[i] >= '0' && value[i] <= '9')) {
+        ++i;
+    }
+    if (i == 0) {
+        throw CliError("--ring expects a size like 1MiB, got '" + value + "'");
+    }
+    std::size_t count = 0;
+    const auto* digitsEnd = value.data() + i;
+    (void)std::from_chars(value.data(), digitsEnd, count);
+    std::string suffix = value.substr(i);
+    std::size_t multiplier = 1;
+    if (suffix.empty() || suffix == "B") {
+        multiplier = 1;
+    } else if (suffix == "K" || suffix == "KiB") {
+        multiplier = 1024;
+    } else if (suffix == "M" || suffix == "MiB") {
+        multiplier = 1024ULL * 1024;
+    } else if (suffix == "G" || suffix == "GiB") {
+        multiplier = 1024ULL * 1024 * 1024;
+    } else {
+        throw CliError("--ring: unknown size suffix '" + suffix + "'");
+    }
+    return count * multiplier;
+}
+
 void setSink(RunInvocation& invocation, SinkMode mode, bool& sinkSet) {
     if (sinkSet) {
         throw CliError("only one of --stream/--group/--json may be given");
@@ -98,6 +140,10 @@ RunInvocation parseRun(const std::vector<std::string>& args) {
             invocation.timeoutSec = parseIntArg(valueFor(i, arg), "--timeout");
         } else if (arg == "-c" || arg == "--concurrency") {
             invocation.concurrency = parseIntArg(valueFor(i, arg), "--concurrency");
+        } else if (arg == "--policy") {
+            invocation.policy = parsePolicy(valueFor(i, arg));
+        } else if (arg == "--ring") {
+            invocation.ringBytes = parseSize(valueFor(i, arg));
         } else if (arg == "--stream") {
             setSink(invocation, SinkMode::Stream, sinkSet);
         } else if (arg == "--group") {
@@ -168,7 +214,8 @@ int runSubcommand(const RunInvocation& invocation, std::ostream& out, std::ostre
     ProcessManager manager;
     const LogContext context{psx::os::currentProcessId(), "run", "-", remoteCommand};
     const auto result = manager.executeRemote(clients, remoteCommand, context, invocation.timeoutSec, sink.get(),
-                                              static_cast<std::size_t>(invocation.concurrency));
+                                              static_cast<std::size_t>(invocation.concurrency), invocation.policy,
+                                              invocation.ringBytes);
     return result.exitCode == 0 ? 0 : 1;
 }
 

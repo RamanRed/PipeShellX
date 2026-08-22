@@ -4,6 +4,9 @@
 // (PLAN.md Appendix A). Kept separate from execution so the argument grammar
 // is unit-tested on its own.
 
+#include "psx/stream/bounded_buffer.hpp"
+
+#include <cstddef>
 #include <ostream>
 #include <stdexcept>
 #include <string>
@@ -30,7 +33,9 @@ struct RunInvocation {
     Selector selector;
     SinkMode sink = SinkMode::Group;
     int timeoutSec = 0;
-    int concurrency = 64;             // -c / --concurrency: workers in flight (0 = all at once)
+    int concurrency = 64; // -c / --concurrency: workers in flight (0 = all at once)
+    psx::stream::OverflowPolicy policy = psx::stream::OverflowPolicy::Block; // --policy
+    std::size_t ringBytes = 0;        // --ring SIZE (0 = unbounded capture, the default)
     bool colour = true;               // --no-color turns it off
     std::vector<std::string> command; // the argv after `--`
 };

@@ -2,6 +2,8 @@
 
 #include "psx/cli/run_command.hpp"
 
+#include "psx/stream/bounded_buffer.hpp"
+
 #include <stdexcept>
 #include <vector>
 
@@ -44,6 +46,21 @@ TEST(ParseRunTest, SinkModesAndInventoryAndTimeout) {
     EXPECT_EQ(inv.inventoryPath, "/etc/fleet.ini");
     EXPECT_EQ(inv.timeoutSec, 30);
     EXPECT_THROW(static_cast<void>(parseRun({"--stream", "--json", "--", "id"})), std::runtime_error); // one sink only
+}
+
+TEST(ParseRunTest, PolicyAndRingFlags) {
+    using psx::stream::OverflowPolicy;
+    EXPECT_EQ(psx::cli::parseRun({"--", "id"}).policy, OverflowPolicy::Block);
+    EXPECT_EQ(psx::cli::parseRun({"--", "id"}).ringBytes, 0U);
+    EXPECT_EQ(psx::cli::parseRun({"--policy", "drop-oldest", "--", "id"}).policy, OverflowPolicy::DropOldest);
+    EXPECT_EQ(psx::cli::parseRun({"--policy", "drop-newest", "--", "id"}).policy, OverflowPolicy::DropNewest);
+    EXPECT_EQ(psx::cli::parseRun({"--ring", "1MiB", "--", "id"}).ringBytes, 1024U * 1024);
+    EXPECT_EQ(psx::cli::parseRun({"--ring", "256KiB", "--", "id"}).ringBytes, 256U * 1024);
+    EXPECT_EQ(psx::cli::parseRun({"--ring", "2M", "--", "id"}).ringBytes, 2U * 1024 * 1024);
+    EXPECT_EQ(psx::cli::parseRun({"--ring", "4096", "--", "id"}).ringBytes, 4096U);
+    EXPECT_THROW(static_cast<void>(psx::cli::parseRun({"--policy", "nope", "--", "id"})), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(psx::cli::parseRun({"--ring", "1XB", "--", "id"})), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(psx::cli::parseRun({"--ring", "big", "--", "id"})), std::runtime_error);
 }
 
 TEST(ParseRunTest, ConcurrencyFlag) {
