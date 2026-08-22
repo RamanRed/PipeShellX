@@ -61,6 +61,7 @@ add_library(pipeshellx_lib
     transport/frame_codec.cpp
     transport/open_request.cpp
     transport/control_payloads.cpp
+    transport/session.cpp
     cli/hosts_command.cpp
     cli/ping_command.cpp
     cli/selection.cpp
