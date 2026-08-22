@@ -236,7 +236,9 @@ private:
         }
         // Fully finished one attempt: retry a transient transport failure (unless
         // the run is being cancelled) before counting it as done.
-        if (!cancelled_ && worker.attempt < maxRetries_ && retryable(worker)) {
+        // A fail-fast/cancel teardown must finalize this worker, never start a
+        // fresh retry: `aborted_`/`cancelled_` both suppress the reschedule.
+        if (!cancelled_ && !aborted_ && worker.attempt < maxRetries_ && retryable(worker)) {
             scheduleRetry(worker);
             return;
         }
@@ -281,6 +283,16 @@ private:
     void onRetry(std::size_t index) {
         retryTimers_.erase(index);
         Worker& worker = workers_[index];
+        // A teardown may have finalized this worker already. The reactor collects
+        // all due timers into one batch before running any, and cancel() cannot
+        // pull a handler out of that batch — so a deadline co-scheduled with this
+        // retry runs first, teardown counts the worker, and cancelling our timer
+        // is a no-op. Resurrecting a counted worker would double-count it (hang)
+        // or leave live I/O handlers in the cached reactor (use-after-free). If it
+        // is already counted, the retry is void.
+        if (worker.counted) {
+            return;
+        }
         worker.awaitingRetry = false;
         if (cancelled_) {
             // Cancelled while backing off: this attempt is the last, as cancelled.

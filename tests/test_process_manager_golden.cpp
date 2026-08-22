@@ -427,3 +427,46 @@ TEST_F(GoldenRemoteTest, WithoutFailFastEveryWorkerStillRuns) {
         EXPECT_EQ(stage.attempts, 1);
     }
 }
+
+// --- Review regressions: retries × teardown must not resurrect a worker ---
+
+// A fail-fast abort of a sibling that is mid-backoff must finalize it as aborted,
+// not reschedule and re-run it. (account()'s retry guard must honour aborted_.)
+TEST_F(GoldenRemoteTest, FailFastAbortsASiblingThatIsMidRetryBackoff) {
+    // `byhost`: the "flap" host fails transiently (retryable, enters a long
+    // backoff); the "deny" host sleeps then exits 1 (a final failure) and trips
+    // --fail-fast while flap is still backing off.
+    std::vector<ClientEntry> clients{client("u", "flap"), client("u", "deny")};
+    const auto start = std::chrono::steady_clock::now();
+    auto result = pm_.executeRemote(clients, "byhost", context("byhost"),
+                                    {.timeoutSec = 20,
+                                     .concurrency = 2,
+                                     .cancellable = false,
+                                     .failFast = true,
+                                     .maxRetries = 3,
+                                     .retryBaseDelay = 2000ms,
+                                     .retryMaxDelay = 4000ms});
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    ASSERT_EQ(result.clientResults.size(), 2U);
+    EXPECT_NE(result.exitCode, 0);
+    EXPECT_TRUE(result.clientResults[0].aborted) << "the flapping sibling must be aborted, not re-run";
+    EXPECT_EQ(result.clientResults[1].exitCode, 1); // deny: the fail-fast trigger
+    // A resurrected retry would have added ~2 s of backoff; aborting ends promptly.
+    EXPECT_LT(elapsed, std::chrono::milliseconds(1500)) << "the aborted sibling was re-run instead of aborted";
+}
+
+// A retry whose backoff timer comes due in the same reactor batch as the run
+// deadline must not resurrect the worker the deadline already finalized. With
+// short backoffs inside a 1 s deadline, a retry timer routinely co-batches with
+// the deadline; the run must still terminate promptly with a timed-out result.
+TEST_F(GoldenRemoteTest, RetryBackoffColludingWithTheDeadlineStillTerminates) {
+    const auto start = std::chrono::steady_clock::now();
+    auto result =
+        pm_.executeRemote({client("u", "h")}, "refused", context("refused"),
+                          {.timeoutSec = 1, .maxRetries = 8, .retryBaseDelay = 150ms, .retryMaxDelay = 1200ms});
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    ASSERT_EQ(result.clientResults.size(), 1U);
+    EXPECT_TRUE(result.timedOut); // the deadline finalized it
+    EXPECT_TRUE(result.clientResults[0].timedOut);
+    EXPECT_LT(elapsed, std::chrono::seconds(4)) << "the run hung (worker resurrected past its final count)";
+}

@@ -159,6 +159,11 @@ case "$cmd" in
   echo)     shift; printf '%s\n' "$*"; exit 0 ;;
   slow)     sleep 0.3; echo "host=$target"; exit 0 ;;
   flaky)    f="${PSX_FLAKY_FILE:-flaky.count}"; n=$(cat "$f" 2>/dev/null || echo 0); n=$((n+1)); printf '%s' "$n" > "$f"; if [ "$n" -ge "${PSX_FLAKY_OK_ON:-2}" ]; then echo "host=$target"; exit 0; else echo "ssh: connect to host $target port 22: Connection refused" >&2; exit 255; fi ;;
+  byhost)   case "$target" in
+              *flap*) echo "ssh: connect to host $target port 22: Connection refused" >&2; exit 255 ;;
+              *deny*) sleep "${PSX_DENY_SLEEP:-0.3}"; echo "boom" >&2; exit 1 ;;
+              *)      echo "host=$target"; exit 0 ;;
+            esac ;;
   *)        echo "fake ssh: unknown command '$last'" >&2; exit 9 ;;
 esac
 )sh");
