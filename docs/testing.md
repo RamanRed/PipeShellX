@@ -12,9 +12,11 @@ be silently skipped. Each `TEST` is registered with CTest individually through
 | `test_cli_options.cpp` | `--verbose`, `--log-file` (both forms), `--version`, `--help`, rejection of unknown or incomplete arguments |
 | `test_client_config.cpp` | `clients.txt` parsing (legacy and `ssh://` forms), password rejection, duplicate detection, per-inventory `known_hosts` derivation, `ClientManager::addClient` persisting without secrets |
 | `test_command_executor.cpp` | allowlist (`top` rejected, `hostname` accepted), explicit paths, shell metacharacters, length bounds, quoting, exit-code propagation |
-| `test_ipc.cpp` | `Pipe` write/read, non-blocking mode, error handling |
 | `test_logger.cpp` | line format, level filtering, console mirror, stderr fallback, unwritable paths, parent-directory creation, default log path resolution, 4-thread interleaving check |
 | `test_process_manager.cpp` | local execution, invalid command, timeout; regression: fast remote failure is not a timeout; hung worker (silent loopback listener) does time out; timeout SIGKILLs the whole process group (grandchild holding the pipes); a holder outside the group is abandoned after the 2 s drain grace |
+| `test_process_manager_golden.cpp` | the v0.1.0 behavioural contract of `ProcessManager` (output capture, remote grouping, error classes, password over a descriptor, timeouts) verified against a fake `ssh`/`sshpass` on `PATH` |
+| `unit/os/*.cpp` | the shared `psx::os` suite: `Result`, `Handle` (CLOEXEC audit, 10 k cycles), `Pipe`, `Process` (`posix_spawn`, limits, groups, EINTR injection, soak), `Poller` per backend, `ChildExitSource` per mode, `SignalSource` |
+| `unit/runtime/test_reactor.cpp` | the `Reactor` on the poll and native backends |
 | `test_ssh_auth.cpp` | hardened `ssh` argv (`PATH` lookup, `accept-new`, `UserKnownHostsFile`, `BatchMode`, `ServerAliveInterval`), `sshpass -d <fd>` with the password never on argv, auth and host-key failure classifiers |
 
 `tests/test_support.hpp` provides `ScopedTempCwd` (runs a test in a fresh
@@ -29,11 +31,12 @@ reachability.
 
 ### IPC Tests
 
-Current coverage includes:
+Current coverage (`tests/unit/os/test_pipe.cpp`) includes:
 
-- write/read correctness
-- nonblocking behavior
-- basic error handling
+- write/read correctness and EOF as a zero-byte read
+- nonblocking reads/writes (`WouldBlock`, partial writes past the pipe capacity)
+- broken pipe reported as an error, never as `SIGPIPE`
+- non-inheritable descriptors at creation, verified by enumerating the process's descriptors
 
 ### Process Tests
 
@@ -48,7 +51,6 @@ Current coverage includes:
 Automated coverage is still missing for:
 
 - end-to-end SSH execution against a real `sshd` (the docker-compose fleet arrives in Phase 2)
-- `SessionManager` (dormant; scheduled for removal in Phase 1)
 - high-volume stress execution
 - concurrent session execution
 - zombie-process regression tests

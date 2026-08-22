@@ -1,15 +1,21 @@
 #pragma once
 
-#include <array>
-#include <string>
-#include <vector>
-#include <sys/types.h>
-#include <signal.h>
-
 #include "client_config.hpp"
 #include "logger.hpp"
 #include "ssh_auth.hpp"
 
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace psx::runtime {
+class Reactor;
+}
+
+// Runs allowlisted commands locally, or one `ssh` worker per client, and
+// collects their output. Built on psx::os::Process + psx::runtime::Reactor:
+// no fork() on the hot path, every descriptor non-inheritable, child exits
+// and deadlines delivered as reactor events.
 class ProcessManager {
 public:
     struct ClientResult {
@@ -38,7 +44,9 @@ public:
     ProcessManager(ProcessManager&&) noexcept;
     ProcessManager& operator=(ProcessManager&&) noexcept;
 
-    // Execute command with arguments, optional input, timeout in seconds
+    // Execute command with arguments, optional input, timeout in seconds.
+    // exitCode is -1 for a signal-terminated child and 127 when the program
+    // could not be started (stderr then carries the reason).
     Result execute(const std::vector<std::string>& args,
                    const LogContext& context,
                    const std::string& input = "",
@@ -49,21 +57,9 @@ public:
                          int timeoutSec = 0);
 
 private:
-    pid_t childPid;
-    std::array<int, 2> stdinPipe;
-    std::array<int, 2> stdoutPipe;
-    std::array<int, 2> stderrPipe;
-
-    void setupPipes();
-    void closePipes();
-    void setNonBlocking(int fd);
-    void reapChild(bool terminateProcessGroup) noexcept;
-    static void installSigChldHandler();
-    static void sigChldHandler(int signo);
-
-    // Internal helpers
-    bool readAvailableData(int fd, std::string& output, bool& closed);
-    bool writeAvailableData(int fd, const std::string& input, std::size_t& written, bool& closed);
+    psx::runtime::Reactor& reactor();
     std::string formatClientResults(const std::vector<ClientResult>& clientResults, bool useStdout) const;
     std::string classifyRemoteError(const ClientResult& clientResult) const;
+
+    std::unique_ptr<psx::runtime::Reactor> reactor_;
 };

@@ -6,11 +6,11 @@ PipeShellX is a C++ systems programming project that demonstrates how operating 
 
 The project focuses on low-level process execution using:
 
-- `fork()` for process creation
-- unnamed pipes for IPC
-- `dup2()` for standard stream redirection
-- `execvp()` for command execution
-- `waitpid()` for process lifecycle management
+- `posix_spawn()` (with a `fork()` fallback only where `posix_spawn` cannot express a request) for process creation
+- unnamed pipes for IPC, non-inheritable at creation
+- `posix_spawn` file actions for standard stream redirection
+- `epoll` / `kqueue` / `poll` readiness demultiplexing behind one `Reactor`
+- `pidfd` / `kqueue EVFILT_PROC` for pollable child exits, `waitpid()` exactly once per child
 
 It provides an interactive terminal client, structured logging, command validation, and a process manager designed to avoid deadlocks and zombie processes.
 
@@ -26,7 +26,6 @@ The project also supports distributed execution over SSH when a `clients.txt` fi
 - Timeout-aware process execution
 - Process group cleanup on timeout or failure
 - Structured logging with timestamp, PID, session ID, and command
-- Session management abstraction for concurrent execution tracking
 - Distributed SSH execution across multiple configured clients
 - Per-client grouped output and normalized remote error reporting
 - Hardened SSH defaults: `ssh` from `PATH`, `accept-new` host keys with a per-inventory `known_hosts`, `BatchMode`, passwords handed to `sshpass` over a pipe (never on a command line)
@@ -34,15 +33,13 @@ The project also supports distributed execution over SSH when a `clients.txt` fi
 
 ## Operating System Concepts Demonstrated
 
-- Process creation with `fork()`
-- Program replacement with `execvp()`
-- Inter-process communication with unnamed pipes
-- File descriptor duplication with `dup2()`
-- Nonblocking I/O with `fcntl()`
-- Event-driven pipe monitoring with `poll()`
-- Child reaping with `waitpid()`
-- Signal handling with `SIGCHLD`
-- Resource limiting with `setrlimit()`
+- Process creation with `posix_spawn()` (and why `fork()` is avoided on the hot path)
+- Inter-process communication with unnamed pipes and the `O_CLOEXEC` invariant
+- Nonblocking I/O with `fcntl()` and edge-triggered draining
+- Event demultiplexing with `epoll`, `kqueue`, and `poll`
+- Pollable child exits with `pidfd_open()` / `EVFILT_PROC`, reaping with `waitpid()`
+- Operator signals as events via `signalfd` / `EVFILT_SIGNAL`
+- Resource limiting with `prlimit()` / `setrlimit()`
 - Process-group based termination with `kill()`
 
 ## Architecture Overview
@@ -54,17 +51,15 @@ The system is organized into a small set of focused modules:
 - `CommandExecutor`
   Parses commands, validates user input, resolves executables from trusted paths, and prepares execution context.
 - `ProcessManager`
-  Creates pipes, forks child processes, redirects stdio, executes commands, collects output, reaps child processes, and runs parallel SSH workers for distributed execution.
-- `SessionManager`
-  Tracks background command sessions using worker threads and per-session state.
+  Spawns local commands and parallel SSH workers on the `psx` runtime (`posix_spawn`, reactor-driven pipes, pollable child exits, deadlines), collects their output, and normalizes failures.
+- `psx::os` / `psx::runtime` (`include/psx/`)
+  The OS primitive layer (`Handle`, `Pipe`, `Process`, `Poller`, `ChildExitSource`, `SignalSource`) and the single-threaded `Reactor` built on it; public headers use `std::` types only, platform code lives under `src/os/posix/`.
 - `Logger`
   Provides structured logs for command execution, process lifecycle, IPC activity, and failures.
 - `ClientConfig`
   Loads and validates `clients.txt` for distributed SSH execution and derives the per-inventory `known_hosts` path.
 - `ssh_auth`
   Builds the hardened OpenSSH argument vector and classifies authentication and host-key failures.
-- `Pipe`
-  A reusable RAII pipe abstraction included as a supporting IPC utility.
 
 For more detail, see:
 
@@ -262,45 +257,48 @@ cmd> df -h
 │   ├── system_flow.md
 │   └── testing.md
 ├── include/
+│   ├── psx/                   # public, std-only headers of the new core
+│   │   ├── result.hpp         # psx::Result<T> / psx::Error (ADR-005)
+│   │   ├── os/                # Handle, Pipe, io, Process, Poller, ChildExitSource, SignalSource
+│   │   └── runtime/           # Reactor
 │   ├── cli_options.hpp
 │   ├── client_config.hpp
 │   ├── client_manager.hpp
 │   ├── command_executor.hpp
-│   ├── ipc_engine.h
 │   ├── logger.hpp
 │   ├── process_manager.hpp
-│   ├── session_manager.hpp
 │   ├── ssh_auth.hpp
 │   └── terminal_client.hpp
 ├── src/
 │   ├── CMakeLists.txt
+│   ├── os/posix/              # the only place platform headers appear
+│   ├── runtime/               # reactor.cpp (platform-agnostic)
 │   ├── cli_options.cpp
 │   ├── client_config.cpp
 │   ├── client_manager.cpp
 │   ├── command_executor.cpp
-│   ├── ipc_engine.cpp
 │   ├── logger.cpp
 │   ├── main.cpp
 │   ├── process_manager.cpp
-│   ├── session_manager.cpp
 │   ├── ssh_auth.cpp
 │   └── terminal_client.cpp
 └── tests/
     ├── CMakeLists.txt         # GoogleTest via FetchContent; gtest_discover_tests
-    ├── test_support.hpp       # ScopedTempCwd, ScopedEnv
+    ├── test_support.hpp       # ScopedTempCwd, ScopedEnv, FakeSshOnPath, refusedLoopbackClient
+    ├── unit/os/               # shared psx::os suite (handle/pipe/process/poller/sources)
+    ├── unit/runtime/          # reactor
     ├── test_cli_options.cpp
     ├── test_client_config.cpp
     ├── test_command_executor.cpp
-    ├── test_ipc.cpp
     ├── test_logger.cpp
     ├── test_process_manager.cpp
+    ├── test_process_manager_golden.cpp
     └── test_ssh_auth.cpp
 ```
 
 ## Future Improvements
 
 - True live streaming output to the terminal callback
-- Deeper integration of `SessionManager` into the interactive runtime path
 - Configurable command policy and resource limits
 - Stronger sandboxing with seccomp, namespaces, or containers
 - Expanded automated tests for concurrency, stress, and failure injection

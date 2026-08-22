@@ -178,6 +178,5 @@ cmake --install build
 ## Known Deployment Constraints
 
 - current terminal client is interactive-first, not a daemon or network service
-- `SessionManager` exists but is not yet the primary deployment-facing orchestration layer
 - log rotation and JSON output are not implemented yet
 - sandboxing is not strong enough yet for hostile multi-tenant environments

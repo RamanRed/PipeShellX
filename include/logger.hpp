@@ -1,17 +1,17 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <fstream>
 #include <mutex>
 #include <string>
-#include <sys/types.h>
 
 // Severity in increasing order; a message is emitted when its level is at
 // least the configured threshold (see Logger::enabled).
 enum class LogLevel { DEBUG, INFO, ERROR };
 
 struct LogContext {
-    pid_t pid;
+    std::int64_t pid;
     std::string sessionId;
     std::string clientId;
     std::string command;

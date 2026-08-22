@@ -37,10 +37,8 @@ add_library(pipeshellx_lib
     client_config.cpp
     client_manager.cpp
     command_executor.cpp
-    ipc_engine.cpp
     logger.cpp
     process_manager.cpp
-    session_manager.cpp
     ssh_auth.cpp
 )
 add_library(pipeshellx::lib ALIAS pipeshellx_lib)

@@ -58,12 +58,22 @@ struct SpawnSpec {
     Stdio out;
     Stdio err;
     Limits limits;
+
+    // Handles made inheritable at fixed descriptor numbers (≥ 3) in the
+    // child, e.g. a password pipe for `sshpass -d 3`. Borrowed during spawn().
+    struct InheritedHandle {
+        const Handle* handle = nullptr;
+        int targetFd = -1;
+    };
+    std::vector<InheritedHandle> extraHandles;
 };
 
 class Process {
 public:
     // Synchronous failure for a missing program, directory, or permission:
-    // no child exists when spawn() returns an error.
+    // no reapable child exists when spawn() returns an error. (Darwin keeps
+    // a transient, self-reaping child for a few milliseconds after a failed
+    // exec; it never becomes a zombie.)
     static Result<Process> spawn(const SpawnSpec& spec);
 
     Process() noexcept = default;
@@ -80,6 +90,8 @@ public:
     // True between spawn() and the reaping wait()/tryWait() (or release()).
     bool running() const noexcept { return owns_; }
 
+    // Signals the whole process group; still valid after the leader was
+    // reaped (descendants that stayed in the group). NoSuchProcess when empty.
     Result<void> signal(StopSignal how);
 
     // Reaps the child. Cached after the first success; retries EINTR.

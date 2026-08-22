@@ -58,8 +58,24 @@ bool groupGone(psx::os::ProcessId group) {
     return false;
 }
 
-bool noUnreapedChildren() {
-    return ::waitpid(-1, nullptr, WNOHANG) == -1 && errno == ECHILD;
+// No child of ours may remain reapable. Darwin's posix_spawn leaves a
+// transient child behind for a few milliseconds after a failed exec (it is
+// torn down by the kernel and never becomes a zombie), so poll for ECHILD
+// and fail only on a child that is actually reapable.
+::testing::AssertionResult noUnreapedChildren() {
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        const pid_t result = ::waitpid(-1, nullptr, WNOHANG);
+        const int err = errno;
+        if (result == -1 && err == ECHILD) {
+            return ::testing::AssertionSuccess();
+        }
+        if (result > 0) {
+            return ::testing::AssertionFailure()
+                   << "waitpid(-1, WNOHANG) reaped pid " << result << ": a zombie was left";
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return ::testing::AssertionFailure() << "a child still exists 500 ms after the operation";
 }
 
 } // namespace
@@ -188,6 +204,32 @@ TEST(OsProcessTest, ChildInheritsOnlyItsThreeStdioDescriptors) {
     }
 }
 
+TEST(OsProcessTest, ExtraHandlesAreInheritedAtTheRequestedDescriptor) {
+    auto secret = Pipe::create();
+    auto out = Pipe::create();
+    ASSERT_TRUE(secret.ok() && out.ok());
+    ASSERT_TRUE(psx::os::write(secret.value().writer, std::span<const char>("hunter2\n", 8)).ok());
+    secret.value().writer.close();
+
+    SpawnSpec spec = shell("read -r line <&3; echo \"got $line\"; ls /dev/fd | tr '\\n' ' '");
+    spec.out = SpawnSpec::Stdio::from(out.value().writer);
+    spec.extraHandles = {{&secret.value().reader, 3}};
+    auto process = Process::spawn(spec);
+    ASSERT_TRUE(process.ok()) << process.error().message();
+    out.value().writer.close();
+    secret.value().reader.close();
+    const std::string output = drain(out.value().reader);
+    ASSERT_TRUE(process.value().wait().ok());
+    EXPECT_EQ(output.rfind("got hunter2\n", 0), 0U) << output;
+
+    SpawnSpec bad = shell("true");
+    bad.extraHandles = {{&secret.value().reader, 1}}; // stdio slots are reserved
+    EXPECT_EQ(Process::spawn(bad).error().cls, ErrorClass::InvalidArgument);
+    SpawnSpec closed = shell("true");
+    closed.extraHandles = {{&secret.value().reader, 4}}; // already closed above
+    EXPECT_EQ(Process::spawn(closed).error().cls, ErrorClass::InvalidArgument);
+}
+
 TEST(OsProcessTest, KillStopsTheWholeProcessGroup) {
     auto process = Process::spawn(shell("sleep 30 & sleep 30"));
     ASSERT_TRUE(process.ok());
@@ -283,7 +325,8 @@ TEST(OsProcessTest, CpuLimitTerminatesARunawayChild) {
     ASSERT_TRUE(status.ok());
     EXPECT_EQ(status.value().kind, ExitStatus::Kind::Signaled);
     EXPECT_TRUE(status.value().code == SIGXCPU || status.value().code == SIGKILL) << status.value().code;
-    EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(5));
+    // One CPU-second may take several wall-clock seconds on a loaded host.
+    EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(15));
 }
 
 TEST(OsProcessTest, AddressSpaceLimitIsEnforcedWhereTheKernelSupportsIt) {

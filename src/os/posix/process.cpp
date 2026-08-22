@@ -90,6 +90,39 @@ struct Argv {
     char** environment() noexcept { return envp.empty() ? environ : envp.data(); }
 };
 
+// Extra handles are dup2'd onto fixed numbers; a source that is itself one of
+// those numbers (dup2(3, 3) keeps FD_CLOEXEC) or that another dup2 would
+// clobber is first moved above the highest target.
+struct RenumberedExtras {
+    std::vector<int> sources;        // one per spec.extraHandles entry
+    std::vector<Handle> temporaries; // closed when spawn() returns
+};
+
+Result<RenumberedExtras> renumberExtras(const SpawnSpec& spec) {
+    RenumberedExtras out;
+    int maxTarget = 2;
+    for (const auto& extra : spec.extraHandles) {
+        maxTarget = extra.targetFd > maxTarget ? extra.targetFd : maxTarget;
+    }
+    for (const auto& extra : spec.extraHandles) {
+        const int source = static_cast<int>(Backend::native(*extra.handle));
+        if (source > maxTarget) {
+            out.sources.push_back(source);
+            continue;
+        }
+        int moved = -1;
+        do {
+            moved = ::fcntl(source, F_DUPFD_CLOEXEC, maxTarget + 1);
+        } while (moved == -1 && errno == EINTR);
+        if (moved == -1) {
+            return posix::fromErrno("fcntl(F_DUPFD_CLOEXEC)", errno);
+        }
+        out.temporaries.push_back(Backend::adopt(moved));
+        out.sources.push_back(moved);
+    }
+    return out;
+}
+
 int stdioSourceFd(const SpawnSpec::Stdio& stdio) noexcept {
     return stdio.handle != nullptr ? static_cast<int>(Backend::native(*stdio.handle)) : -1;
 }
@@ -116,6 +149,17 @@ Result<void> validate(const SpawnSpec& spec) {
         if (stdio->mode == SpawnSpec::Stdio::Mode::Handle &&
             (stdio->handle == nullptr || !stdio->handle->valid() || stdioSourceFd(*stdio) <= 2)) {
             return Error{ErrorClass::InvalidArgument, EBADF, "spawn(stdio)"};
+        }
+    }
+    for (std::size_t i = 0; i < spec.extraHandles.size(); ++i) {
+        const auto& extra = spec.extraHandles[i];
+        if (extra.handle == nullptr || !extra.handle->valid() || extra.targetFd <= 2) {
+            return Error{ErrorClass::InvalidArgument, EBADF, "spawn(extraHandles)"};
+        }
+        for (std::size_t j = 0; j < i; ++j) {
+            if (spec.extraHandles[j].targetFd == extra.targetFd) {
+                return Error{ErrorClass::InvalidArgument, EINVAL, "spawn(extraHandles)"};
+            }
         }
     }
     return {};
@@ -166,7 +210,7 @@ Result<void> addStdio(posix_spawn_file_actions_t& actions, const SpawnSpec::Stdi
     return Error{ErrorClass::InvalidArgument, EINVAL, "spawn(stdio)"};
 }
 
-Result<pid_t> spawnViaPosixSpawn(const SpawnSpec& spec, Argv& argv) {
+Result<pid_t> spawnViaPosixSpawn(const SpawnSpec& spec, Argv& argv, const std::vector<int>& extraSources) {
     SpawnAttributes attributes;
     if (const int rc = posix_spawn_file_actions_init(&attributes.actions); rc != 0) {
         return posix::fromErrno("posix_spawn_file_actions_init", rc);
@@ -180,6 +224,14 @@ Result<pid_t> spawnViaPosixSpawn(const SpawnSpec& spec, Argv& argv) {
     PSX_TRY(addStdio(attributes.actions, spec.in, STDIN_FILENO));
     PSX_TRY(addStdio(attributes.actions, spec.out, STDOUT_FILENO));
     PSX_TRY(addStdio(attributes.actions, spec.err, STDERR_FILENO));
+    for (std::size_t i = 0; i < spec.extraHandles.size(); ++i) {
+        // dup2 onto the target clears FD_CLOEXEC there; the source closes at exec.
+        if (const int rc =
+                posix_spawn_file_actions_adddup2(&attributes.actions, extraSources[i], spec.extraHandles[i].targetFd);
+            rc != 0) {
+            return posix::fromErrno("posix_spawn_file_actions_adddup2", rc);
+        }
+    }
 
     if (!spec.cwd.empty()) {
 #if defined(PSX_SPAWN_ADDCHDIR)
@@ -239,7 +291,7 @@ Result<void> applyLimits(pid_t pid, const Limits& limits) {
         PSX_TRY(apply(RLIMIT_CPU, *limits.cpuSeconds, "prlimit(RLIMIT_CPU)"));
     }
     if (limits.addressSpaceBytes) {
-        PSX_TRY(apply(RLIMIT_AS, *limits.addressSpaceBytes, "prlimit(RLIMIT_AS)"));
+        (void)apply(RLIMIT_AS, *limits.addressSpaceBytes, "prlimit(RLIMIT_AS)"); // advisory
     }
     if (limits.openHandles) {
         PSX_TRY(apply(RLIMIT_NOFILE, *limits.openHandles, "prlimit(RLIMIT_NOFILE)"));
@@ -258,12 +310,15 @@ Result<void> applyLimits(pid_t pid, const Limits& limits) {
     ::_exit(127);
 }
 
+// RLIMIT_AS is advisory: Darwin rejects or ignores it (PLAN.md §3.8), and a
+// refused memory cap must not prevent the program from starting.
 bool applyLimitInChild(int resource, const std::optional<std::uint64_t>& value) noexcept {
     if (!value) {
         return true;
     }
     const rlimit limit{static_cast<rlim_t>(*value), static_cast<rlim_t>(*value)};
-    return ::setrlimit(resource, &limit) == 0;
+    const bool applied = ::setrlimit(resource, &limit) == 0;
+    return applied || resource == RLIMIT_AS;
 }
 
 void wireStdioInChild(const SpawnSpec::Stdio& stdio, int target, int errorFd) noexcept {
@@ -286,7 +341,7 @@ void wireStdioInChild(const SpawnSpec::Stdio& stdio, int target, int errorFd) no
     }
 }
 
-Result<pid_t> spawnViaFork(const SpawnSpec& spec, Argv& argv) {
+Result<pid_t> spawnViaFork(const SpawnSpec& spec, Argv& argv, const std::vector<int>& extraSources) {
     int errorPipe[2] = {-1, -1};
 #if defined(__linux__)
     if (::pipe2(errorPipe, O_CLOEXEC) == -1) {
@@ -337,6 +392,11 @@ Result<pid_t> spawnViaFork(const SpawnSpec& spec, Argv& argv) {
         wireStdioInChild(spec.in, STDIN_FILENO, errorFd);
         wireStdioInChild(spec.out, STDOUT_FILENO, errorFd);
         wireStdioInChild(spec.err, STDERR_FILENO, errorFd);
+        for (std::size_t i = 0; i < spec.extraHandles.size(); ++i) {
+            if (::dup2(extraSources[i], spec.extraHandles[i].targetFd) == -1) {
+                childFail(errorFd, errno);
+            }
+        }
         environ = argv.environment();
         if (lookup) {
             ::execvp(spec.program.c_str(), argv.argv.data());
@@ -373,7 +433,12 @@ Result<Process> Process::spawn(const SpawnSpec& spec) {
 
     const bool needsFork =
         (hasLimits(spec.limits) && !kSpawnSupportsLimits) || (!spec.cwd.empty() && !kSpawnSupportsChdir);
-    Result<pid_t> spawned = needsFork ? spawnViaFork(spec, argv) : spawnViaPosixSpawn(spec, argv);
+    auto extras = renumberExtras(spec);
+    if (!extras.ok()) {
+        return extras.error();
+    }
+    Result<pid_t> spawned = needsFork ? spawnViaFork(spec, argv, extras.value().sources)
+                                      : spawnViaPosixSpawn(spec, argv, extras.value().sources);
     if (!spawned.ok()) {
         return spawned.error();
     }
@@ -418,14 +483,16 @@ Process& Process::operator=(Process&& other) noexcept {
 }
 
 Result<void> Process::signal(StopSignal how) {
-    if (!owns_) {
+    if (group_ <= 0) {
         return Error{ErrorClass::NoSuchProcess, ESRCH, "kill"};
     }
+    // The group outlives the leader: descendants that stayed in it are
+    // reachable after the leader exited and was reaped.
     const int sig = how == StopSignal::Kill ? SIGKILL : SIGTERM;
     if (::kill(-static_cast<pid_t>(group_), sig) == 0) {
         return {};
     }
-    if (errno == ESRCH && ::kill(static_cast<pid_t>(id_), sig) == 0) {
+    if (errno == ESRCH && owns_ && ::kill(static_cast<pid_t>(id_), sig) == 0) {
         return {}; // the group is gone but the leader may still be reapable
     }
     return posix::fromErrno("kill", errno);

@@ -28,7 +28,6 @@ add_executable(pipeshellx_tests
     test_cli_options.cpp
     test_client_config.cpp
     test_command_executor.cpp
-    test_ipc.cpp
     test_logger.cpp
     test_process_manager.cpp
     test_process_manager_golden.cpp
