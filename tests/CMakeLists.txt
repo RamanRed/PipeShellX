@@ -31,6 +31,7 @@ add_executable(pipeshellx_tests
     unit/os/test_system.cpp
     unit/stream/test_bounded_buffer.cpp
     unit/stream/test_credit_window.cpp
+    unit/stream/test_stream.cpp
     unit/stream/test_line_framer.cpp
     unit/runtime/test_reactor.cpp
     test_cli_options.cpp

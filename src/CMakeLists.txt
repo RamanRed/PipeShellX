@@ -8,6 +8,7 @@ else()
         stream/bounded_buffer.cpp
         stream/credit_window.cpp
         stream/line_framer.cpp
+        stream/stream.cpp
     )
     set(PIPESHELLX_OS_SOURCES
         os/posix/child_exit.cpp
