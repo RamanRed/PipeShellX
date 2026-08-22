@@ -21,6 +21,18 @@ struct SshOptions {
 // BatchMode is enabled unless a password prompt must be answered by sshpass.
 // Throws std::invalid_argument when the known_hosts path cannot be expressed
 // as an OpenSSH option value (it contains a double quote or a newline).
+// The shell that interprets the remote command line on the target host. A
+// POSIX target quotes very differently from a Windows one (cmd.exe / PowerShell),
+// so the command is assembled per the target's shell.
+enum class RemoteShell { Posix, Cmd, PowerShell };
+
+// Joins `argv` into a single remote command line, quoting each argument for the
+// given shell so the remote program receives the arguments verbatim.
+//   Posix       -> each arg in single quotes, internal ' as '\''
+//   PowerShell  -> each arg in single quotes, internal ' doubled
+//   Cmd         -> CommandLineToArgvW rules (double-quote + backslash escaping)
+std::string quoteRemoteCommand(const std::vector<std::string>& argv, RemoteShell shell = RemoteShell::Posix);
+
 std::vector<std::string> buildSshBaseArguments(const ClientEntry& client, const SshOptions& options = {});
 
 // Full argv for one remote command. A password-backed client requires

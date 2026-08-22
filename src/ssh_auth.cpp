@@ -70,6 +70,92 @@ void addOption(std::vector<std::string>& args, const std::string& option) {
 
 } // namespace
 
+namespace {
+
+// POSIX sh: 'arg' with internal ' rendered as '\'' (close, escaped quote, reopen).
+std::string quotePosixArg(const std::string& arg) {
+    std::string out = "'";
+    for (char c : arg) {
+        if (c == '\'') {
+            out += "'\\''";
+        } else {
+            out += c;
+        }
+    }
+    out += '\'';
+    return out;
+}
+
+// PowerShell: 'arg' with internal ' doubled ('' is a literal quote).
+std::string quotePowerShellArg(const std::string& arg) {
+    std::string out = "'";
+    for (char c : arg) {
+        if (c == '\'') {
+            out += "''";
+        } else {
+            out += c;
+        }
+    }
+    out += '\'';
+    return out;
+}
+
+// Windows CommandLineToArgvW quoting: leave a simple token bare, else wrap in
+// double quotes with the backslash-before-quote doubling rule so the target
+// program's argv parser recovers the argument exactly.
+std::string quoteCmdArg(const std::string& arg) {
+    const bool needsQuotes = arg.empty() || arg.find_first_of(" \t\n\v\"") != std::string::npos;
+    if (!needsQuotes) {
+        return arg;
+    }
+    std::string out = "\"";
+    std::size_t i = 0;
+    while (i < arg.size()) {
+        std::size_t backslashes = 0;
+        while (i < arg.size() && arg[i] == '\\') {
+            ++backslashes;
+            ++i;
+        }
+        if (i == arg.size()) {
+            out.append(backslashes * 2, '\\'); // escape all before the closing quote
+            break;
+        }
+        if (arg[i] == '\"') {
+            out.append(backslashes * 2 + 1, '\\'); // escape the backslashes and the quote
+            out += '\"';
+        } else {
+            out.append(backslashes, '\\');
+            out += arg[i];
+        }
+        ++i;
+    }
+    out += '\"';
+    return out;
+}
+
+} // namespace
+
+std::string quoteRemoteCommand(const std::vector<std::string>& argv, RemoteShell shell) {
+    std::string out;
+    for (std::size_t i = 0; i < argv.size(); ++i) {
+        if (i != 0) {
+            out += ' ';
+        }
+        switch (shell) {
+            case RemoteShell::Cmd:
+                out += quoteCmdArg(argv[i]);
+                break;
+            case RemoteShell::PowerShell:
+                out += quotePowerShellArg(argv[i]);
+                break;
+            case RemoteShell::Posix:
+                out += quotePosixArg(argv[i]);
+                break;
+        }
+    }
+    return out;
+}
+
 std::vector<std::string> buildSshBaseArguments(const ClientEntry& client, const SshOptions& options) {
     std::vector<std::string> args{"ssh"}; // resolved from PATH by execvp
 

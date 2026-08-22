@@ -5,6 +5,7 @@
 // is unit-tested on its own.
 
 #include "psx/stream/bounded_buffer.hpp"
+#include "ssh_auth.hpp" // RemoteShell
 
 #include <cstddef>
 #include <ostream>
@@ -35,14 +36,15 @@ struct RunInvocation {
     int timeoutSec = 0;
     int concurrency = 64; // -c / --concurrency: workers in flight (0 = all at once)
     psx::stream::OverflowPolicy policy = psx::stream::OverflowPolicy::Block; // --policy
-    std::size_t ringBytes = 0;        // --ring SIZE (0 = unbounded capture, the default)
-    std::string policyPath;           // --policy FILE: restrict the command (empty = unrestricted)
-    bool reuse = false;               // --reuse: ssh ControlMaster connection reuse
-    int retries = 0;                  // --retries N: extra attempts on a transient transport failure
-    bool failFast = false;            // --fail-fast: abort the run on the first final failure
-    std::string auditPath;            // --audit-log FILE: append a JSONL audit trail (empty = off)
-    bool colour = true;               // --no-color turns it off
-    std::vector<std::string> command; // the argv after `--`
+    std::size_t ringBytes = 0;              // --ring SIZE (0 = unbounded capture, the default)
+    std::string policyPath;                 // --policy FILE: restrict the command (empty = unrestricted)
+    bool reuse = false;                     // --reuse: ssh ControlMaster connection reuse
+    int retries = 0;                        // --retries N: extra attempts on a transient transport failure
+    RemoteShell shell = RemoteShell::Posix; // --shell: remote command quoting (posix/cmd/powershell)
+    bool failFast = false;                  // --fail-fast: abort the run on the first final failure
+    std::string auditPath;                  // --audit-log FILE: append a JSONL audit trail (empty = off)
+    bool colour = true;                     // --no-color turns it off
+    std::vector<std::string> command;       // the argv after `--`
 };
 
 // Parses the args following `run`. Throws CliError on any grammar violation.

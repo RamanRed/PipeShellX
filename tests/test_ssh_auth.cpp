@@ -221,3 +221,28 @@ TEST(SshAuthTest, RetryableFailuresAreTransientTransportOnly) {
     EXPECT_FALSE(isRetryableSshFailure("Host key verification failed."));
     EXPECT_FALSE(isRetryableSshFailure("hello from the remote command"));
 }
+
+TEST(SshAuthTest, QuoteRemoteCommandPosix) {
+    EXPECT_EQ(quoteRemoteCommand({"ls", "-la", "a b"}), "'ls' '-la' 'a b'");
+    EXPECT_EQ(quoteRemoteCommand({"it's"}), "'it'\\''s'"); // close, escaped quote, reopen
+    EXPECT_EQ(quoteRemoteCommand({}), "");
+}
+
+TEST(SshAuthTest, QuoteRemoteCommandPowerShell) {
+    EXPECT_EQ(quoteRemoteCommand({"Get-Item", "a b"}, RemoteShell::PowerShell), "'Get-Item' 'a b'");
+    EXPECT_EQ(quoteRemoteCommand({"it's"}, RemoteShell::PowerShell), "'it''s'"); // doubled quote
+}
+
+TEST(SshAuthTest, QuoteRemoteCommandCmd) {
+    // A simple token is left bare; a space forces double quotes.
+    EXPECT_EQ(quoteRemoteCommand({"whoami"}, RemoteShell::Cmd), "whoami");
+    EXPECT_EQ(quoteRemoteCommand({"echo", "a b"}, RemoteShell::Cmd), "echo \"a b\"");
+    // Backslashes are only doubled when they precede a quote or the closing quote.
+    EXPECT_EQ(quoteRemoteCommand({R"(c:\dir\file)"}, RemoteShell::Cmd), R"(c:\dir\file)");
+    EXPECT_EQ(quoteRemoteCommand({R"(c:\program files\x)"}, RemoteShell::Cmd), R"("c:\program files\x")");
+    // An embedded quote is backslash-escaped; a trailing backslash inside quotes is doubled.
+    EXPECT_EQ(quoteRemoteCommand({R"(a"b)"}, RemoteShell::Cmd), R"("a\"b")");
+    EXPECT_EQ(quoteRemoteCommand({"a b\\"}, RemoteShell::Cmd), "\"a b\\\\\"");
+    // An empty argument still produces an empty quoted token.
+    EXPECT_EQ(quoteRemoteCommand({""}, RemoteShell::Cmd), "\"\"");
+}

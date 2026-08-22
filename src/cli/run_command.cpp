@@ -13,6 +13,7 @@
 #include "psx/sink/group_sink.hpp"
 #include "psx/sink/json_sink.hpp"
 #include "psx/sink/stream_sink.hpp"
+#include "ssh_auth.hpp"
 
 #include <charconv>
 #include <filesystem>
@@ -76,6 +77,19 @@ psx::stream::OverflowPolicy parsePolicy(const std::string& value) {
         return psx::stream::OverflowPolicy::Spool;
     }
     throw CliError("--overflow must be block, drop-oldest, drop-newest or spool, got '" + value + "'");
+}
+
+RemoteShell parseShell(const std::string& value) {
+    if (value == "posix") {
+        return RemoteShell::Posix;
+    }
+    if (value == "cmd") {
+        return RemoteShell::Cmd;
+    }
+    if (value == "powershell" || value == "pwsh") {
+        return RemoteShell::PowerShell;
+    }
+    throw CliError("--shell must be posix, cmd or powershell, got '" + value + "'");
 }
 
 // Parses a byte size: a decimal count with an optional K/M/G or KiB/MiB/GiB
@@ -167,6 +181,8 @@ RunInvocation parseRun(const std::vector<std::string>& args) {
             invocation.retries = parseIntArg(valueFor(i, arg), "--retries");
         } else if (arg == "--fail-fast") {
             invocation.failFast = true;
+        } else if (arg == "--shell") {
+            invocation.shell = parseShell(valueFor(i, arg));
         } else if (arg == "--audit-log") {
             invocation.auditPath = valueFor(i, arg);
         } else if (arg == "--no-color" || arg == "--no-colour") {
@@ -225,22 +241,8 @@ int runSubcommand(const RunInvocation& invocation, std::ostream& out, std::ostre
     }
     const std::vector<ClientEntry>& clients = resolved.clients;
 
-    // Reuse the existing per-argument quoting for the remote command line.
-    std::string remoteCommand;
-    for (std::size_t i = 0; i < invocation.command.size(); ++i) {
-        if (i != 0) {
-            remoteCommand += ' ';
-        }
-        remoteCommand += '\'';
-        for (char c : invocation.command[i]) {
-            if (c == '\'') {
-                remoteCommand += "'\\''";
-            } else {
-                remoteCommand += c;
-            }
-        }
-        remoteCommand += '\'';
-    }
+    // Quote the remote command line for the target shell (POSIX by default).
+    const std::string remoteCommand = quoteRemoteCommand(invocation.command, invocation.shell);
 
     // ControlMaster reuse: a persisted master socket per user@host:port under
     // the state dir lets repeated runs skip the TCP+KEX handshake.
