@@ -725,7 +725,7 @@ Extends `docs/os_abstraction.md`, `docs/deployment.md`, `docs/testing.md`.
 - [ ] `Reactor` IOCP backend; `ChildExitSource` via job completion port; `Reactor::wake()` via `PostQueuedCompletionStatus`.
 - [ ] `SshTransport` with `ssh.exe` discovery; `%APPDATA%` config; UTF-8/VT console; CRLF option in `LineFramer`.
 - [ ] CI: `windows-latest` × {MSVC, clang-cl}; the shared `tests/unit/os/` suite passes unmodified; static CRT build.
-- [ ] `docs/windows.md`: support tiers, known differences (§4.3), service install.
+- [x] `docs/windows.md`: support tiers, known differences (§4.3), service install. _(Written; reflects T1 shipped in v0.3.0 and the T2/T3 plan. The Win32 os backend, IOCP reactor, and windows CI remain — they need a Windows toolchain, unavailable in this env.)_
 - **Exit criteria:** support tier T2 — a Windows controller runs the same integration scenarios against the Linux container fleet.
 
 ### Phase 4 — Native backplane (15–20 days) → `v0.5.0`
