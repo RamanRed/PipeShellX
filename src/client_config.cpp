@@ -13,12 +13,10 @@
 namespace {
 
 std::string trim(const std::string& value) {
-    const auto begin = std::find_if_not(value.begin(), value.end(), [](unsigned char c) {
-        return std::isspace(c) != 0;
-    });
-    const auto end = std::find_if_not(value.rbegin(), value.rend(), [](unsigned char c) {
-        return std::isspace(c) != 0;
-    }).base();
+    const auto begin =
+        std::find_if_not(value.begin(), value.end(), [](unsigned char c) { return std::isspace(c) != 0; });
+    const auto end =
+        std::find_if_not(value.rbegin(), value.rend(), [](unsigned char c) { return std::isspace(c) != 0; }).base();
 
     if (begin >= end) {
         return "";
@@ -91,7 +89,11 @@ ClientEntry parseUrlEntry(const std::string& trimmed) {
     entry.host = hostPart;
     if (!portPart.empty()) {
         try {
-            const unsigned long port = std::stoul(portPart);
+            std::size_t consumed = 0;
+            const unsigned long port = std::stoul(portPart, &consumed);
+            if (consumed != portPart.size()) {
+                throw std::runtime_error("port contains trailing characters");
+            }
             if (port == 0 || port > 65535) {
                 throw std::runtime_error("port out of range");
             }
@@ -140,8 +142,8 @@ void validateEntryFields(const ClientEntry& entry) {
     if (!std::all_of(entry.host.begin(), entry.host.end(), isValidHostChar)) {
         throw std::runtime_error("host contains invalid characters");
     }
-    if (entry.host.front() == '.' || entry.host.back() == '.' ||
-        entry.host.front() == '-' || entry.host.back() == '-') {
+    if (entry.host.front() == '.' || entry.host.back() == '.' || entry.host.front() == '-' ||
+        entry.host.back() == '-') {
         throw std::runtime_error("host has an invalid boundary character");
     }
 }
@@ -223,15 +225,12 @@ void ClientConfig::loadFromFile(const std::string& path) {
         try {
             entry = parseEntry(trimmed);
         } catch (const std::exception& ex) {
-            throw std::runtime_error(
-                "Invalid client entry at line " + std::to_string(lineNumber) + ": " + ex.what()
-            );
+            throw std::runtime_error("Invalid client entry at line " + std::to_string(lineNumber) + ": " + ex.what());
         }
 
         if (!seen.insert(entry.clientId()).second) {
-            throw std::runtime_error(
-                "Duplicate client entry at line " + std::to_string(lineNumber) + ": " + entry.clientId()
-            );
+            throw std::runtime_error("Duplicate client entry at line " + std::to_string(lineNumber) + ": " +
+                                     entry.clientId());
         }
 
         entry.knownHostsFile = knownHostsFile;

@@ -46,10 +46,6 @@ bool signalFromNumber(int number, Signal& out) noexcept {
 
 } // namespace posix
 
-Result<std::unique_ptr<SignalSource>> SignalSource::create(std::initializer_list<Signal> signals) {
-    return create(std::vector<Signal>(signals));
-}
-
 Result<std::unique_ptr<SignalSource>> SignalSource::create(const std::vector<Signal>& signals) {
     if (signals.empty()) {
         return Error{ErrorClass::InvalidArgument, EINVAL, "signal_source.create"};

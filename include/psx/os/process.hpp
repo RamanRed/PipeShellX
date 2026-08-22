@@ -46,7 +46,6 @@ struct SpawnSpec {
         Mode mode = Mode::Inherit;
         const Handle* handle = nullptr; // borrowed only for the duration of spawn()
 
-        static Stdio inherit() noexcept { return Stdio{}; }
         static Stdio null() noexcept { return Stdio{Mode::Null, nullptr}; }
         static Stdio from(const Handle& source) noexcept { return Stdio{Mode::Handle, &source}; }
     };

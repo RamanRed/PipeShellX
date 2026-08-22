@@ -1,21 +1,40 @@
 #include "psx/runtime/reactor.hpp"
 
+#include "psx/os/io.hpp"
+
 #include <algorithm>
-#include <limits>
+#include <cstdlib>
+#include <string_view>
 #include <utility>
 
 namespace psx::runtime {
 
 namespace {
 
-// The Poller reserves UINT64_MAX for its own wake-up.
-constexpr Token kChildToken = std::numeric_limits<Token>::max() - 1;
-constexpr Token kSignalToken = std::numeric_limits<Token>::max() - 2;
 constexpr std::size_t kEventBatch = 256;
 
 } // namespace
 
+os::Poller::Backend Reactor::backendFromEnvironment() {
+    const char* value = std::getenv("PIPESHELLX_POLLER");
+    const std::string_view choice = value != nullptr ? value : "";
+    if (choice == "poll") {
+        return os::Poller::Backend::Poll;
+    }
+    if (choice == "epoll") {
+        return os::Poller::Backend::Epoll;
+    }
+    if (choice == "kqueue") {
+        return os::Poller::Backend::Kqueue;
+    }
+    return os::Poller::Backend::Auto;
+}
+
 Result<std::unique_ptr<Reactor>> Reactor::create(const Options& options) {
+    // The reactor writes to child stdin pipes; a child that closes its read end
+    // must yield BrokenPipe, not SIGPIPE (which would kill the process).
+    PSX_TRY(os::ignoreBrokenPipeSignal());
+
     std::unique_ptr<Reactor> reactor(new Reactor());
 
     auto poller = os::Poller::create(options.backend);
@@ -29,7 +48,8 @@ Result<std::unique_ptr<Reactor>> Reactor::create(const Options& options) {
         return children.error();
     }
     reactor->children_ = std::move(children.value());
-    PSX_TRY(reactor->poller_->add(reactor->children_->handle(), os::Interest::Readable, kChildToken));
+    reactor->childToken_ = reactor->nextToken_++;
+    PSX_TRY(reactor->poller_->add(reactor->children_->handle(), os::Interest::Readable, reactor->childToken_));
 
     if (!options.signals.empty()) {
         auto signals = os::SignalSource::create(options.signals);
@@ -37,7 +57,8 @@ Result<std::unique_ptr<Reactor>> Reactor::create(const Options& options) {
             return signals.error();
         }
         reactor->signals_ = std::move(signals.value());
-        PSX_TRY(reactor->poller_->add(reactor->signals_->handle(), os::Interest::Readable, kSignalToken));
+        reactor->signalToken_ = reactor->nextToken_++;
+        PSX_TRY(reactor->poller_->add(reactor->signals_->handle(), os::Interest::Readable, reactor->signalToken_));
     }
 
     reactor->events_.resize(kEventBatch);
@@ -53,6 +74,10 @@ os::Poller::Backend Reactor::backend() const noexcept {
 }
 
 Result<Token> Reactor::watch(const os::Handle& handle, os::Interest interest, IoHandler handler) {
+    // The drain-until-WouldBlock discipline the handlers rely on requires a
+    // non-blocking handle; establish it here so no call site can forget (a
+    // no-op for the future completion-style backend).
+    PSX_TRY(const_cast<os::Handle&>(handle).setNonBlocking(true));
     const Token token = nextToken_++;
     PSX_TRY(poller_->add(handle, interest, token));
     io_.emplace(token, std::move(handler));
@@ -133,9 +158,9 @@ Result<void> Reactor::runOnce(std::optional<std::chrono::milliseconds> timeout) 
 
     for (std::size_t i = 0; i < ready.value(); ++i) {
         const os::Event event = events_[i];
-        if (event.token == kChildToken) {
+        if (event.token == childToken_) {
             dispatchChildren();
-        } else if (event.token == kSignalToken) {
+        } else if (signals_ && event.token == signalToken_) {
             dispatchSignals();
         } else if (auto it = io_.find(event.token); it != io_.end()) {
             // Copy: the handler may unwatch itself (destroying the stored callable).

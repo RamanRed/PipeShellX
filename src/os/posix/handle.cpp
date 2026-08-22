@@ -95,10 +95,6 @@ Result<void> Handle::setNonBlocking(bool enabled) {
     return {};
 }
 
-void Handle::swap(Handle& other) noexcept {
-    std::swap(handle_, other.handle_);
-}
-
 HandleStats handleStats() noexcept {
     const std::int64_t created = gCreated.load(std::memory_order_relaxed);
     const std::int64_t closed = gClosed.load(std::memory_order_relaxed);

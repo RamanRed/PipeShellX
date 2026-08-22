@@ -38,6 +38,13 @@ TEST(ClientConfigTest, ParsesLegacyAndUrlEntries) {
     EXPECT_EQ(url.identityFile, "/home/admin/.ssh/id_ed25519");
 }
 
+TEST(ClientConfigTest, RejectsPortWithTrailingCharacters) {
+    EXPECT_THROW(static_cast<void>(ClientConfig::parseEntry("ssh://admin@host:22junk")), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(ClientConfig::parseEntry("ssh://admin@host:0")), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(ClientConfig::parseEntry("ssh://admin@host:99999")), std::runtime_error);
+    EXPECT_EQ(ClientConfig::parseEntry("ssh://admin@host:2222").port, 2222);
+}
+
 TEST(ClientConfigTest, KnownHostsPathIsDerivedFromInventoryPath) {
     test_support::ScopedTempCwd cwd("known-hosts-path");
 

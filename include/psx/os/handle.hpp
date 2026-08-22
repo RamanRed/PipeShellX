@@ -35,8 +35,6 @@ public:
     // backends (Windows) ignore this and use overlapped I/O.
     Result<void> setNonBlocking(bool enabled);
 
-    void swap(Handle& other) noexcept;
-
 private:
     friend struct Backend;
     explicit Handle(NativeHandle handle) noexcept : handle_(handle) {}

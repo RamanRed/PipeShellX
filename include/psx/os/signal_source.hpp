@@ -11,7 +11,6 @@
 #include "psx/result.hpp"
 
 #include <cstdint>
-#include <initializer_list>
 #include <memory>
 #include <vector>
 
@@ -26,7 +25,6 @@ enum class Signal : std::uint8_t {
 
 class SignalSource {
 public:
-    static Result<std::unique_ptr<SignalSource>> create(std::initializer_list<Signal> signals);
     static Result<std::unique_ptr<SignalSource>> create(const std::vector<Signal>& signals);
 
     virtual ~SignalSource() = default;

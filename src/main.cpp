@@ -1,5 +1,6 @@
 #include "cli_options.hpp"
 #include "logger.hpp"
+#include "psx/os/io.hpp"
 #include "psx/os/system.hpp"
 #include "terminal_client.hpp"
 
@@ -26,6 +27,10 @@ int main(int argc, char** argv) {
             std::cout << cliVersionText() << '\n';
             return 0;
         }
+
+        // A child that exits before reading our stdin must not kill the
+        // controller with SIGPIPE; write() then returns BrokenPipe instead.
+        (void)psx::os::ignoreBrokenPipeSignal();
 
         auto& logger = Logger::getInstance();
         logger.setLevel(options.verbose ? LogLevel::DEBUG : LogLevel::INFO);

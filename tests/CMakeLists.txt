@@ -1,19 +1,23 @@
-# GoogleTest is always available: fetched at configure time unless the user
-# explicitly opts into a system installation. The suite can never be skipped.
+# GoogleTest is always available so the suite can never be silently skipped:
+# use an installed copy when there is one (works offline), otherwise fetch it.
+# PIPESHELLX_SYSTEM_GTEST=ON requires the installed copy and never fetches.
 if(PIPESHELLX_SYSTEM_GTEST)
     find_package(GTest REQUIRED)
 else()
-    include(FetchContent)
-    FetchContent_Declare(
-        googletest
-        GIT_REPOSITORY https://github.com/google/googletest.git
-        GIT_TAG        v1.17.0
-        GIT_SHALLOW    TRUE
-    )
-    set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
-    set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
-    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-    FetchContent_MakeAvailable(googletest)
+    find_package(GTest QUIET)
+    if(NOT GTest_FOUND)
+        include(FetchContent)
+        FetchContent_Declare(
+            googletest
+            GIT_REPOSITORY https://github.com/google/googletest.git
+            GIT_TAG        v1.17.0
+            GIT_SHALLOW    TRUE
+        )
+        set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
+        set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+        set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(googletest)
+    endif()
 endif()
 
 add_executable(pipeshellx_tests
@@ -32,6 +36,7 @@ add_executable(pipeshellx_tests
     test_logger.cpp
     test_process_manager.cpp
     test_process_manager_golden.cpp
+    test_main.cpp
     test_ssh_auth.cpp
 )
 
@@ -40,7 +45,7 @@ target_include_directories(pipeshellx_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(pipeshellx_tests PRIVATE
     pipeshellx_lib
     pipeshellx_warnings
-    GTest::gtest_main
+    GTest::gtest
 )
 
 include(GoogleTest)

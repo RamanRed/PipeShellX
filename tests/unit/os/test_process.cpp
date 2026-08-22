@@ -222,6 +222,23 @@ TEST(OsProcessTest, ExtraHandlesAreInheritedAtTheRequestedDescriptor) {
     ASSERT_TRUE(process.value().wait().ok());
     EXPECT_EQ(output.rfind("got hunter2\n", 0), 0U) << output;
 
+    // A closefrom-style spawn must not close the extra handle it just placed
+    // (regression: the glibc closefrom floor sitting below fd 3).
+    auto secret2 = Pipe::create();
+    auto out2 = Pipe::create();
+    ASSERT_TRUE(secret2.ok() && out2.ok());
+    ASSERT_TRUE(psx::os::write(secret2.value().writer, std::span<const char>("kept\n", 5)).ok());
+    secret2.value().writer.close();
+    SpawnSpec keep = shell("cat <&3");
+    keep.out = SpawnSpec::Stdio::from(out2.value().writer);
+    keep.extraHandles = {{&secret2.value().reader, 3}};
+    auto keeper = Process::spawn(keep);
+    ASSERT_TRUE(keeper.ok()) << keeper.error().message();
+    out2.value().writer.close();
+    secret2.value().reader.close();
+    EXPECT_EQ(drain(out2.value().reader), "kept\n") << "fd 3 was closed before exec";
+    ASSERT_TRUE(keeper.value().wait().ok());
+
     SpawnSpec bad = shell("true");
     bad.extraHandles = {{&secret.value().reader, 1}}; // stdio slots are reserved
     EXPECT_EQ(Process::spawn(bad).error().cls, ErrorClass::InvalidArgument);

@@ -118,6 +118,20 @@ TEST_F(GoldenRemoteTest, SshFailuresAreClassified) {
     EXPECT_EQ(pm_.executeRemote({c}, "refused", context("refused"), 10).exitCode, 255);
 }
 
+TEST_F(GoldenRemoteTest, RemoteCommandStderrIsNotMisreadAsAnSshFailure) {
+    // The remote command runs (ssh exits with the command's code, not 255) and
+    // prints text that looks like an ssh diagnostic; it must be reported as a
+    // plain command failure, never "authentication failed".
+    auto denied = pm_.executeRemote({client("u", "h")}, "fail 13:Permission denied", context("cmd"), 10);
+    ASSERT_EQ(denied.clientResults.size(), 1U);
+    EXPECT_EQ(denied.clientResults[0].exitCode, 13);
+    EXPECT_EQ(denied.clientResults[0].errorMessage, "ERROR: command failed with exit code 13");
+
+    // A genuine ssh failure (exit 255) is still classified.
+    auto refused = pm_.executeRemote({client("u", "h")}, "refused", context("ssh"), 10);
+    EXPECT_EQ(refused.clientResults[0].errorMessage, "ERROR: connection failed");
+}
+
 TEST_F(GoldenRemoteTest, PasswordReachesSshpassThroughTheDescriptor) {
     ClientEntry c = client("u", "h");
     c.password = "s3cret pa$$";

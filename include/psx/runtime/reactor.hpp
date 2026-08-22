@@ -42,6 +42,10 @@ public:
         std::vector<os::Signal> signals; // empty: no SignalSource, onSignal() is Unsupported
     };
 
+    // Backend::Auto refined by $PIPESHELLX_POLLER (poll|epoll|kqueue), else the
+    // platform's native backend. Used as the default for Options::backend.
+    static os::Poller::Backend backendFromEnvironment();
+
     static Result<std::unique_ptr<Reactor>> create(const Options& options);
     static Result<std::unique_ptr<Reactor>> create(); // default Options
 
@@ -52,8 +56,8 @@ public:
     // The backend actually in use (never Auto).
     os::Poller::Backend backend() const noexcept;
 
-    // The handle must stay open until unwatch(); non-blocking handles drain
-    // until WouldBlock inside the handler (edge-triggered discipline).
+    // The handle must stay open until unwatch(); watch() makes it non-blocking
+    // and the handler drains until WouldBlock (edge-triggered discipline).
     Result<Token> watch(const os::Handle& handle, os::Interest interest, IoHandler handler);
     Result<void> modify(Token token, os::Interest interest);
     Result<void> unwatch(Token token);
@@ -105,6 +109,8 @@ private:
     std::unordered_map<os::ProcessId, ChildHandler> childHandlers_;
     SignalHandler signalHandler_;
     std::vector<os::Event> events_;
+    Token childToken_ = 0;
+    Token signalToken_ = 0;
     Token nextToken_ = 1;
     TimerId nextTimer_ = 1;
     std::atomic<bool> stopRequested_{false};

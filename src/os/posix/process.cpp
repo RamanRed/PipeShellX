@@ -53,6 +53,21 @@ constexpr bool kSpawnSupportsLimits = true; // prlimit() after spawn
 constexpr bool kSpawnSupportsLimits = false;
 #endif
 
+// waitpid retried across EINTR.
+pid_t waitpidRetry(pid_t pid, int* status, int flags) noexcept {
+    pid_t result = -1;
+    do {
+        result = ::waitpid(pid, status, flags);
+    } while (result == -1 && errno == EINTR);
+    return result;
+}
+
+// Reaps a child we are about to discard (kill paths); status ignored.
+void reapQuietly(pid_t pid) noexcept {
+    int status = 0;
+    (void)waitpidRetry(pid, &status, 0);
+}
+
 ExitStatus decode(int status) noexcept {
     if (WIFEXITED(status)) {
         return ExitStatus{ExitStatus::Kind::Exited, WEXITSTATUS(status)};
@@ -242,8 +257,14 @@ Result<pid_t> spawnViaPosixSpawn(const SpawnSpec& spec, Argv& argv, const std::v
 #endif
     }
 #if PSX_GLIBC_AT_LEAST(2, 34)
-    // Belt and braces: every handle is CLOEXEC already.
-    if (const int rc = posix_spawn_file_actions_addclosefrom_np(&attributes.actions, 3); rc != 0) {
+    // Belt and braces: every handle is CLOEXEC already. The floor is above the
+    // extra-handle targets so this does not close a descriptor the dup2 actions
+    // above just placed (e.g. the sshpass password pipe at fd 3).
+    int closeFromFd = 3;
+    for (const auto& extra : spec.extraHandles) {
+        closeFromFd = extra.targetFd >= closeFromFd ? extra.targetFd + 1 : closeFromFd;
+    }
+    if (const int rc = posix_spawn_file_actions_addclosefrom_np(&attributes.actions, closeFromFd); rc != 0) {
         return posix::fromErrno("posix_spawn_file_actions_addclosefrom_np", rc);
     }
 #endif
@@ -270,9 +291,7 @@ Result<pid_t> spawnViaPosixSpawn(const SpawnSpec& spec, Argv& argv, const std::v
                                         argv.argv.data(), argv.environment());
     if (rc != 0) {
         if (pid > 0) {
-            // Darwin may have created a child that failed its file actions; never leave a zombie.
-            int status = 0;
-            while (::waitpid(pid, &status, 0) == -1 && errno == EINTR) {}
+            reapQuietly(pid); // Darwin may leave a child that failed its file actions
         }
         return posix::fromErrno(lookup ? "posix_spawnp" : "posix_spawn", rc);
     }
@@ -416,9 +435,7 @@ Result<pid_t> spawnViaFork(const SpawnSpec& spec, Argv& argv, const std::vector<
     ::close(errorPipe[0]);
 
     if (got == static_cast<ssize_t>(sizeof(childErrno))) {
-        // The child reported a failure and has exited; reap it so no zombie remains.
-        int status = 0;
-        while (::waitpid(pid, &status, 0) == -1 && errno == EINTR) {}
+        reapQuietly(pid); // the child reported a failure and has exited
         return posix::fromErrno(lookup ? "execvp" : "execv", childErrno);
     }
     return pid; // pipe closed by exec: success
@@ -444,15 +461,12 @@ Result<Process> Process::spawn(const SpawnSpec& spec) {
         return spawned.error();
     }
     const pid_t pid = spawned.value();
-    // Mirror the child's setpgid so kill(-pid) is valid immediately.
-    (void)::setpgid(pid, pid);
 
 #if defined(__linux__)
     if (hasLimits(spec.limits)) {
         if (auto applied = applyLimits(pid, spec.limits); !applied.ok()) {
             (void)::kill(-pid, SIGKILL);
-            int status = 0;
-            while (::waitpid(pid, &status, 0) == -1 && errno == EINTR) {}
+            reapQuietly(pid);
             return applied.error();
         }
     }
@@ -464,8 +478,7 @@ Process::~Process() {
     if (owns_) {
         (void)::kill(-static_cast<pid_t>(group_), SIGKILL);
         (void)::kill(static_cast<pid_t>(id_), SIGKILL);
-        int status = 0;
-        while (::waitpid(static_cast<pid_t>(id_), &status, 0) == -1 && errno == EINTR) {}
+        reapQuietly(static_cast<pid_t>(id_));
     }
 }
 
@@ -533,10 +546,8 @@ Result<ExitStatus> Process::wait() {
         return Error{ErrorClass::NoSuchProcess, ECHILD, "waitpid"};
     }
     int status = 0;
-    while (::waitpid(static_cast<pid_t>(id_), &status, 0) == -1) {
-        if (errno != EINTR) {
-            return posix::fromErrno("waitpid", errno);
-        }
+    if (waitpidRetry(static_cast<pid_t>(id_), &status, 0) == -1) {
+        return posix::fromErrno("waitpid", errno);
     }
     owns_ = false;
     status_ = decode(status);
@@ -551,10 +562,7 @@ Result<std::optional<ExitStatus>> Process::tryWait() {
         return Error{ErrorClass::NoSuchProcess, ECHILD, "waitpid"};
     }
     int status = 0;
-    pid_t result = -1;
-    do {
-        result = ::waitpid(static_cast<pid_t>(id_), &status, WNOHANG);
-    } while (result == -1 && errno == EINTR);
+    const pid_t result = waitpidRetry(static_cast<pid_t>(id_), &status, WNOHANG);
     if (result == -1) {
         return posix::fromErrno("waitpid", errno);
     }

@@ -144,6 +144,7 @@ prev=""; last=""
 for a in "$@"; do prev="$last"; last="$a"; done
 case "$last" in
   ok)       echo "host=$prev"; exit 0 ;;
+  fail*:*)  code="${last#fail }"; echo "${code#*:}" >&2; exit "${code%%:*}" ;;
   fail*)    echo "failing" >&2; exit "${last#fail }" ;;
   refused)  echo "ssh: connect to host $prev port 22: Connection refused" >&2; exit 255 ;;
   denied)   echo "$prev: Permission denied (publickey)." >&2; exit 255 ;;

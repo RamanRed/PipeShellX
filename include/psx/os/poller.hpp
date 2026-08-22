@@ -17,12 +17,9 @@
 
 namespace psx::os {
 
-enum class Interest : std::uint8_t { None = 0, Readable = 1, Writable = 2, ReadWrite = 3 };
+enum class Interest : std::uint8_t { None = 0, Readable = 1, Writable = 2 };
 enum class Readiness : std::uint8_t { None = 0, Readable = 1, Writable = 2, Hangup = 4, Error = 8 };
 
-constexpr Interest operator|(Interest a, Interest b) noexcept {
-    return static_cast<Interest>(static_cast<std::uint8_t>(a) | static_cast<std::uint8_t>(b));
-}
 constexpr Readiness operator|(Readiness a, Readiness b) noexcept {
     return static_cast<Readiness>(static_cast<std::uint8_t>(a) | static_cast<std::uint8_t>(b));
 }

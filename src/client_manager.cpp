@@ -91,8 +91,13 @@ void ClientManager::addClient(const std::string& specification, const std::optio
 
     clients_.push_back(ManagedClient{
         Client{nextClientId_++, entry.serialize(), entry.password, false}, entry, ClientStatus::UNKNOWN, {}, false});
-    verifyClientConnectivity(clients_.back());
-    save();
+    try {
+        verifyClientConnectivity(clients_.back());
+        save();
+    } catch (...) {
+        clients_.pop_back(); // never leave a phantom client the file does not have
+        throw;
+    }
     Logger::getInstance().log(LogLevel::INFO, addContext,
                               "Client added with status " + statusToString(clients_.back().status));
 }

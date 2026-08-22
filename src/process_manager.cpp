@@ -6,11 +6,8 @@
 #include "psx/os/process.hpp"
 #include "psx/runtime/reactor.hpp"
 
-#include <algorithm>
-#include <cctype>
 #include <chrono>
 #include <cstddef>
-#include <cstdlib>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -68,8 +65,18 @@ struct Worker {
     bool stdinClosed = false;
     bool exited = false;
     bool timedOut = false;
+    bool counted = false; // WorkerRun: already subtracted from the remaining count
 
     bool complete() const noexcept { return exited && stdoutClosed && stderrClosed && stdinClosed; }
+
+    // A worker that never started: it is immediately complete, carries the
+    // reason on stderr (v0.1.0 shape, consumed by classifyRemoteError and the
+    // REPL) and in failureMessage for the result.
+    void failToStart(std::string message) {
+        failureMessage = message;
+        stderrData = std::move(message);
+        stdoutClosed = stderrClosed = stdinClosed = exited = true;
+    }
 
     // v0.1.0 contract: exit code, -1 when signal-terminated, 127 when not started.
     int exitCode() const noexcept {
@@ -94,28 +101,29 @@ public:
     bool anyTimedOut() const noexcept { return anyTimedOut_; }
 
     void run() {
+        remaining_ = workers_.size();
         for (auto& worker : workers_) {
             arm(worker);
+            account(worker); // workers that failed to start are already complete
         }
         if (timeoutSec_ > 0) {
             reactor_.after(std::chrono::seconds(timeoutSec_), [this] { onDeadline(); });
         }
-        checkComplete();
-        if (!allComplete()) {
-            if (auto ran = reactor_.run(); !ran.ok()) {
-                fail("event loop failed", ran.error());
-            }
+        // Reactor::run() returns immediately if account() already called stop().
+        if (auto ran = reactor_.run(); !ran.ok()) {
+            fail("event loop failed", ran.error());
         }
     }
 
 private:
-    bool allComplete() const noexcept {
-        return std::all_of(workers_.begin(), workers_.end(), [](const Worker& w) { return w.complete(); });
-    }
-
-    void checkComplete() {
-        if (allComplete()) {
-            reactor_.stop();
+    // O(1) completion tracking: each worker is subtracted from `remaining_`
+    // exactly once, when it first becomes complete; the loop stops at zero.
+    void account(Worker& worker) {
+        if (!worker.counted && worker.complete()) {
+            worker.counted = true;
+            if (--remaining_ == 0) {
+                reactor_.stop();
+            }
         }
     }
 
@@ -145,7 +153,15 @@ private:
         if (auto watched =
                 reactor_.watchChild(worker.process.id(), [this, &worker](psx::os::ProcessId) { onExit(worker); });
             !watched.ok()) {
-            fail("watching child failed for " + worker.clientId, watched.error());
+            // The child can exit before we watch it (fast commands): the exit
+            // source then reports "no such process". That is not a failure —
+            // the child is already reapable, so handle its exit now. Any pipe
+            // output it left is still drained by the readable handlers above.
+            if (watched.error().cls == psx::ErrorClass::NoSuchProcess) {
+                onExit(worker);
+            } else {
+                fail("watching child failed for " + worker.clientId, watched.error());
+            }
         }
     }
 
@@ -195,7 +211,7 @@ private:
         }
         if (endOfStream) {
             closeStream(handle, token, closed);
-            checkComplete();
+            account(worker);
         }
     }
 
@@ -214,7 +230,7 @@ private:
         }
         closeStream(worker.stdinWriter, worker.stdinToken, worker.stdinClosed);
         Logger::getInstance().log(LogLevel::DEBUG, worker.context, "Finished writing command input to child stdin");
-        checkComplete();
+        account(worker);
     }
 
     void onExit(Worker& worker) {
@@ -228,7 +244,7 @@ private:
         if (Logger::getInstance().enabled(LogLevel::DEBUG)) {
             Logger::getInstance().log(LogLevel::DEBUG, worker.context, "Child process reaped");
         }
-        checkComplete();
+        account(worker);
     }
 
     void onDeadline() {
@@ -238,7 +254,13 @@ private:
             }
             worker.timedOut = true;
             anyTimedOut_ = true;
-            (void)worker.process.signal(psx::os::StopSignal::Kill); // the group, even if the leader is gone
+            // SIGKILL the whole process group so a grandchild that stayed in it
+            // dies too. This is valid while the group is non-empty (its id is
+            // not recycled until the last member exits); a descendant that left
+            // via setsid empties the group and is unreachable anyway, which the
+            // drain grace below bounds. Signalling after the leader is reaped is
+            // deliberate for the grandchild case (regression-tested).
+            (void)worker.process.signal(psx::os::StopSignal::Kill);
             Logger::getInstance().log(LogLevel::ERROR, worker.context,
                                       "Command timed out; sent SIGKILL to process group");
         }
@@ -260,13 +282,14 @@ private:
             }
             Logger::getInstance().log(LogLevel::ERROR, worker.context,
                                       "Pipes still open after the SIGKILL grace period; abandoning remaining output");
+            account(worker);
         }
-        checkComplete();
     }
 
     Reactor& reactor_;
     std::vector<Worker>& workers_;
     int timeoutSec_;
+    std::size_t remaining_ = 0;
     bool anyTimedOut_ = false;
 };
 
@@ -299,14 +322,12 @@ void spawnWorker(Worker& worker, SpawnSpec spec, bool feedInput) {
 
     auto process = Process::spawn(spec);
     if (!process.ok()) {
-        // Same shape as the v0.1.0 child-side message, so classifiers and the
-        // terminal's "command execution failed" mapping keep working.
-        worker.failureMessage =
+        // Same shape as the v0.1.0 child-side message, so the REPL's "command
+        // execution failed" mapping keeps working.
+        worker.failToStart(
             "execvp failed for " +
             (worker.clientId == "-" ? "'" + spec.program + "'" : "ssh client '" + worker.clientId + "'") + ": " +
-            process.error().message() + "\n";
-        worker.stderrData = worker.failureMessage;
-        worker.stdoutClosed = worker.stderrClosed = worker.stdinClosed = worker.exited = true;
+            process.error().message() + "\n");
         Logger::getInstance().log(LogLevel::ERROR, worker.context, worker.failureMessage);
         return;
     }
@@ -326,27 +347,10 @@ ProcessManager::~ProcessManager() = default;
 ProcessManager::ProcessManager(ProcessManager&&) noexcept = default;
 ProcessManager& ProcessManager::operator=(ProcessManager&&) noexcept = default;
 
-// Test/diagnostic hook: PIPESHELLX_POLLER=poll|epoll|kqueue forces a
-// backend; anything else (or unset) means the platform's native one.
-psx::os::Poller::Backend pollerBackendFromEnvironment() {
-    const char* value = std::getenv("PIPESHELLX_POLLER");
-    const std::string_view choice = value != nullptr ? value : "";
-    if (choice == "poll") {
-        return psx::os::Poller::Backend::Poll;
-    }
-    if (choice == "epoll") {
-        return psx::os::Poller::Backend::Epoll;
-    }
-    if (choice == "kqueue") {
-        return psx::os::Poller::Backend::Kqueue;
-    }
-    return psx::os::Poller::Backend::Auto;
-}
-
 psx::runtime::Reactor& ProcessManager::reactor() {
     if (!reactor_) {
         Reactor::Options options;
-        options.backend = pollerBackendFromEnvironment();
+        options.backend = Reactor::backendFromEnvironment();
         auto created = Reactor::create(options);
         if (!created.ok()) {
             fail("event loop creation failed", created.error());
@@ -414,9 +418,7 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
         SpawnSpec spec;
         if (!client.password.empty()) {
             if (client.password.size() >= kMaxPasswordBytes) {
-                worker.failureMessage = "password too long for secure hand-off\n";
-                worker.stderrData = worker.failureMessage;
-                worker.stdoutClosed = worker.stderrClosed = worker.stdinClosed = worker.exited = true;
+                worker.failToStart("password too long for secure hand-off\n");
                 continue;
             }
             auto created = Pipe::create();
@@ -438,10 +440,9 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
 
         spawnWorker(worker, std::move(spec), false);
         if (worker.process.running()) {
-            Logger::getInstance().log(LogLevel::INFO,
-                                      LogContext{worker.process.id(), context.sessionId, client.clientId(),
-                                                 "ssh " + client.clientId() + " " + remoteCommand},
-                                      "Remote SSH worker created");
+            LogContext created = worker.context;
+            created.pid = worker.process.id();
+            Logger::getInstance().log(LogLevel::INFO, created, "Remote SSH worker created");
         }
         // passwordPipe closes here: only the child holds the secret now.
     }
@@ -465,13 +466,10 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
                                              worker.timedOut});
     }
 
-    for (auto& clientResult : clientResults) {
-        clientResult.errorMessage = classifyRemoteError(clientResult);
-        if (!clientResult.errorMessage.empty()) {
-            Logger::getInstance().log(LogLevel::ERROR,
-                                      LogContext{context.pid, context.sessionId, clientResult.clientId,
-                                                 "ssh " + clientResult.clientId + " " + remoteCommand},
-                                      clientResult.errorMessage);
+    for (std::size_t index = 0; index < clientResults.size(); ++index) {
+        clientResults[index].errorMessage = classifyRemoteError(clientResults[index]);
+        if (!clientResults[index].errorMessage.empty()) {
+            Logger::getInstance().log(LogLevel::ERROR, workers[index].context, clientResults[index].errorMessage);
         }
     }
 
@@ -515,8 +513,13 @@ std::string ProcessManager::classifyRemoteError(const ClientResult& clientResult
         return "ERROR: remote worker setup failed";
     }
 
-    if (const auto sshFailure = classifySshFailure(stderrText); sshFailure.has_value()) {
-        return "ERROR: " + *sshFailure;
+    // ssh reports its own failures (connect/auth/host-key) with exit code 255;
+    // any other exit code is the remote command's own result, so its stderr —
+    // which may itself contain "permission denied" etc. — must not be sniffed.
+    if (clientResult.exitCode == 255) {
+        if (const auto sshFailure = classifySshFailure(stderrText); sshFailure.has_value()) {
+            return "ERROR: " + *sshFailure;
+        }
     }
 
     if (clientResult.exitCode != 0) {
