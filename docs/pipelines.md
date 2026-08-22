@@ -32,21 +32,26 @@ Between the remote process and the sink sit the L2 primitives
   `drop-newest` policies (drop counts reported). `block` is the backpressure
   mechanism: a full buffer stops the reactor reading that pipe, the kernel
   pipe fills, and the producer's `write(2)` blocks. `drop-oldest` is the
-  log-tailing policy (liveness over completeness). `spool` (overflow to a temp
-  file) is planned.
+  log-tailing policy (liveness over completeness). `spool` bounds memory the
+  same way but loses nothing — the overflow is spilled to an anonymous temp
+  file and folded back into the captured output at the end (RAM stays flat
+  during the run; the full result costs disk instead of drops). An in-memory
+  ring can't spool, so `BoundedBuffer`/`Stream` treat `spool` as `block`; the
+  spill lives in the output-capture path.
 - `CreditWindow` — HTTP/2-style per-stream (256 KiB) and per-connection (4 MiB)
   flow control for the Phase 4 native backplane: the sender may not exceed the
   advertised window, replenished by `WINDOW_UPDATE` as the sink drains.
 - `Stream` — the `Open → HalfClosed → Closed` state machine that ties a bounded
   buffer to EOF/half-close; `writable()` is the backpressure signal.
 
-`pipeshellx run --overflow drop-oldest|drop-newest --ring SIZE` (e.g. `1MiB`,
-`256KiB`, `4096`) bounds the per-host output the run captures: with `--stream`
-the sink already holds nothing, so a bounded ring keeps the controller's RSS
-flat under an endless command like `tail -F` (drops are counted and reported
-in the summary). `--group`/`--json` still buffer each stage's full output by
-design (you asked for the complete block/object). The default `block` policy
-captures everything.
+`pipeshellx run --overflow drop-oldest|drop-newest|spool --ring SIZE` (e.g.
+`1MiB`, `256KiB`, `4096`) bounds the per-host output the run captures: with
+`--stream` the sink already holds nothing, so a bounded ring keeps the
+controller's RSS flat under an endless command like `tail -F`. `drop-*` counts
+and reports what it discards; `spool` discards nothing (it spills the overflow
+to disk and reconstructs the full capture at the end). `--group`/`--json` still
+buffer each stage's full output by design (you asked for the complete
+block/object). The default `block` policy captures everything in memory.
 
 ## Running
 

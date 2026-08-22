@@ -31,14 +31,15 @@ void BoundedBuffer::discardFront(std::size_t n) noexcept {
 
 std::size_t BoundedBuffer::append(std::span<const char> data) {
     if (capacity_ == 0 || data.empty()) {
-        if (policy_ != OverflowPolicy::Block) {
+        if (dropsOnOverflow(policy_)) {
             dropped_ += data.size();
         }
-        return policy_ == OverflowPolicy::Block ? 0 : data.size();
+        return dropsOnOverflow(policy_) ? data.size() : 0;
     }
 
     switch (policy_) {
         case OverflowPolicy::Block:
+        case OverflowPolicy::Spool: // an in-memory ring cannot spool; behaves as Block
             return appendUpTo(data);
 
         case OverflowPolicy::DropNewest: {

@@ -21,7 +21,15 @@
 
 namespace psx::stream {
 
-enum class OverflowPolicy : std::uint8_t { Block, DropNewest, DropOldest };
+// Block: backpressure (retry later). DropNewest/DropOldest: bound memory by
+// discarding. Spool: bound memory by spilling overflow to a temp file (no loss)
+// — only the output-*capture* honours it; an in-memory ring treats it as Block.
+enum class OverflowPolicy : std::uint8_t { Block, DropNewest, DropOldest, Spool };
+
+// True for the policies that discard bytes on overflow (Block and Spool do not).
+inline bool dropsOnOverflow(OverflowPolicy policy) noexcept {
+    return policy == OverflowPolicy::DropNewest || policy == OverflowPolicy::DropOldest;
+}
 
 class BoundedBuffer {
 public:

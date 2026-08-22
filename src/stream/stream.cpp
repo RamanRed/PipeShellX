@@ -79,7 +79,7 @@ bool Stream::writable() const noexcept {
     }
     // A drop-policy buffer always accepts (it discards to make room), so its
     // producer never blocks; only Block backpressures on a full buffer.
-    return buffer_.policy() != OverflowPolicy::Block || !buffer_.full();
+    return dropsOnOverflow(buffer_.policy()) || !buffer_.full();
 }
 
 bool Stream::atEnd() const noexcept {

@@ -77,6 +77,11 @@ TEST(ParseRunTest, PolicyFileFlag) {
     EXPECT_THROW(static_cast<void>(psx::cli::parseRun({"--policy", "--", "id"})), std::runtime_error);
 }
 
+TEST(ParseRunTest, OverflowSpoolIsAccepted) {
+    EXPECT_EQ(psx::cli::parseRun({"--overflow", "spool", "--", "id"}).policy, psx::stream::OverflowPolicy::Spool);
+    EXPECT_THROW(psx::cli::parseRun({"--overflow", "bogus", "--", "id"}), psx::cli::CliError);
+}
+
 TEST(ParseRunTest, ReuseFlag) {
     EXPECT_FALSE(psx::cli::parseRun({"--", "id"}).reuse);
     EXPECT_TRUE(psx::cli::parseRun({"--reuse", "--", "id"}).reuse);

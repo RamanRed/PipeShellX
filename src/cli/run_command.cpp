@@ -72,7 +72,10 @@ psx::stream::OverflowPolicy parsePolicy(const std::string& value) {
     if (value == "drop-newest") {
         return psx::stream::OverflowPolicy::DropNewest;
     }
-    throw CliError("--overflow must be block, drop-oldest or drop-newest, got '" + value + "'");
+    if (value == "spool") {
+        return psx::stream::OverflowPolicy::Spool;
+    }
+    throw CliError("--overflow must be block, drop-oldest, drop-newest or spool, got '" + value + "'");
 }
 
 // Parses a byte size: a decimal count with an optional K/M/G or KiB/MiB/GiB

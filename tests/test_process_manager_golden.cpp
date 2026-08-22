@@ -499,3 +499,18 @@ TEST_F(GoldenRemoteTest, ABufferingSinkKeepsOnlyTheLastAttemptOnRetry) {
     EXPECT_EQ(text.find("Connection refused"), std::string::npos) // the failed attempt was reset
         << "failed-attempt stderr leaked into the buffered sink: " << text;
 }
+
+// The Spool policy bounds memory during the run by spilling the oldest overflow
+// to disk, but loses nothing: the reconstructed capture is the full output in
+// order, with a zero drop count.
+TEST_F(GoldenRemoteTest, SpoolRingKeepsEveryByteWithoutDropping) {
+    // `big` writes 200000 'o' to stdout and 100000 'e' to stderr; the 64 KiB ring
+    // forces most of it to spill.
+    auto result = pm_.executeRemote(
+        {client("u", "h")}, "big", context("big"),
+        {.timeoutSec = 20, .concurrency = 1, .policy = psx::stream::OverflowPolicy::Spool, .ringBytes = 65536});
+    ASSERT_EQ(result.clientResults.size(), 1U);
+    EXPECT_EQ(result.clientResults[0].droppedBytes, 0U) << "spool must not drop";
+    EXPECT_EQ(result.clientResults[0].stdoutData, std::string(200000, 'o'));
+    EXPECT_EQ(result.clientResults[0].stderrData, std::string(100000, 'e'));
+}

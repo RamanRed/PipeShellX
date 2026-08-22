@@ -5,6 +5,8 @@
 #include "psx/os/io.hpp"
 #include "psx/os/pipe.hpp"
 #include "psx/os/process.hpp"
+#include "psx/stream/spool_buffer.hpp"
+
 #include "psx/runtime/backoff.hpp"
 #include "psx/runtime/reactor.hpp"
 #include "psx/sink/sink.hpp"
@@ -75,12 +77,14 @@ struct Worker {
     bool exited = false;
     bool timedOut = false;
     bool cancelled = false;
-    bool aborted = false;           // aborted by --fail-fast because a sibling failed
-    int attempt = 0;                // retries performed so far (0 on the first run)
-    bool awaitingRetry = false;     // finished a failed attempt, waiting on a backoff timer
-    std::uint64_t droppedBytes = 0; // bytes discarded from stdout/stderr by the ring
-    bool counted = false;           // WorkerRun: already subtracted from the remaining count
-    bool spawned = false;           // WorkerRun: spawnFn has been invoked for this worker
+    bool aborted = false;                 // aborted by --fail-fast because a sibling failed
+    int attempt = 0;                      // retries performed so far (0 on the first run)
+    bool awaitingRetry = false;           // finished a failed attempt, waiting on a backoff timer
+    std::uint64_t droppedBytes = 0;       // bytes discarded from stdout/stderr by the ring
+    psx::stream::SpoolBuffer stdoutSpool; // Spool policy: overflow spilled to disk
+    psx::stream::SpoolBuffer stderrSpool;
+    bool counted = false; // WorkerRun: already subtracted from the remaining count
+    bool spawned = false; // WorkerRun: spawnFn has been invoked for this worker
 
     bool complete() const noexcept { return exited && stdoutClosed && stderrClosed && stdinClosed; }
 
@@ -110,6 +114,8 @@ struct Worker {
         cancelled = false;
         aborted = false;
         droppedBytes = 0;
+        stdoutSpool.reset();
+        stderrSpool.reset();
         inputWritten = 0;
         counted = false;
         awaitingRetry = false;
@@ -392,12 +398,21 @@ private:
 
         if (outputCap_ != 0 && data.size() > outputCap_) {
             const std::size_t over = data.size() - outputCap_;
-            if (outputPolicy_ == psx::stream::OverflowPolicy::DropOldest) {
+            if (outputPolicy_ == psx::stream::OverflowPolicy::Spool) {
+                // Spill the oldest bytes to disk (no loss) and keep the newest
+                // ring in memory. A spill failure degrades to drop-oldest.
+                psx::stream::SpoolBuffer& spool = isStdout ? worker.stdoutSpool : worker.stderrSpool;
+                if (!spool.append(std::string_view(data.data(), over))) {
+                    worker.droppedBytes += over;
+                }
+                data.erase(0, over);
+            } else if (outputPolicy_ == psx::stream::OverflowPolicy::DropOldest) {
                 data.erase(0, over); // keep the newest ring
+                worker.droppedBytes += over;
             } else {
                 data.resize(outputCap_); // DropNewest: keep the oldest ring
+                worker.droppedBytes += over;
             }
-            worker.droppedBytes += over;
         }
 
         if (data.size() > before && Logger::getInstance().enabled(LogLevel::DEBUG)) {
@@ -805,10 +820,17 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
         } else if (exitCode != 0 || worker.timedOut) {
             overallExitCode = exitCode == 0 ? 1 : exitCode;
         }
+        // Spool policy: the older bytes live on disk; prepend them to the
+        // in-memory tail to reconstruct the full output (no-op otherwise, since
+        // the spool is empty unless the Spool policy spilled).
+        std::string stdoutFull = worker.stdoutSpool.empty() ? std::move(worker.stdoutData)
+                                                            : worker.stdoutSpool.readAll() + worker.stdoutData;
+        std::string stderrFull = worker.stderrSpool.empty() ? std::move(worker.stderrData)
+                                                            : worker.stderrSpool.readAll() + worker.stderrData;
         clientResults.push_back(ClientResult{worker.clientId,
                                              exitCode,
-                                             std::move(worker.stdoutData),
-                                             std::move(worker.stderrData),
+                                             std::move(stdoutFull),
+                                             std::move(stderrFull),
                                              {},
                                              worker.timedOut,
                                              worker.droppedBytes,

@@ -38,6 +38,7 @@ add_executable(pipeshellx_tests
     unit/cli/test_run_command.cpp
     unit/cli/test_ping_command.cpp
     unit/stream/test_line_framer.cpp
+    unit/stream/test_spool_buffer.cpp
     unit/runtime/test_reactor.cpp
     unit/runtime/test_backoff.cpp
     unit/audit/test_audit_log.cpp
