@@ -153,3 +153,87 @@ TEST(SessionTest, AMalformedOpenPayloadIsAProtocolError) {
         encodeFrame({.type = FrameType::Open, .flags = 0, .streamId = 1, .payload = "not-a-valid-open"});
     EXPECT_FALSE(node.receive(wire).ok());
 }
+
+// --- Flow control (credit windows) ---
+
+// Two sessions sharing a small window; used to exercise backpressure cheaply.
+struct SmallLink {
+    static constexpr std::uint32_t kWindow = 8;
+    std::string aToB;
+    std::string bToA;
+    Recorder ctl;
+    Recorder node;
+    Session a{Role::Controller, [this](std::string_view s) { aToB.append(s); }, ctl, kWindow};
+    Session b{Role::Node, [this](std::string_view s) { bToA.append(s); }, node, kWindow};
+    psx::Result<void> pump() {
+        while (!aToB.empty() || !bToA.empty()) {
+            std::string toB;
+            toB.swap(aToB);
+            std::string toA;
+            toA.swap(bToA);
+            if (!toB.empty()) {
+                if (auto r = b.receive(toB); !r.ok()) {
+                    return r;
+                }
+            }
+            if (!toA.empty()) {
+                if (auto r = a.receive(toA); !r.ok()) {
+                    return r;
+                }
+            }
+        }
+        return {};
+    }
+    std::string nodeBytes() const {
+        std::string all;
+        for (const auto& d : node.datas) {
+            all += std::get<1>(d);
+        }
+        return all;
+    }
+};
+
+TEST(SessionTest, SenderIsBackpressuredToTheWindowUntilCreditIsGranted) {
+    SmallLink link;
+    const StreamId id = link.a.open({.argv = {"cat"}, .cwd = ""});
+    ASSERT_TRUE(link.pump().ok());
+    // Queue 20 bytes into an 8-byte window.
+    link.a.sendData(id, "0123456789ABCDEFGHIJ", /*endStream=*/true);
+    ASSERT_TRUE(link.pump().ok());
+    // Only the first window's worth got through; the rest is buffered at the sender.
+    EXPECT_EQ(link.nodeBytes(), "01234567");
+
+    // The node consumes 8 bytes -> WINDOW_UPDATE -> the sender releases the next 8.
+    link.b.consume(id, 8);
+    ASSERT_TRUE(link.pump().ok());
+    EXPECT_EQ(link.nodeBytes(), "0123456789ABCDEF");
+
+    // Drain the rest; the final chunk carries the buffered endStream.
+    link.b.consume(id, 8);
+    ASSERT_TRUE(link.pump().ok());
+    EXPECT_EQ(link.nodeBytes(), "0123456789ABCDEFGHIJ");
+    ASSERT_FALSE(link.node.datas.empty());
+    EXPECT_TRUE(std::get<2>(link.node.datas.back())) << "endStream rides the last chunk";
+}
+
+TEST(SessionTest, InboundDataExceedingTheWindowIsAFlowControlError) {
+    Recorder rec;
+    // A node with an 8-byte window; feed it a raw DATA of 9 bytes on an opened stream.
+    Session node(Role::Node, [](std::string_view) {}, rec, /*initialWindow=*/8);
+    const std::string open =
+        encodeFrame({.type = FrameType::Open, .flags = 0, .streamId = 1, .payload = encodeOpen({.argv = {"x"}})});
+    ASSERT_TRUE(node.receive(open).ok());
+    const std::string data =
+        encodeFrame({.type = FrameType::Data, .flags = 0, .streamId = 1, .payload = "123456789"}); // 9 > 8
+    EXPECT_FALSE(node.receive(data).ok());
+}
+
+TEST(SessionTest, AWindowUpdateThatOverflowsTheWindowIsAProtocolError) {
+    Recorder rec;
+    Session ctl(Role::Controller, [](std::string_view) {}, rec);
+    const StreamId id = ctl.open({.argv = {"x"}, .cwd = ""}); // starts at kDefaultStreamWindow
+    // A WINDOW_UPDATE near-u32max pushes sendCredit past kMaxStreamWindow.
+    const std::string wu = encodeFrame(
+        {.type = FrameType::WindowUpdate, .flags = 0, .streamId = id, .payload = encodeWindowUpdate(0xFFFFFFF0u)});
+    EXPECT_FALSE(ctl.receive(wu).ok());
+}

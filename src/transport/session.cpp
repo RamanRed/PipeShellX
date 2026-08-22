@@ -2,6 +2,8 @@
 
 #include "psx/transport/control_payloads.hpp"
 
+#include <algorithm>
+
 namespace psx::transport {
 
 namespace {
@@ -10,8 +12,8 @@ psx::Error protocolError(const char* what) {
 }
 } // namespace
 
-Session::Session(Role role, WriteFn write, SessionHandler& handler)
-    : role_(role), write_(std::move(write)), handler_(handler) {}
+Session::Session(Role role, WriteFn write, SessionHandler& handler, std::uint32_t initialWindow)
+    : role_(role), write_(std::move(write)), handler_(handler), initialWindow_(initialWindow) {}
 
 void Session::send(const Frame& frame) {
     std::string wire;
@@ -21,16 +23,54 @@ void Session::send(const Frame& frame) {
 
 StreamId Session::open(const OpenRequest& request) {
     const StreamId id = nextStreamId_++;
-    streams_.emplace(id, Stream{});
+    streams_.try_emplace(id, initialWindow_);
     send(Frame{.type = FrameType::Open, .flags = 0, .streamId = id, .payload = encodeOpen(request)});
     return id;
 }
 
 void Session::sendData(StreamId id, std::string_view bytes, bool endStream) {
-    send(Frame{.type = FrameType::Data,
-               .flags = static_cast<std::uint8_t>(endStream ? kFlagEndStream : 0),
-               .streamId = id,
-               .payload = std::string(bytes)});
+    auto it = streams_.find(id);
+    if (it == streams_.end()) {
+        return; // unknown stream: nothing to send
+    }
+    it->second.sendBuffer.append(bytes);
+    if (endStream) {
+        it->second.sendEndPending = true;
+    }
+    flushStream(id, it->second);
+}
+
+void Session::flushStream(StreamId id, Stream& stream) {
+    while (!stream.sendBuffer.empty() && stream.sendCredit > 0) {
+        const auto chunk =
+            static_cast<std::uint32_t>(std::min<std::size_t>(stream.sendBuffer.size(), stream.sendCredit));
+        const bool last = (chunk == stream.sendBuffer.size()) && stream.sendEndPending;
+        send(Frame{.type = FrameType::Data,
+                   .flags = static_cast<std::uint8_t>(last ? kFlagEndStream : 0),
+                   .streamId = id,
+                   .payload = stream.sendBuffer.substr(0, chunk)});
+        stream.sendCredit -= chunk;
+        stream.sendBuffer.erase(0, chunk);
+        if (last) {
+            stream.sendEndPending = false;
+        }
+    }
+    // A pending end that has no (more) buffered bytes rides a zero-length frame.
+    if (stream.sendBuffer.empty() && stream.sendEndPending) {
+        send(Frame{.type = FrameType::Data, .flags = kFlagEndStream, .streamId = id, .payload = {}});
+        stream.sendEndPending = false;
+    }
+}
+
+void Session::consume(StreamId id, std::uint32_t n) {
+    auto it = streams_.find(id);
+    if (it == streams_.end()) {
+        return;
+    }
+    const std::uint32_t delta = it->second.recvWindow.onConsumed(n);
+    if (delta > 0) {
+        send(Frame{.type = FrameType::WindowUpdate, .flags = 0, .streamId = id, .payload = encodeWindowUpdate(delta)});
+    }
 }
 
 void Session::sendExit(StreamId id, const psx::os::ExitStatus& status) {
@@ -75,13 +115,17 @@ psx::Result<void> Session::dispatch(Frame&& frame) {
             if (!request.ok()) {
                 return request.error();
             }
-            streams_.emplace(frame.streamId, Stream{});
+            streams_.try_emplace(frame.streamId, initialWindow_);
             handler_.onOpen(frame.streamId, request.value());
             return {};
         }
         case FrameType::Data: {
-            if (streams_.count(frame.streamId) == 0) {
+            auto it = streams_.find(frame.streamId);
+            if (it == streams_.end()) {
                 return protocolError("DATA for an unknown stream");
+            }
+            if (!it->second.recvWindow.onData(static_cast<std::uint32_t>(frame.payload.size()))) {
+                return protocolError("DATA exceeds the stream's flow-control window");
             }
             const bool endStream = (frame.flags & kFlagEndStream) != 0;
             handler_.onData(frame.streamId, frame.payload, endStream);
@@ -112,9 +156,23 @@ psx::Result<void> Session::dispatch(Frame&& frame) {
             goneAway_ = true;
             handler_.onGoAway();
             return {};
-        case FrameType::WindowUpdate:
-            // Flow control is layered on in the next slice; ignore for now.
+        case FrameType::WindowUpdate: {
+            auto it = streams_.find(frame.streamId);
+            if (it == streams_.end()) {
+                return protocolError("WINDOW_UPDATE for an unknown stream");
+            }
+            auto delta = decodeWindowUpdate(frame.payload);
+            if (!delta.ok()) {
+                return delta.error();
+            }
+            Stream& stream = it->second;
+            if (static_cast<std::uint64_t>(stream.sendCredit) + delta.value() > kMaxStreamWindow) {
+                return protocolError("WINDOW_UPDATE overflows the stream flow-control window");
+            }
+            stream.sendCredit += delta.value();
+            flushStream(frame.streamId, stream);
             return {};
+        }
     }
     return protocolError("unknown frame type");
 }
