@@ -1,24 +1,8 @@
 #include "psx/transport/frame_codec.hpp"
 
+#include "psx/transport/wire.hpp"
+
 namespace psx::transport {
-
-namespace {
-
-void writeU32BE(std::string& out, std::uint32_t value) {
-    out.push_back(static_cast<char>((value >> 24) & 0xFF));
-    out.push_back(static_cast<char>((value >> 16) & 0xFF));
-    out.push_back(static_cast<char>((value >> 8) & 0xFF));
-    out.push_back(static_cast<char>(value & 0xFF));
-}
-
-std::uint32_t readU32BE(const char* p) {
-    return (static_cast<std::uint32_t>(static_cast<unsigned char>(p[0])) << 24) |
-           (static_cast<std::uint32_t>(static_cast<unsigned char>(p[1])) << 16) |
-           (static_cast<std::uint32_t>(static_cast<unsigned char>(p[2])) << 8) |
-           static_cast<std::uint32_t>(static_cast<unsigned char>(p[3]));
-}
-
-} // namespace
 
 void encodeFrameInto(std::string& out, const Frame& frame) {
     out.reserve(out.size() + kFrameHeaderSize + frame.payload.size());

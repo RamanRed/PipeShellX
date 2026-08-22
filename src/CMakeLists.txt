@@ -59,6 +59,7 @@ add_library(pipeshellx_lib
     ${PIPESHELLX_POLICY_SOURCES}
     runtime/reactor.cpp
     transport/frame_codec.cpp
+    transport/open_request.cpp
     cli/hosts_command.cpp
     cli/ping_command.cpp
     cli/selection.cpp
