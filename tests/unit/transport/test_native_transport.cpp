@@ -1,5 +1,7 @@
 #include "psx/transport/native_transport.hpp"
 
+#include "psx/transport/node_stage_runner.hpp"
+
 #include "psx/os/socket.hpp"
 #include "psx/os/tls.hpp"
 #include "psx/runtime/reactor.hpp"
@@ -125,4 +127,57 @@ TEST(NativeTransportTest, RunsAStageEndToEndOverMtls) {
     // Identity check both directions.
     EXPECT_EQ(ctl.peerSanUri(), "psx://node/1");
     EXPECT_EQ(node.peerSanUri(), "psx://controller");
+}
+
+TEST(NodeStageRunnerTest, RunsARealCommandOverTheEncryptedBackplane) {
+    auto listener = Socket::listen("127.0.0.1", 0);
+    ASSERT_TRUE(listener.ok());
+    auto clientSock = Socket::connect("127.0.0.1", listener.value().localPort().value());
+    ASSERT_TRUE(clientSock.ok());
+    Socket serverSock = acceptWithin(listener.value());
+    ASSERT_TRUE(serverSock.valid());
+
+    const auto ctlId = tls_test::generateSelfSigned("psx://controller");
+    const auto nodeId = tls_test::generateSelfSigned("psx://node/1");
+    auto ctlTls = Tls::create(
+        {.certificatePem = ctlId.certPem, .privateKeyPem = ctlId.keyPem, .caPem = nodeId.certPem, .isServer = false});
+    auto nodeTls = Tls::create(
+        {.certificatePem = nodeId.certPem, .privateKeyPem = nodeId.keyPem, .caPem = ctlId.certPem, .isServer = true});
+    ASSERT_TRUE(ctlTls.ok() && nodeTls.ok());
+
+    auto reactor = Reactor::create();
+    ASSERT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+
+    NodeStageRunner runner(r); // the node runs each opened stream as a local process
+    ControllerSink sink;
+    sink.reactor = &r;
+    bool errored = false;
+    NativeTransport* ctlPtr = nullptr;
+
+    NativeTransport node(r, std::move(serverSock), std::move(nodeTls.value()), Role::Node, runner,
+                         {.onError = [&](psx::Error) {
+                             errored = true;
+                             r.stop();
+                         }});
+    runner.bind(node.session());
+    NativeTransport ctl(r, std::move(clientSock.value()), std::move(ctlTls.value()), Role::Controller, sink,
+                        {.onReady = [&] { ctlPtr->session().open({.argv = {"/bin/echo", "hello-from-stage"}}); },
+                         .onError =
+                             [&](psx::Error) {
+                                 errored = true;
+                                 r.stop();
+                             }});
+    ctlPtr = &ctl;
+
+    ASSERT_TRUE(node.start().ok());
+    ASSERT_TRUE(ctl.start().ok());
+    r.after(std::chrono::seconds(5), [&] { r.stop(); });
+    ASSERT_TRUE(r.run().ok());
+
+    EXPECT_FALSE(errored);
+    EXPECT_EQ(sink.data, "hello-from-stage\n"); // the real command's stdout, encrypted end to end
+    EXPECT_TRUE(sink.exited);
+    EXPECT_EQ(sink.status.code, 0);
+    EXPECT_EQ(runner.runningStages(), 0U); // the stage was cleaned up
 }

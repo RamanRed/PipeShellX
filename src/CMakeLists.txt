@@ -69,6 +69,7 @@ add_library(pipeshellx_lib
     transport/open_request.cpp
     transport/control_payloads.cpp
     transport/session.cpp
+    transport/node_stage_runner.cpp
     ${PIPESHELLX_TLS_SOURCES}
     cli/hosts_command.cpp
     cli/ping_command.cpp
