@@ -5,6 +5,8 @@
 #include "psx/os/pipe.hpp"
 #include "psx/os/process.hpp"
 #include "psx/runtime/reactor.hpp"
+#include "psx/sink/sink.hpp"
+#include "psx/stream/line_framer.hpp"
 
 #include <chrono>
 #include <cstddef>
@@ -57,6 +59,8 @@ struct Worker {
     std::string stdoutData;
     std::string stderrData;
     std::optional<psx::os::ExitStatus> status;
+    psx::stream::LineFramer stdoutFramer;
+    psx::stream::LineFramer stderrFramer;
     Token stdoutToken = 0;
     Token stderrToken = 0;
     Token stdinToken = 0;
@@ -95,8 +99,8 @@ struct Worker {
 // kDrainGrace, then abandon whatever still holds the pipes.
 class WorkerRun {
 public:
-    WorkerRun(Reactor& reactor, std::vector<Worker>& workers, int timeoutSec)
-        : reactor_(reactor), workers_(workers), timeoutSec_(timeoutSec) {}
+    WorkerRun(Reactor& reactor, std::vector<Worker>& workers, int timeoutSec, psx::sink::Sink* sink)
+        : reactor_(reactor), workers_(workers), timeoutSec_(timeoutSec), sink_(sink) {}
 
     bool anyTimedOut() const noexcept { return anyTimedOut_; }
 
@@ -202,6 +206,11 @@ private:
                 break;
             }
             data.append(buffer, chunk.value());
+            if (sink_ != nullptr) {
+                framerFor(worker, isStdout)
+                    .push(std::span<const char>(buffer, chunk.value()),
+                          [&](std::string_view lineText, bool) { emitLine(worker, isStdout, lineText); });
+            }
         }
 
         if (data.size() > before && Logger::getInstance().enabled(LogLevel::DEBUG)) {
@@ -210,9 +219,22 @@ private:
                                           (isStdout ? " bytes from child stdout" : " bytes from child stderr"));
         }
         if (endOfStream) {
+            if (sink_ != nullptr) {
+                framerFor(worker, isStdout).flush([&](std::string_view lineText, bool) {
+                    emitLine(worker, isStdout, lineText);
+                });
+            }
             closeStream(handle, token, closed);
             account(worker);
         }
+    }
+
+    psx::stream::LineFramer& framerFor(Worker& worker, bool isStdout) noexcept {
+        return isStdout ? worker.stdoutFramer : worker.stderrFramer;
+    }
+
+    void emitLine(const Worker& worker, bool isStdout, std::string_view lineText) {
+        sink_->line(worker.clientId, isStdout ? psx::sink::Channel::Stdout : psx::sink::Channel::Stderr, lineText);
     }
 
     void onWritable(Worker& worker) {
@@ -289,6 +311,7 @@ private:
     Reactor& reactor_;
     std::vector<Worker>& workers_;
     int timeoutSec_;
+    psx::sink::Sink* sink_ = nullptr;
     std::size_t remaining_ = 0;
     bool anyTimedOut_ = false;
 };
@@ -387,7 +410,7 @@ ProcessManager::Result ProcessManager::execute(const std::vector<std::string>& a
                                   "Child process created");
     }
 
-    WorkerRun run(reactor(), workers, timeoutSec);
+    WorkerRun run(reactor(), workers, timeoutSec, nullptr);
     run.run();
 
     Logger::getInstance().log(worker.exitCode() == 0 ? LogLevel::INFO : LogLevel::ERROR, context,
@@ -399,7 +422,8 @@ ProcessManager::Result ProcessManager::execute(const std::vector<std::string>& a
 ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEntry>& clients,
                                                      const std::string& remoteCommand,
                                                      const LogContext& context,
-                                                     int timeoutSec) {
+                                                     int timeoutSec,
+                                                     psx::sink::Sink* sink) {
     if (clients.empty()) {
         throw std::runtime_error("no clients configured for remote execution");
     }
@@ -447,7 +471,13 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
         // passwordPipe closes here: only the child holds the secret now.
     }
 
-    WorkerRun run(reactor(), workers, timeoutSec);
+    if (sink != nullptr) {
+        for (const auto& worker : workers) {
+            sink->stageStarted(worker.clientId);
+        }
+    }
+
+    WorkerRun run(reactor(), workers, timeoutSec, sink);
     run.run();
 
     std::vector<ClientResult> clientResults;
@@ -471,6 +501,19 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
         if (!clientResults[index].errorMessage.empty()) {
             Logger::getInstance().log(LogLevel::ERROR, workers[index].context, clientResults[index].errorMessage);
         }
+    }
+
+    if (sink != nullptr) {
+        std::size_t succeeded = 0;
+        for (const auto& clientResult : clientResults) {
+            const bool ok = clientResult.exitCode == 0 && !clientResult.timedOut && clientResult.errorMessage.empty();
+            succeeded += ok ? 1 : 0;
+            sink->stageFinished(
+                clientResult.clientId,
+                psx::sink::StageResult{clientResult.exitCode, clientResult.timedOut, clientResult.errorMessage, 0});
+        }
+        sink->runFinished(psx::sink::RunSummary{clientResults.size(), succeeded, clientResults.size() - succeeded, 0,
+                                                /*cancelled=*/false});
     }
 
     return Result{overallExitCode, formatClientResults(clientResults, true), formatClientResults(clientResults, false),

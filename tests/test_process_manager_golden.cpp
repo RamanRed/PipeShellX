@@ -8,7 +8,12 @@
 #include "client_config.hpp"
 #include "command_executor.hpp"
 #include "process_manager.hpp"
+#include "psx/sink/group_sink.hpp"
+#include "psx/sink/json_sink.hpp"
+#include "psx/sink/stream_sink.hpp"
 #include "test_support.hpp"
+
+#include <sstream>
 
 #include <chrono>
 #include <string>
@@ -184,4 +189,60 @@ TEST_F(GoldenRemoteTest, CommandExecutorStreamsHeadersAndLinesPerClient) {
     EXPECT_FALSE(isStdout[1]);
     ASSERT_EQ(result.clientResults.size(), 1U);
     EXPECT_EQ(result.exitCode, 9);
+}
+
+// --- Sink integration: executeRemote streams live, framed, per-stage lines ---
+
+TEST_F(GoldenRemoteTest, GroupSinkRendersEachClientBlock) {
+    std::ostringstream out;
+    psx::sink::GroupSink sink(out);
+    const std::vector<ClientEntry> clients{client("alice", "h1"), client("bob", "h2")};
+    auto result = pm_.executeRemote(clients, "ok", context("ok"), 10, &sink);
+    EXPECT_EQ(result.exitCode, 0);
+    // Grouped per client, in client order, headers + stdout lines.
+    EXPECT_EQ(out.str(), "CLIENT alice@h1\nhost=alice@h1\nCLIENT bob@h2\nhost=bob@h2\n");
+}
+
+TEST_F(GoldenRemoteTest, GroupSinkRendersTheNormalizedErrorForAFailure) {
+    std::ostringstream out;
+    psx::sink::GroupSink sink(out);
+    pm_.executeRemote({client("u", "h")}, "refused", context("refused"), 10, &sink);
+    EXPECT_EQ(out.str(), "CLIENT u@h\nERROR: connection failed\n");
+}
+
+TEST_F(GoldenRemoteTest, StreamSinkEmitsHostTaggedLinesLive) {
+    std::ostringstream out;
+    std::ostringstream err;
+    psx::sink::StreamSink sink(out, err, /*colour=*/false);
+    pm_.executeRemote({client("u", "h")}, "big", context("big"), 20, &sink);
+    // 200 000 'o' bytes with no newline -> one very long line, host-tagged.
+    const std::string text = out.str();
+    ASSERT_FALSE(text.empty());
+    EXPECT_EQ(text.rfind("[u@h] ", 0), 0U) << text.substr(0, 40);
+    EXPECT_NE(text.find("oooo"), std::string::npos);
+    EXPECT_NE(err.str().find("1/1 ok"), std::string::npos) << err.str();
+}
+
+TEST_F(GoldenRemoteTest, JsonSinkEmitsOneObjectPerStageAndASummary) {
+    std::ostringstream out;
+    psx::sink::JsonSink sink(out);
+    const std::vector<ClientEntry> clients{client("a", "h1"), client("b", "h2")};
+    // a: ok (exit 0); b: fail 3
+    pm_.executeRemote({clients[0]}, "ok", context("ok"), 10, &sink);
+    pm_.executeRemote({clients[1]}, "fail 3", context("fail"), 10, &sink);
+    const std::string text = out.str();
+    EXPECT_NE(text.find(R"("stage":"a@h1")"), std::string::npos) << text;
+    EXPECT_NE(text.find(R"("stdout":"host=a@h1")"), std::string::npos) << text;
+    EXPECT_NE(text.find(R"("stage":"b@h2","exit":3)"), std::string::npos) << text;
+    EXPECT_NE(text.find(R"("summary":true)"), std::string::npos) << text;
+}
+
+TEST_F(GoldenRemoteTest, SinkAndResultCaptureAgree) {
+    std::ostringstream out;
+    psx::sink::GroupSink sink(out);
+    auto result = pm_.executeRemote({client("alice", "h1")}, "ok", context("ok"), 10, &sink);
+    // The Result still carries the full capture (API unchanged) and matches.
+    ASSERT_EQ(result.clientResults.size(), 1U);
+    EXPECT_EQ(result.clientResults[0].stdoutData, "host=alice@h1\n");
+    EXPECT_EQ(out.str(), "CLIENT alice@h1\nhost=alice@h1\n");
 }

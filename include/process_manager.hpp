@@ -11,6 +11,9 @@
 namespace psx::runtime {
 class Reactor;
 }
+namespace psx::sink {
+class Sink;
+}
 
 // Runs allowlisted commands locally, or one `ssh` worker per client, and
 // collects their output. Built on psx::os::Process + psx::runtime::Reactor:
@@ -51,10 +54,14 @@ public:
                    const LogContext& context,
                    const std::string& input = "",
                    int timeoutSec = 0);
+    // When `sink` is non-null it receives live, line-framed, per-stage output
+    // (host-tagged) during the run, plus a stageFinished per client and a
+    // final runFinished; the returned Result still carries the full capture.
     Result executeRemote(const std::vector<ClientEntry>& clients,
                          const std::string& remoteCommand,
                          const LogContext& context,
-                         int timeoutSec = 0);
+                         int timeoutSec = 0,
+                         psx::sink::Sink* sink = nullptr);
 
 private:
     psx::runtime::Reactor& reactor();
