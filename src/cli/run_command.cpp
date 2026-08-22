@@ -66,7 +66,7 @@ psx::stream::OverflowPolicy parsePolicy(const std::string& value) {
     if (value == "drop-newest") {
         return psx::stream::OverflowPolicy::DropNewest;
     }
-    throw CliError("--policy must be block, drop-oldest or drop-newest, got '" + value + "'");
+    throw CliError("--overflow must be block, drop-oldest or drop-newest, got '" + value + "'");
 }
 
 // Parses a byte size: a decimal count with an optional K/M/G or KiB/MiB/GiB
@@ -140,7 +140,7 @@ RunInvocation parseRun(const std::vector<std::string>& args) {
             invocation.timeoutSec = parseIntArg(valueFor(i, arg), "--timeout");
         } else if (arg == "-c" || arg == "--concurrency") {
             invocation.concurrency = parseIntArg(valueFor(i, arg), "--concurrency");
-        } else if (arg == "--policy") {
+        } else if (arg == "--overflow") {
             invocation.policy = parsePolicy(valueFor(i, arg));
         } else if (arg == "--ring") {
             invocation.ringBytes = parseSize(valueFor(i, arg));

@@ -40,7 +40,7 @@ Between the remote process and the sink sit the L2 primitives
 - `Stream` — the `Open → HalfClosed → Closed` state machine that ties a bounded
   buffer to EOF/half-close; `writable()` is the backpressure signal.
 
-`pipeshellx run --policy drop-oldest|drop-newest --ring SIZE` (e.g. `1MiB`,
+`pipeshellx run --overflow drop-oldest|drop-newest --ring SIZE` (e.g. `1MiB`,
 `256KiB`, `4096`) bounds the per-host output the run captures: with `--stream`
 the sink already holds nothing, so a bounded ring keeps the controller's RSS
 flat under an endless command like `tail -F` (drops are counted and reported
