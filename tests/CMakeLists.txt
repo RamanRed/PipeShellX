@@ -28,6 +28,7 @@ add_executable(pipeshellx_tests
     unit/os/test_process.cpp
     unit/os/test_result.cpp
     unit/os/test_signal_source.cpp
+    unit/os/test_socket.cpp
     unit/os/test_system.cpp
     unit/stream/test_bounded_buffer.cpp
     unit/stream/test_credit_window.cpp

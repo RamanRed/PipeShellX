@@ -30,6 +30,7 @@ else()
         os/posix/io.cpp
         os/posix/paths.cpp
         os/posix/pipe.cpp
+        os/posix/socket.cpp
         os/posix/poller.cpp
         os/posix/poller_poll.cpp
         os/posix/process.cpp
