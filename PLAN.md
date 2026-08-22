@@ -709,15 +709,15 @@ Extends `docs/ipc_design.md`, `docs/process_management.md`, `docs/architecture.m
 
 ### Phase 2 — Streaming engine and the real CLI (10–15 days) → `v0.3.0`
 Extends `docs/ipc_design.md`, `docs/system_flow.md`, `docs/distributed_execution.md`, `docs/testing.md`; creates `docs/pipelines.md` (sinks), `docs/json.md`.
-- [ ] `stream::{Stream, BoundedBuffer, CreditWindow, LineFramer}`; pipe-level backpressure by interest deregistration; policies `block|drop-oldest|drop-newest|spool`.
-- [ ] Live `--stream` (host-prefixed, colour-stable, TTY-detected), `--group` (today's format, kept), `--json`; end-of-run summary; strict exit codes; `130` on cancel.
-- [ ] Orchestrator v1: `Run`/`Stage` state machines, sliding-window scheduler (`-c`, default 64, bounded by handle budget), per-stage + global deadlines, `--retries` with jittered backoff, per-node circuit breaker, cancellation token wired to `SignalSource`.
-- [ ] `SshTransport` extracted from `executeRemote`; `ControlMaster` opt-in (`--reuse`); Windows-target quoting (support tier T1); host-key-change reporting UX.
-- [ ] `Inventory` (INI groups/tags/per-host options, XDG/`%APPDATA%` lookup, `clients.txt` import); `pipeshellx run|ping|hosts|shell`; `--policy` file replaces the hardcoded allowlist (allowlist kept as the default policy for `shell` demo mode).
-- [ ] REPL rewritten as a thin client over `Run`; spin-wait threads removed.
-- [ ] Audit log JSONL; file logging with rotation; `run_id`/`stage_id` in `LogContext`.
-- [ ] Integration rig: docker-compose fleet of N `openssh-server` containers; scenarios: success, partial failure, unreachable, hung host, host-key change, identity-file auth, 500-host `ssh localhost` scale check; TSan job on reactor tests; property test "no interleaved partial lines".
-- **Exit criteria:** `tail -F` across 100 containers streams live with flat controller RSS; §7 targets T1–T6 met on Linux and macOS.
+- [x] `stream::{Stream, BoundedBuffer, CreditWindow, LineFramer}`; pipe-level backpressure by interest deregistration; policies `block|drop-oldest|drop-newest|spool`.
+- [x] Live `--stream` (host-prefixed, colour-stable, TTY-detected), `--group` (today's format, kept), `--json`; end-of-run summary; strict exit codes; `130` on cancel.
+- [~] Orchestrator v1: sliding-window scheduler (`-c`, default 64) ✓, per-stage + global deadlines ✓, `--retries` jittered backoff ✓, cancellation via `SignalSource` (exit `130`) ✓, `--fail-fast` ✓. **Deferred:** a formal `Run`/`Stage` state-machine *type* and the per-node **circuit breaker** (premature in the single-command model — the breaker needs multi-stage-per-node work).
+- [x] `SshTransport` extracted from `executeRemote`; `ControlMaster` opt-in (`--reuse`); Windows-target quoting (support tier T1, `--shell posix|cmd|powershell`); host-key-change reporting UX.
+- [x] `Inventory` (INI groups/tags/per-host options, XDG/`%APPDATA%` lookup, `clients.txt` import); `pipeshellx run|ping|hosts|shell`; `--policy` file replaces the hardcoded allowlist (allowlist kept as the default policy for `shell` demo mode).
+- [x] REPL rewritten as a thin client over `Run`; spin-wait threads removed.
+- [x] Audit log JSONL; file logging with rotation; `run_id`/`stage_id` in `LogContext`.
+- [~] Integration rig: property test "no interleaved partial lines" ✓ (randomized, in `test_line_framer.cpp`). **Blocked in this env:** docker-compose `openssh-server` fleet + the TSan job (no Docker daemon available — see the dev-environment notes).
+- **Exit criteria:** `tail -F` across 100 containers streams live with flat controller RSS; §7 targets T1–T6 met on Linux and macOS. _(Functionally implemented; the 100-container docker verification cannot run in the current environment — no Docker daemon. Tagging `v0.3.0` awaits either a Docker-capable host or an explicit decision to record the docker criterion as an environment exception.)_
 
 ### Phase 3 — Windows port (15–20 days) → `v0.4.0`
 Extends `docs/os_abstraction.md`, `docs/deployment.md`, `docs/testing.md`.
