@@ -739,7 +739,7 @@ Extends `docs/os_abstraction.md`, `docs/deployment.md`, `docs/testing.md`.
 
 ### Phase 4 — Native backplane (15–20 days) → `v0.5.0`
 Extends `docs/distributed_execution.md`, `docs/authentication.md`, `docs/security.md`; creates `docs/wire_protocol.md`.
-- [ ] Spike (2 days): frame codec + `OPEN` encoding (CBOR vs TLV) + OpenSSL vs SChannel decision → ADR-006/007.
+- [x] Spike: frame codec (TLV envelope) + `OPEN` encoding (`OpenRequest`) + OpenSSL-vs-SChannel decision → ADR-006 (TLV) / ADR-007 (OpenSSL). In `psx::transport`, bounds-checked + fuzz-style tested.
 - [ ] `os::Socket`, `os::Tls` (mTLS 1.3, SAN-URI identity, CRL file); `transport::NativeTransport` (multiplexed streams, credit windows, `PING`/`PONG` leases, `GOAWAY` drain).
 - [ ] `pipeshellx node` agent: listener, job supervisor (lease expiry kills jobs), `AF_UNIX`/named-pipe local endpoint, metrics endpoint; service install for systemd/launchd/SCM.
 - [ ] `pipeshellx ca init|issue|revoke`; `pipeshellx node enroll` over `SshTransport`.
