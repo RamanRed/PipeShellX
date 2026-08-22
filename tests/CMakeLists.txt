@@ -20,6 +20,11 @@ else()
     endif()
 endif()
 
+set(PIPESHELLX_TLS_TEST_SOURCES "")
+if(PIPESHELLX_NATIVE_TRANSPORT AND OpenSSL_FOUND)
+    set(PIPESHELLX_TLS_TEST_SOURCES unit/os/test_tls.cpp)
+endif()
+
 add_executable(pipeshellx_tests
     unit/os/test_child_exit.cpp
     unit/os/test_handle.cpp
@@ -29,6 +34,7 @@ add_executable(pipeshellx_tests
     unit/os/test_result.cpp
     unit/os/test_signal_source.cpp
     unit/os/test_socket.cpp
+    ${PIPESHELLX_TLS_TEST_SOURCES}
     unit/os/test_system.cpp
     unit/stream/test_bounded_buffer.cpp
     unit/stream/test_credit_window.cpp

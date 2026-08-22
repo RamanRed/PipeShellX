@@ -13,6 +13,10 @@ option(PIPESHELLX_BUILD_TESTS  "Build the GoogleTest suite"                     
 option(PIPESHELLX_BUILD_BENCH  "Build the benchmark harness (bench/)"               ON)
 option(PIPESHELLX_WERROR       "Treat warnings as errors"                           ON)
 option(PIPESHELLX_SYSTEM_GTEST "Use an installed GTest instead of FetchContent"     OFF)
+option(PIPESHELLX_NATIVE_TRANSPORT "Build the native mTLS backplane (needs OpenSSL)"  ON)
+if(PIPESHELLX_NATIVE_TRANSPORT)
+    find_package(OpenSSL)
+endif()
 set(PIPESHELLX_SANITIZE "" CACHE STRING
     "Comma-separated sanitizers to enable (e.g. address,undefined or thread)")
 

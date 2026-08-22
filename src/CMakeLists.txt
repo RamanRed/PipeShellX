@@ -52,6 +52,12 @@ else()
 endif()
 
 # Core library
+set(PIPESHELLX_TLS_SOURCES "")
+if(PIPESHELLX_NATIVE_TRANSPORT AND OpenSSL_FOUND)
+    set(PIPESHELLX_TLS_SOURCES os/tls.cpp)
+    message(STATUS "PipeShellX: native transport enabled (OpenSSL ${OPENSSL_VERSION})")
+endif()
+
 add_library(pipeshellx_lib
     ${PIPESHELLX_OS_SOURCES}
     ${PIPESHELLX_STREAM_SOURCES}
@@ -63,6 +69,7 @@ add_library(pipeshellx_lib
     transport/open_request.cpp
     transport/control_payloads.cpp
     transport/session.cpp
+    ${PIPESHELLX_TLS_SOURCES}
     cli/hosts_command.cpp
     cli/ping_command.cpp
     cli/selection.cpp
@@ -88,6 +95,10 @@ target_link_libraries(pipeshellx_lib
 target_compile_definitions(pipeshellx_lib PUBLIC
     PIPESHELLX_VERSION="${PROJECT_VERSION}"
 )
+if(PIPESHELLX_NATIVE_TRANSPORT AND OpenSSL_FOUND)
+    target_link_libraries(pipeshellx_lib PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+    target_compile_definitions(pipeshellx_lib PUBLIC PIPESHELLX_HAVE_TLS=1)
+endif()
 
 # Interactive executable
 add_executable(pipeshellx_app
