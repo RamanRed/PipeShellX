@@ -23,6 +23,9 @@ enum class Readiness : std::uint8_t { None = 0, Readable = 1, Writable = 2, Hang
 constexpr Readiness operator|(Readiness a, Readiness b) noexcept {
     return static_cast<Readiness>(static_cast<std::uint8_t>(a) | static_cast<std::uint8_t>(b));
 }
+constexpr Interest operator|(Interest a, Interest b) noexcept {
+    return static_cast<Interest>(static_cast<std::uint8_t>(a) | static_cast<std::uint8_t>(b));
+}
 constexpr bool has(Interest set, Interest flag) noexcept {
     return (static_cast<std::uint8_t>(set) & static_cast<std::uint8_t>(flag)) != 0;
 }
