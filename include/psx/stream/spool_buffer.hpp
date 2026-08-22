@@ -35,13 +35,23 @@ public:
         if (bytes.empty()) {
             return true;
         }
+        if (failed_) {
+            return false; // a prior spill failed: drop the rest so the spool stays consistent
+        }
         if (file_ == nullptr) {
             file_ = std::tmpfile();
             if (file_ == nullptr) {
+                failed_ = true;
                 return false;
             }
         }
         if (std::fwrite(bytes.data(), 1, bytes.size(), file_) != bytes.size()) {
+            // A short write may have left partial bytes past the size_ boundary.
+            // Do NOT advance size_ — readAll reads only the first size_ bytes, so
+            // the orphan is ignored — and poison the buffer so no later append
+            // writes past the orphan and corrupts the reconstruction. The caller
+            // drops the rest of the stream (counted).
+            failed_ = true;
             return false;
         }
         size_ += bytes.size();
@@ -64,6 +74,10 @@ public:
         out.resize(static_cast<std::size_t>(size_));
         const std::size_t got = std::fread(out.data(), 1, out.size(), file_);
         out.resize(got);
+        // Leave the stream positioned at the end: C11 forbids a write directly
+        // after a read on an update stream without an intervening seek, so this
+        // keeps a later append() well-defined.
+        (void)std::fseek(file_, 0, SEEK_END);
         return out;
     }
 
@@ -75,8 +89,10 @@ private:
     void moveFrom(SpoolBuffer& other) noexcept {
         file_ = other.file_;
         size_ = other.size_;
+        failed_ = other.failed_;
         other.file_ = nullptr;
         other.size_ = 0;
+        other.failed_ = false;
     }
     void close() noexcept {
         if (file_ != nullptr) {
@@ -84,10 +100,12 @@ private:
             file_ = nullptr;
         }
         size_ = 0;
+        failed_ = false;
     }
 
     std::FILE* file_ = nullptr;
     std::uint64_t size_ = 0;
+    bool failed_ = false; // a spill I/O failure poisons the buffer: drop the rest, keep size_ consistent
 };
 
 } // namespace psx::stream

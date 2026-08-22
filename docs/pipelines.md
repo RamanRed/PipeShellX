@@ -89,7 +89,7 @@ succeeded, `1` some stage failed, `2` usage/config, `3` no hosts selected,
 | `--fail-fast` | Stop the whole run as soon as one stage *finally* fails (after any retries): pending hosts never start, in-flight hosts get SIGTERM then a SIGKILL grace, and the run exits non-zero. Aborted stages are reported as `ERROR: aborted (fail-fast)`. |
 | `--reuse` | Enable ssh `ControlMaster` connection reuse: repeated runs against the same `user@host:port` share one authenticated master socket (under the state dir) and skip the TCP + key-exchange handshake. |
 | `--audit-log FILE` | Append a JSONL audit trail — one `run_started`, one `stage_finished` per host, and one `run_finished` object per line, all sharing the run’s `run_id` and carrying an epoch-millisecond `ts_ms`. An unwritable path degrades to no audit with a warning; it never aborts the run. |
-| `--shell S` | How to quote the remote command line for the target shell: `posix` (default), `cmd`, or `powershell`/`pwsh`. Use `cmd`/`powershell` when the target is a Windows OpenSSH host (support tier T1) so arguments survive the remote shell verbatim. |
+| `--shell S` | How to quote the remote command line for the target shell: `posix` (default), `cmd`, or `powershell`/`pwsh`. Use `cmd`/`powershell` when the target is a Windows OpenSSH host (support tier T1) so each argument is quoted for that shell’s argv parser. This is argv quoting only: cmd.exe metacharacters (`& | < > ^`) are **not** escaped, so avoid passing them as literal arguments to a `cmd` target. |
 
 **Cancellation.** Ctrl-C (SIGINT) cancels an in-flight run gracefully — in-flight
 hosts get SIGTERM then a SIGKILL grace, the end-of-run summary still prints, and

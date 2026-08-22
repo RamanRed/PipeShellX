@@ -48,6 +48,17 @@ TEST(SpoolBufferTest, ResetDiscardsTheSpill) {
     EXPECT_EQ(spool.readAll(), "fresh");
 }
 
+TEST(SpoolBufferTest, AppendAfterReadAllContinuesCorrectly) {
+    // readAll() repositions the stream to the end so a later append() is defined
+    // (C11 forbids a write straight after a read on an update stream).
+    SpoolBuffer spool;
+    ASSERT_TRUE(spool.append("first"));
+    EXPECT_EQ(spool.readAll(), "first");
+    ASSERT_TRUE(spool.append("second"));
+    EXPECT_EQ(spool.readAll(), "firstsecond");
+    EXPECT_EQ(spool.size(), 11U);
+}
+
 TEST(SpoolBufferTest, MoveTransfersOwnership) {
     SpoolBuffer a;
     ASSERT_TRUE(a.append("moved"));

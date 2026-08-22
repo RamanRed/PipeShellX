@@ -6,7 +6,6 @@
 #include "psx/os/console.hpp"
 #include "psx/os/system.hpp"
 
-#include <chrono>
 #include <iostream>
 #include <optional>
 #include <sstream>
