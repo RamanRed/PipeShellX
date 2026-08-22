@@ -4,6 +4,9 @@ find_package(Threads REQUIRED)
 if(WIN32)
     message(FATAL_ERROR "The Win32 backend arrives in Phase 3 (PLAN.md)")
 else()
+    set(PIPESHELLX_STREAM_SOURCES
+        stream/bounded_buffer.cpp
+    )
     set(PIPESHELLX_OS_SOURCES
         os/posix/child_exit.cpp
         os/posix/console.cpp
@@ -35,6 +38,7 @@ endif()
 # Core library
 add_library(pipeshellx_lib
     ${PIPESHELLX_OS_SOURCES}
+    ${PIPESHELLX_STREAM_SOURCES}
     runtime/reactor.cpp
     cli_options.cpp
     client_config.cpp
