@@ -72,7 +72,26 @@ Host selection is `-g GROUP`, `-t TAG`, `-H h1,h2,…`, or all (see
 hosts run at once (default 64, `0` = all): a large fan-out spawns ssh
 processes in a sliding window rather than all at once, so the controller's
 descriptor and process budget stays bounded. Exit codes: `0` all stages
-succeeded, `1` some stage failed, `2` usage/config, `3` no hosts selected.
+succeeded, `1` some stage failed, `2` usage/config, `3` no hosts selected,
+`130` cancelled by Ctrl-C.
+
+## Reliability and operability
+
+| Flag | Effect |
+| --- | --- |
+| `--timeout S` | Per-stage and global deadline; a hung host is SIGKILLed and reported as timed out. |
+| `--retries N` | Retry a stage that fails with a *transient* transport error (connection refused/timed out/reset, host unreachable) up to `N` more times, with equal-jitter exponential backoff. Auth failures, host-key failures, a command’s own non-zero exit, and timeouts are **not** retried. |
+| `--fail-fast` | Stop the whole run as soon as one stage *finally* fails (after any retries): pending hosts never start, in-flight hosts get SIGTERM then a SIGKILL grace, and the run exits non-zero. Aborted stages are reported as `ERROR: aborted (fail-fast)`. |
+| `--reuse` | Enable ssh `ControlMaster` connection reuse: repeated runs against the same `user@host:port` share one authenticated master socket (under the state dir) and skip the TCP + key-exchange handshake. |
+| `--audit-log FILE` | Append a JSONL audit trail — one `run_started`, one `stage_finished` per host, and one `run_finished` object per line, all sharing the run’s `run_id` and carrying an epoch-millisecond `ts_ms`. An unwritable path degrades to no audit with a warning; it never aborts the run. |
+
+**Cancellation.** Ctrl-C (SIGINT) cancels an in-flight run gracefully — in-flight
+hosts get SIGTERM then a SIGKILL grace, the end-of-run summary still prints, and
+the process exits `130`.
+
+**Correlation.** Every log line of one run carries `[run=<id>] [stage=s<index>]`;
+the same `run_id` keys the audit records, so a run’s logs and audit trail can be
+joined offline.
 
 ## Roadmap (Phase 5)
 
