@@ -399,3 +399,31 @@ TEST_F(GoldenRemoteTest, ACommandsOwnNonZeroExitIsNotRetried) {
     EXPECT_EQ(result.clientResults[0].attempts, 1); // a real result, not a transport failure
     EXPECT_EQ(result.clientResults[0].exitCode, 7);
 }
+
+// --- Fail-fast: the first final failure aborts the rest (Phase 2) ---
+
+TEST_F(GoldenRemoteTest, FailFastAbortsTheRemainingWorkers) {
+    // Window of 1, three hosts that all fail: the first failure aborts the two
+    // still-pending workers before they ever spawn.
+    std::vector<ClientEntry> clients{client("a", "h1"), client("b", "h2"), client("c", "h3")};
+    auto result = pm_.executeRemote(clients, "refused", context("refused"),
+                                    {.timeoutSec = 10, .concurrency = 1, .failFast = true});
+    ASSERT_EQ(result.clientResults.size(), 3U);
+    EXPECT_NE(result.exitCode, 0);
+    EXPECT_EQ(result.clientResults[0].exitCode, 255); // the real failure
+    EXPECT_FALSE(result.clientResults[0].aborted);
+    EXPECT_TRUE(result.clientResults[1].aborted); // never ran: aborted
+    EXPECT_TRUE(result.clientResults[2].aborted);
+    EXPECT_EQ(result.clientResults[1].errorMessage, "ERROR: aborted (fail-fast)");
+}
+
+TEST_F(GoldenRemoteTest, WithoutFailFastEveryWorkerStillRuns) {
+    std::vector<ClientEntry> clients{client("a", "h1"), client("b", "h2"), client("c", "h3")};
+    auto result = pm_.executeRemote(clients, "refused", context("refused"), {.timeoutSec = 10, .concurrency = 1});
+    ASSERT_EQ(result.clientResults.size(), 3U);
+    for (const auto& stage : result.clientResults) {
+        EXPECT_FALSE(stage.aborted); // all three were attempted
+        EXPECT_EQ(stage.exitCode, 255);
+        EXPECT_EQ(stage.attempts, 1);
+    }
+}

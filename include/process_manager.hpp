@@ -34,6 +34,7 @@ public:
         std::uint64_t droppedBytes = 0; // bytes discarded by a drop-policy ring
         bool cancelled = false;         // run was cancelled (SIGINT) before this stage finished
         int attempts = 1;               // total attempts made (1 + retries)
+        bool aborted = false;           // killed by --fail-fast because a sibling failed
     };
 
     struct Result {
@@ -83,6 +84,9 @@ public:
         // When true a SIGINT drains in-flight workers (TERM then a KILL grace) and
         // the run reports Result::cancelled (the CLI maps that to exit 130).
         bool cancellable = false;
+        // Stop the whole run on the first stage that finally fails (after any
+        // retries) and report a non-zero exit.
+        bool failFast = false;
         // Extra attempts after the first for a *transient* transport failure
         // (connection refused/timed out/reset, host unreachable). Auth/host-key
         // failures and the command's own non-zero exit are never retried.

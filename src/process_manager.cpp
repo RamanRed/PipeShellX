@@ -75,6 +75,7 @@ struct Worker {
     bool exited = false;
     bool timedOut = false;
     bool cancelled = false;
+    bool aborted = false;           // aborted by --fail-fast because a sibling failed
     int attempt = 0;                // retries performed so far (0 on the first run)
     bool awaitingRetry = false;     // finished a failed attempt, waiting on a backoff timer
     std::uint64_t droppedBytes = 0; // bytes discarded from stdout/stderr by the ring
@@ -107,6 +108,7 @@ struct Worker {
         exited = false;
         timedOut = false;
         cancelled = false;
+        aborted = false;
         droppedBytes = 0;
         inputWritten = 0;
         counted = false;
@@ -142,6 +144,7 @@ public:
               psx::stream::OverflowPolicy policy,
               std::size_t ringBytes,
               bool cancellable,
+              bool failFast,
               int maxRetries,
               std::chrono::milliseconds retryBase,
               std::chrono::milliseconds retryCap)
@@ -149,8 +152,8 @@ public:
           concurrency_(concurrency == 0 ? workers.size() : concurrency), spawn_(std::move(spawn)),
           // Block (or a 0 ring) captures everything; a drop policy bounds it.
           outputCap_(policy == psx::stream::OverflowPolicy::Block ? 0 : ringBytes), outputPolicy_(policy),
-          cancellable_(cancellable), maxRetries_(maxRetries), retryBase_(retryBase), retryCap_(retryCap),
-          rng_(std::random_device{}()) {}
+          cancellable_(cancellable), failFast_(failFast), maxRetries_(maxRetries), retryBase_(retryBase),
+          retryCap_(retryCap), rng_(std::random_device{}()) {}
 
     // The reactor is cached and reused across runs; a timer left in it after
     // this WorkerRun is destroyed would fire into freed memory. Cancel any
@@ -174,6 +177,7 @@ public:
 
     bool anyTimedOut() const noexcept { return anyTimedOut_; }
     bool wasCancelled() const noexcept { return cancelled_; }
+    bool wasAborted() const noexcept { return aborted_; }
 
     void run() {
         remaining_ = workers_.size();
@@ -239,7 +243,19 @@ private:
         worker.counted = true;
         if (--remaining_ == 0) {
             reactor_.stop();
+            return;
         }
+        // --fail-fast: the first final failure aborts every remaining worker.
+        if (failFast_ && !aborted_ && !cancelled_ && isFailure(worker)) {
+            aborted_ = true;
+            Logger::getInstance().log(LogLevel::ERROR, worker.context,
+                                      "Stage failed with --fail-fast; aborting the rest of the run");
+            teardown(StopReason::FailFast);
+        }
+    }
+
+    static bool isFailure(const Worker& worker) noexcept {
+        return worker.timedOut || !worker.failureMessage.empty() || worker.exitCode() != 0;
     }
 
     // Only ssh's own transient transport failures (exit 255 + connect/unreachable
@@ -432,7 +448,7 @@ private:
         fillSlots(); // spawn the next pending worker into the freed slot
     }
 
-    enum class StopReason { Deadline, Cancel };
+    enum class StopReason { Deadline, Cancel, FailFast };
 
     void onDeadline() {
         deadlineTimer_ = 0; // fired: nothing to cancel later
@@ -453,12 +469,12 @@ private:
     }
 
     void teardown(StopReason reason) {
-        const bool cancel = reason == StopReason::Cancel;
-        if (cancel) {
+        const bool deadline = reason == StopReason::Deadline;
+        if (reason == StopReason::Cancel) {
             cancelled_ = true;
-        } else {
+        } else if (deadline) {
             anyTimedOut_ = true;
-        }
+        } // FailFast: aborted_ is already set by the caller
         // Abandon pending backoff timers; those workers end on this attempt.
         for (auto& [index, timer] : retryTimers_) {
             reactor_.cancel(timer);
@@ -502,10 +518,12 @@ private:
             // drain grace below bounds. Signalling after the leader is reaped is
             // deliberate for the grandchild case (regression-tested). Deadline
             // uses SIGKILL; cancel uses SIGTERM and lets the grace escalate.
-            (void)worker.process.signal(cancel ? psx::os::StopSignal::Graceful : psx::os::StopSignal::Kill);
+            (void)worker.process.signal(deadline ? psx::os::StopSignal::Kill : psx::os::StopSignal::Graceful);
             Logger::getInstance().log(LogLevel::ERROR, worker.context,
-                                      cancel ? "Run cancelled; sent SIGTERM to process group"
-                                             : "Command timed out; sent SIGKILL to process group");
+                                      deadline ? "Command timed out; sent SIGKILL to process group"
+                                      : reason == StopReason::Cancel
+                                          ? "Run cancelled; sent SIGTERM to process group"
+                                          : "Run aborted (--fail-fast); sent SIGTERM to process group");
         }
         if (drainTimer_ == 0) {
             drainTimer_ = reactor_.after(kDrainGrace, [this] { onDrainExpired(); });
@@ -513,10 +531,16 @@ private:
     }
 
     void mark(Worker& worker, StopReason reason) {
-        if (reason == StopReason::Cancel) {
-            worker.cancelled = true;
-        } else {
-            worker.timedOut = true;
+        switch (reason) {
+            case StopReason::Cancel:
+                worker.cancelled = true;
+                break;
+            case StopReason::FailFast:
+                worker.aborted = true;
+                break;
+            case StopReason::Deadline:
+                worker.timedOut = true;
+                break;
         }
     }
 
@@ -561,6 +585,8 @@ private:
     bool cancellable_ = false;
     bool cancelled_ = false;
     bool signalRegistered_ = false;
+    bool failFast_ = false;
+    bool aborted_ = false;
     int maxRetries_ = 0;
     std::chrono::milliseconds retryBase_{200};
     std::chrono::milliseconds retryCap_{30000};
@@ -672,7 +698,7 @@ ProcessManager::Result ProcessManager::execute(const std::vector<std::string>& a
     };
 
     WorkerRun run(reactor(), workers, timeoutSec, nullptr, 1, spawnLocal, psx::stream::OverflowPolicy::Block, 0,
-                  /*cancellable=*/false, /*maxRetries=*/0, std::chrono::milliseconds{200},
+                  /*cancellable=*/false, /*failFast=*/false, /*maxRetries=*/0, std::chrono::milliseconds{200},
                   std::chrono::milliseconds{30000});
     run.run();
 
@@ -743,7 +769,7 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
 
     WorkerRun run(reactor(/*withSignals=*/options.cancellable), workers, options.timeoutSec, options.sink,
                   options.concurrency, spawnRemote, options.policy, options.ringBytes, options.cancellable,
-                  options.maxRetries, options.retryBaseDelay, options.retryMaxDelay);
+                  options.failFast, options.maxRetries, options.retryBaseDelay, options.retryMaxDelay);
     run.run();
 
     std::vector<ClientResult> clientResults;
@@ -751,7 +777,13 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
     int overallExitCode = 0;
     for (auto& worker : workers) {
         const int exitCode = worker.exitCode();
-        if (exitCode != 0 || worker.timedOut) {
+        if (worker.aborted) {
+            // Killed because a sibling failed: a generic failure that must not
+            // overwrite the real failing exit code with the kill's -1.
+            if (overallExitCode == 0) {
+                overallExitCode = 1;
+            }
+        } else if (exitCode != 0 || worker.timedOut) {
             overallExitCode = exitCode == 0 ? 1 : exitCode;
         }
         clientResults.push_back(ClientResult{worker.clientId,
@@ -762,7 +794,8 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
                                              worker.timedOut,
                                              worker.droppedBytes,
                                              worker.cancelled,
-                                             worker.attempt + 1});
+                                             worker.attempt + 1,
+                                             worker.aborted});
     }
 
     for (std::size_t index = 0; index < clientResults.size(); ++index) {
@@ -820,6 +853,9 @@ std::string ProcessManager::formatClientResults(const std::vector<ClientResult>&
 std::string ProcessManager::classifyRemoteError(const ClientResult& clientResult) const {
     if (clientResult.cancelled) {
         return "ERROR: cancelled";
+    }
+    if (clientResult.aborted) {
+        return "ERROR: aborted (fail-fast)";
     }
     if (clientResult.timedOut) {
         return "ERROR: command timed out";

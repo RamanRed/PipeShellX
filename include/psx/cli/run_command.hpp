@@ -39,6 +39,7 @@ struct RunInvocation {
     std::string policyPath;           // --policy FILE: restrict the command (empty = unrestricted)
     bool reuse = false;               // --reuse: ssh ControlMaster connection reuse
     int retries = 0;                  // --retries N: extra attempts on a transient transport failure
+    bool failFast = false;            // --fail-fast: abort the run on the first final failure
     bool colour = true;               // --no-color turns it off
     std::vector<std::string> command; // the argv after `--`
 };

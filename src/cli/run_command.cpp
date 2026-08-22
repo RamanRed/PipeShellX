@@ -160,6 +160,8 @@ RunInvocation parseRun(const std::vector<std::string>& args) {
             invocation.reuse = true;
         } else if (arg == "--retries") {
             invocation.retries = parseIntArg(valueFor(i, arg), "--retries");
+        } else if (arg == "--fail-fast") {
+            invocation.failFast = true;
         } else if (arg == "--no-color" || arg == "--no-colour") {
             invocation.colour = false;
         } else {
@@ -254,6 +256,7 @@ int runSubcommand(const RunInvocation& invocation, std::ostream& out, std::ostre
                                                .ringBytes = invocation.ringBytes,
                                                .controlPath = controlPath,
                                                .cancellable = true,
+                                               .failFast = invocation.failFast,
                                                .maxRetries = invocation.retries});
     if (result.cancelled) {
         return kExitCancelled; // 130
