@@ -2,6 +2,8 @@
 
 #include "psx/stream/line_framer.hpp"
 
+#include <algorithm>
+#include <random>
 #include <span>
 #include <string>
 #include <string_view>
@@ -135,4 +137,114 @@ TEST(LineFramerTest, NoInterleavedPartialLinesProperty) {
         feed(framer, c, lines);
     }
     EXPECT_EQ(lines, (std::vector<std::string>{"hello world", "foo bar", "baz"}));
+}
+
+namespace {
+
+// A deterministic corpus of newline-terminated text, varied in line length
+// (including empty lines) so chunk splits land in many positions.
+std::string makeStream(std::mt19937& rng, int lineCount) {
+    std::uniform_int_distribution<int> lineLen(0, 40);
+    std::uniform_int_distribution<int> ch('a', 'z');
+    std::string out;
+    for (int i = 0; i < lineCount; ++i) {
+        const int n = lineLen(rng);
+        for (int j = 0; j < n; ++j) {
+            out.push_back(static_cast<char>(ch(rng)));
+        }
+        out.push_back('\n');
+    }
+    return out;
+}
+
+// Splits `data` into random-sized chunks (1..maxChunk bytes).
+std::vector<std::string> randomChunks(std::mt19937& rng, const std::string& data, std::size_t maxChunk) {
+    std::vector<std::string> chunks;
+    std::uniform_int_distribution<std::size_t> size(1, maxChunk);
+    std::size_t pos = 0;
+    while (pos < data.size()) {
+        const std::size_t n = std::min(size(rng), data.size() - pos);
+        chunks.push_back(data.substr(pos, n));
+        pos += n;
+    }
+    return chunks;
+}
+
+std::vector<std::string> splitLines(const std::string& data) {
+    std::vector<std::string> lines;
+    std::string current;
+    for (char c : data) {
+        if (c == '\n') {
+            lines.push_back(current);
+            current.clear();
+        } else {
+            current.push_back(c);
+        }
+    }
+    return lines; // data always ends in '\n', so no trailing partial
+}
+
+} // namespace
+
+// Property: the framed output is invariant under chunk boundaries. For many
+// random streams cut at many random boundaries, the emitted lines equal exactly
+// the newline-delimited lines of the input — no fragment, no merge, no loss.
+TEST(LineFramerTest, ChunkBoundariesDoNotChangeTheFramedLines) {
+    std::mt19937 rng(0xC0FFEE);
+    for (int trial = 0; trial < 500; ++trial) {
+        std::uniform_int_distribution<int> lineCount(0, 30);
+        const std::string stream = makeStream(rng, lineCount(rng));
+        const std::vector<std::string> expected = splitLines(stream);
+
+        LineFramer framer;
+        std::vector<std::string> got;
+        for (const auto& chunk : randomChunks(rng, stream, 7)) {
+            feed(framer, chunk, got);
+        }
+        framer.flush([&](std::string_view line, bool truncated) {
+            got.emplace_back(line);
+            EXPECT_FALSE(truncated);
+        });
+        ASSERT_EQ(got, expected) << "trial " << trial;
+    }
+}
+
+// Property: two producers multiplexed through separate framers into one shared
+// sink never interleave a partial line. Each recorded emission is a complete
+// line tagged with its producer; per producer the lines arrive in order and
+// equal that producer's input exactly, regardless of how the two byte streams
+// are interleaved chunk-by-chunk.
+TEST(LineFramerTest, TwoProducersNeverInterleaveAPartialLine) {
+    std::mt19937 rng(0x5EED);
+    for (int trial = 0; trial < 300; ++trial) {
+        std::uniform_int_distribution<int> lineCount(0, 20);
+        const std::string a = makeStream(rng, lineCount(rng));
+        const std::string b = makeStream(rng, lineCount(rng));
+        const auto expectedA = splitLines(a);
+        const auto expectedB = splitLines(b);
+
+        auto chunksA = randomChunks(rng, a, 5);
+        auto chunksB = randomChunks(rng, b, 5);
+        LineFramer framerA;
+        LineFramer framerB;
+        std::vector<std::string> gotA;
+        std::vector<std::string> gotB;
+
+        // Interleave the two chunk queues in a random order.
+        std::size_t ia = 0;
+        std::size_t ib = 0;
+        while (ia < chunksA.size() || ib < chunksB.size()) {
+            const bool takeA = ib >= chunksB.size() || (ia < chunksA.size() && (rng() & 1));
+            if (takeA) {
+                feed(framerA, chunksA[ia++], gotA);
+            } else {
+                feed(framerB, chunksB[ib++], gotB);
+            }
+        }
+        framerA.flush([&](std::string_view line, bool) { gotA.emplace_back(line); });
+        framerB.flush([&](std::string_view line, bool) { gotB.emplace_back(line); });
+
+        ASSERT_EQ(gotA, expectedA) << "producer A, trial " << trial;
+        ASSERT_EQ(gotB, expectedB) << "producer B, trial " << trial;
+    }
 }
