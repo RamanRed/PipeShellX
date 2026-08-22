@@ -10,6 +10,9 @@ else()
         stream/line_framer.cpp
         stream/stream.cpp
     )
+    set(PIPESHELLX_INVENTORY_SOURCES
+        inventory/inventory.cpp
+    )
     set(PIPESHELLX_SINK_SOURCES
         sink/group_sink.cpp
         sink/json_sink.cpp
@@ -48,6 +51,7 @@ add_library(pipeshellx_lib
     ${PIPESHELLX_OS_SOURCES}
     ${PIPESHELLX_STREAM_SOURCES}
     ${PIPESHELLX_SINK_SOURCES}
+    ${PIPESHELLX_INVENTORY_SOURCES}
     runtime/reactor.cpp
     cli_options.cpp
     client_config.cpp

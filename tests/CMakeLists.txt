@@ -33,6 +33,7 @@ add_executable(pipeshellx_tests
     unit/stream/test_credit_window.cpp
     unit/stream/test_stream.cpp
     unit/sink/test_sinks.cpp
+    unit/inventory/test_inventory.cpp
     unit/stream/test_line_framer.cpp
     unit/runtime/test_reactor.cpp
     test_cli_options.cpp
