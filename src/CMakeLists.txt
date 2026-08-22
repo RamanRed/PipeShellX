@@ -9,9 +9,16 @@ else()
         os/posix/handle.cpp
         os/posix/io.cpp
         os/posix/pipe.cpp
+        os/posix/poller.cpp
+        os/posix/poller_poll.cpp
         os/posix/process.cpp
         os/posix/signal.cpp
     )
+    if(APPLE OR CMAKE_SYSTEM_NAME MATCHES "BSD|DragonFly")
+        list(APPEND PIPESHELLX_OS_SOURCES os/posix/poller_kqueue.cpp)
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        list(APPEND PIPESHELLX_OS_SOURCES os/posix/poller_epoll.cpp)
+    endif()
 endif()
 
 # Core library
