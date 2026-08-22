@@ -35,6 +35,7 @@ add_executable(pipeshellx_tests
     unit/sink/test_sinks.cpp
     unit/inventory/test_inventory.cpp
     unit/cli/test_run_command.cpp
+    unit/cli/test_ping_command.cpp
     unit/stream/test_line_framer.cpp
     unit/runtime/test_reactor.cpp
     test_cli_options.cpp

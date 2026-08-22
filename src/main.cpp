@@ -1,6 +1,7 @@
 #include "cli_options.hpp"
 #include "logger.hpp"
 #include "psx/cli/hosts_command.hpp"
+#include "psx/cli/ping_command.hpp"
 #include "psx/cli/run_command.hpp"
 #include "psx/os/console.hpp"
 #include "psx/os/io.hpp"
@@ -54,6 +55,7 @@ const char* kTopUsage = R"(Usage: pipeshellx <command> [options]
 Commands:
   run    [-i FILE] [-g GROUP|-t TAG|-H h1,h2] [--stream|--group|--json]
          [--timeout S] [--no-color] -- <command...>   run a command on hosts
+  ping   [-i FILE] [-g GROUP|-t TAG|-H h1,h2] [--timeout S]   probe reachability
   hosts  [-i FILE]                                     list inventory hosts
   shell  [--verbose] [--log-file PATH]                 interactive REPL (default)
 
@@ -83,6 +85,17 @@ int main(int argc, char** argv) {
                                                psx::os::isInteractive(psx::os::StandardStream::Output));
             } catch (const psx::cli::CliError& ex) {
                 std::cerr << "pipeshellx run: " << ex.what() << "\n";
+                return kExitUsage;
+            }
+        }
+
+        if (!args.empty() && args[0] == "ping") {
+            initLogging(CliOptions{});
+            try {
+                const auto invocation = psx::cli::parsePing(std::vector<std::string>(args.begin() + 1, args.end()));
+                return psx::cli::pingSubcommand(invocation, std::cout, std::cerr);
+            } catch (const psx::cli::CliError& ex) {
+                std::cerr << "pipeshellx ping: " << ex.what() << "\n";
                 return kExitUsage;
             }
         }

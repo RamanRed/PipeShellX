@@ -174,21 +174,21 @@ TEST_F(GoldenRemoteTest, CommandExecutorStreamsHeadersAndLinesPerClient) {
     CommandExecutor executor;
     std::vector<std::string> lines;
     std::vector<bool> isStdout;
-    // The allowlisted command is single-quoted per argument ('echo' 'hi'), which
-    // the fake ssh rejects on stderr with exit 9 — enough to pin the contract:
-    // one "CLIENT <id>" header line, then output/error lines, per client.
+    // The allowlisted command is single-quoted per argument ('echo' 'hi'); the
+    // fake ssh echoes it back. Pins the streaming contract: one "CLIENT <id>"
+    // header line, then the output line, per client.
     auto result =
         executor.executeOnClients("echo hi", {client("alice", "h1")}, "golden", [&](const std::string& line, bool out) {
             lines.push_back(line);
             isStdout.push_back(out);
         });
-    ASSERT_GE(lines.size(), 2U);
+    ASSERT_EQ(lines.size(), 2U);
     EXPECT_EQ(lines[0], "CLIENT alice@h1");
     EXPECT_TRUE(isStdout[0]);
-    EXPECT_EQ(lines[1], "ERROR: command failed with exit code 9");
-    EXPECT_FALSE(isStdout[1]);
+    EXPECT_EQ(lines[1], "hi");
+    EXPECT_TRUE(isStdout[1]);
     ASSERT_EQ(result.clientResults.size(), 1U);
-    EXPECT_EQ(result.exitCode, 9);
+    EXPECT_EQ(result.exitCode, 0);
 }
 
 // --- Sink integration: executeRemote streams live, framed, per-stage lines ---

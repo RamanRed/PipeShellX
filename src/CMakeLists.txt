@@ -54,6 +54,8 @@ add_library(pipeshellx_lib
     ${PIPESHELLX_INVENTORY_SOURCES}
     runtime/reactor.cpp
     cli/hosts_command.cpp
+    cli/ping_command.cpp
+    cli/selection.cpp
     cli/run_command.cpp
     cli_options.cpp
     client_config.cpp

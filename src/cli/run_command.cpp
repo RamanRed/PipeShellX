@@ -3,7 +3,7 @@
 #include "client_config.hpp"
 #include "logger.hpp"
 #include "process_manager.hpp"
-#include "psx/inventory/inventory.hpp"
+#include "psx/cli/selection.hpp"
 #include "psx/os/paths.hpp"
 #include "psx/os/system.hpp"
 #include "psx/sink/group_sink.hpp"
@@ -11,10 +11,7 @@
 #include "psx/sink/stream_sink.hpp"
 
 #include <charconv>
-#include <filesystem>
-#include <fstream>
 #include <memory>
-#include <sstream>
 
 namespace psx::cli {
 
@@ -126,18 +123,6 @@ RunInvocation parseRun(const std::vector<std::string>& args) {
 
 namespace {
 
-// Turns an inventory Host into the SSH descriptor the transport understands.
-ClientEntry toClientEntry(const psx::inventory::Host& host, const std::string& knownHosts) {
-    ClientEntry entry;
-    entry.user = host.user;
-    entry.host = host.host;
-    entry.port = host.port;
-    entry.identityFile = host.identity;
-    entry.knownHostsFile = knownHosts;
-    entry.raw = entry.serialize();
-    return entry;
-}
-
 std::unique_ptr<psx::sink::Sink>
 makeSink(const RunInvocation& invocation, std::ostream& out, std::ostream& err, bool colourTty) {
     switch (invocation.sink) {
@@ -151,62 +136,14 @@ makeSink(const RunInvocation& invocation, std::ostream& out, std::ostream& err, 
     }
 }
 
-std::vector<psx::inventory::Host> selectHosts(const psx::inventory::Inventory& inventory, const Selector& selector) {
-    switch (selector.kind) {
-        case SelectorKind::Group:
-            return inventory.selectGroup(selector.value);
-        case SelectorKind::Tag:
-            return inventory.selectTag(selector.value);
-        case SelectorKind::Hosts:
-            return inventory.selectHosts(selector.hosts);
-        case SelectorKind::All:
-        default:
-            return inventory.all();
-    }
-}
-
 } // namespace
 
 int runSubcommand(const RunInvocation& invocation, std::ostream& out, std::ostream& err, bool colourTty) {
-    // Resolve the inventory: -i INI, else a clients.txt in the working directory.
-    psx::inventory::Inventory inventory;
-    std::string inventoryPath = invocation.inventoryPath;
-    try {
-        if (!inventoryPath.empty()) {
-            inventory = psx::inventory::Inventory::loadFromFile(inventoryPath);
-        } else if (std::filesystem::exists("clients.txt")) {
-            std::ifstream file("clients.txt");
-            std::stringstream buffer;
-            buffer << file.rdbuf();
-            inventory = psx::inventory::Inventory::importClientsTxt(buffer.str(), "clients.txt");
-            inventoryPath = "clients.txt";
-        } else {
-            err << "pipeshellx run: no inventory (pass -i FILE or add a clients.txt)\n";
-            return 2;
-        }
-    } catch (const std::exception& ex) {
-        err << "pipeshellx run: " << ex.what() << "\n";
-        return 2;
+    const ResolvedHosts resolved = resolveHosts(invocation.inventoryPath, invocation.selector, err);
+    if (!resolved.ok()) {
+        return resolved.exitCode;
     }
-
-    std::vector<psx::inventory::Host> hosts;
-    try {
-        hosts = selectHosts(inventory, invocation.selector);
-    } catch (const std::exception& ex) {
-        err << "pipeshellx run: " << ex.what() << "\n";
-        return 2;
-    }
-    if (hosts.empty()) {
-        err << "pipeshellx run: no hosts selected\n";
-        return 3;
-    }
-
-    const std::string knownHosts = ClientConfig::knownHostsPathFor(inventoryPath);
-    std::vector<ClientEntry> clients;
-    clients.reserve(hosts.size());
-    for (const auto& host : hosts) {
-        clients.push_back(toClientEntry(host, knownHosts));
-    }
+    const std::vector<ClientEntry>& clients = resolved.clients;
 
     // Reuse the existing per-argument quoting for the remote command line.
     std::string remoteCommand;
