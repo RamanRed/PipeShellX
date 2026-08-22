@@ -22,7 +22,6 @@ install_manifest.txt
 *.a
 *.o
 *.obj
-PLAN.md
 .claude
 
 # Test and runtime artifacts
