@@ -30,6 +30,7 @@ struct RunInvocation {
     Selector selector;
     SinkMode sink = SinkMode::Group;
     int timeoutSec = 0;
+    int concurrency = 64;             // -c / --concurrency: workers in flight (0 = all at once)
     bool colour = true;               // --no-color turns it off
     std::vector<std::string> command; // the argv after `--`
 };

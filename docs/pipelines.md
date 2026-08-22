@@ -59,7 +59,10 @@ pipeshellx run -i fleet.ini --json -- df -h
 ```
 
 Host selection is `-g GROUP`, `-t TAG`, `-H h1,h2,…`, or all (see
-`docs/authentication.md` for the inventory format). Exit codes: `0` all stages
+`docs/authentication.md` for the inventory format). `-c N` bounds how many
+hosts run at once (default 64, `0` = all): a large fan-out spawns ssh
+processes in a sliding window rather than all at once, so the controller's
+descriptor and process budget stays bounded. Exit codes: `0` all stages
 succeeded, `1` some stage failed, `2` usage/config, `3` no hosts selected.
 
 ## Roadmap (Phase 5)

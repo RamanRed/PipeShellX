@@ -96,6 +96,8 @@ RunInvocation parseRun(const std::vector<std::string>& args) {
             invocation.inventoryPath = valueFor(i, arg);
         } else if (arg == "--timeout") {
             invocation.timeoutSec = parseIntArg(valueFor(i, arg), "--timeout");
+        } else if (arg == "-c" || arg == "--concurrency") {
+            invocation.concurrency = parseIntArg(valueFor(i, arg), "--concurrency");
         } else if (arg == "--stream") {
             setSink(invocation, SinkMode::Stream, sinkSet);
         } else if (arg == "--group") {
@@ -165,7 +167,8 @@ int runSubcommand(const RunInvocation& invocation, std::ostream& out, std::ostre
     auto sink = makeSink(invocation, out, err, colourTty);
     ProcessManager manager;
     const LogContext context{psx::os::currentProcessId(), "run", "-", remoteCommand};
-    const auto result = manager.executeRemote(clients, remoteCommand, context, invocation.timeoutSec, sink.get());
+    const auto result = manager.executeRemote(clients, remoteCommand, context, invocation.timeoutSec, sink.get(),
+                                              static_cast<std::size_t>(invocation.concurrency));
     return result.exitCode == 0 ? 0 : 1;
 }
 

@@ -10,6 +10,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <functional>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -70,6 +71,7 @@ struct Worker {
     bool exited = false;
     bool timedOut = false;
     bool counted = false; // WorkerRun: already subtracted from the remaining count
+    bool spawned = false; // WorkerRun: spawnFn has been invoked for this worker
 
     bool complete() const noexcept { return exited && stdoutClosed && stderrClosed && stdinClosed; }
 
@@ -99,8 +101,17 @@ struct Worker {
 // kDrainGrace, then abandon whatever still holds the pipes.
 class WorkerRun {
 public:
-    WorkerRun(Reactor& reactor, std::vector<Worker>& workers, int timeoutSec, psx::sink::Sink* sink)
-        : reactor_(reactor), workers_(workers), timeoutSec_(timeoutSec), sink_(sink) {}
+    // `spawn(index)` populates workers_[index] (process + streams); the run
+    // keeps at most `concurrency` workers in flight, spawning the next pending
+    // one as each running process exits. concurrency 0 means "all at once".
+    WorkerRun(Reactor& reactor,
+              std::vector<Worker>& workers,
+              int timeoutSec,
+              psx::sink::Sink* sink,
+              std::size_t concurrency,
+              std::function<void(std::size_t)> spawn)
+        : reactor_(reactor), workers_(workers), timeoutSec_(timeoutSec), sink_(sink),
+          concurrency_(concurrency == 0 ? workers.size() : concurrency), spawn_(std::move(spawn)) {}
 
     // The reactor is cached and reused across runs; a timer left in it after
     // this WorkerRun is destroyed would fire into freed memory. Cancel any
@@ -118,13 +129,10 @@ public:
 
     void run() {
         remaining_ = workers_.size();
-        for (auto& worker : workers_) {
-            arm(worker);
-            account(worker); // workers that failed to start are already complete
-        }
         if (timeoutSec_ > 0) {
             deadlineTimer_ = reactor_.after(std::chrono::seconds(timeoutSec_), [this] { onDeadline(); });
         }
+        fillSlots();
         // Reactor::run() returns immediately if account() already called stop().
         if (auto ran = reactor_.run(); !ran.ok()) {
             fail("event loop failed", ran.error());
@@ -132,6 +140,30 @@ public:
     }
 
 private:
+    // Spawns pending workers until `concurrency` are in flight. Reentrancy-safe:
+    // arm() can complete a fast-exiting worker synchronously (calling back into
+    // fillSlots); the guard makes the nested call a no-op and the outer loop
+    // refills the freed slot.
+    void fillSlots() {
+        if (filling_) {
+            return;
+        }
+        filling_ = true;
+        while (inFlight_ < concurrency_ && nextToSpawn_ < workers_.size()) {
+            const std::size_t index = nextToSpawn_++;
+            Worker& worker = workers_[index];
+            worker.spawned = true;
+            spawn_(index);
+            if (worker.process.running()) {
+                ++inFlight_;
+                arm(worker); // may call onExit() synchronously for a fast child
+            } else {
+                account(worker); // failed to start: complete now, no slot consumed
+            }
+        }
+        filling_ = false;
+    }
+
     // O(1) completion tracking: each worker is subtracted from `remaining_`
     // exactly once, when it first becomes complete; the loop stops at zero.
     void account(Worker& worker) {
@@ -157,6 +189,9 @@ private:
     void arm(Worker& worker) {
         if (!worker.process.running()) {
             return; // could not be started: already complete
+        }
+        if (sink_ != nullptr) {
+            sink_->stageStarted(worker.clientId);
         }
         watch(worker, worker.stdoutReader, psx::os::Interest::Readable, worker.stdoutToken,
               [this, &worker](psx::os::Readiness readiness) { onReadable(worker, true, readiness); });
@@ -275,14 +310,26 @@ private:
             worker.status = blocking.value(); // notified, so this cannot block for long
         }
         worker.exited = true;
+        if (inFlight_ > 0) {
+            --inFlight_; // this ssh process is gone; its slot is free
+        }
         if (Logger::getInstance().enabled(LogLevel::DEBUG)) {
             Logger::getInstance().log(LogLevel::DEBUG, worker.context, "Child process reaped");
         }
         account(worker);
+        fillSlots(); // spawn the next pending worker into the freed slot
     }
 
     void onDeadline() {
         deadlineTimer_ = 0; // fired: nothing to cancel later
+        // Pending workers never got a slot; they are timed out without running.
+        while (nextToSpawn_ < workers_.size()) {
+            Worker& pending = workers_[nextToSpawn_++];
+            pending.timedOut = true;
+            anyTimedOut_ = true;
+            pending.stdoutClosed = pending.stderrClosed = pending.stdinClosed = pending.exited = true;
+            account(pending);
+        }
         for (auto& worker : workers_) {
             if (worker.complete()) {
                 continue;
@@ -326,7 +373,12 @@ private:
     std::vector<Worker>& workers_;
     int timeoutSec_;
     psx::sink::Sink* sink_ = nullptr;
+    std::size_t concurrency_ = 1;
+    std::function<void(std::size_t)> spawn_;
     std::size_t remaining_ = 0;
+    std::size_t nextToSpawn_ = 0;
+    std::size_t inFlight_ = 0;
+    bool filling_ = false;
     psx::runtime::TimerId deadlineTimer_ = 0;
     psx::runtime::TimerId drainTimer_ = 0;
     bool anyTimedOut_ = false;
@@ -413,20 +465,23 @@ ProcessManager::Result ProcessManager::execute(const std::vector<std::string>& a
     worker.context = context;
     worker.input = input;
 
-    SpawnSpec spec;
-    spec.program = args.front(); // PATH lookup when there is no '/', like execvp
-    spec.argv = args;
-    spec.limits.cpuSeconds = kLocalCpuSeconds;
-    spec.limits.addressSpaceBytes = kLocalAddressSpaceBytes;
-    Logger::getInstance().log(LogLevel::DEBUG, context, "Creating IPC pipes");
-    spawnWorker(worker, std::move(spec), !input.empty());
-    if (worker.process.running()) {
-        Logger::getInstance().log(LogLevel::INFO,
-                                  LogContext{worker.process.id(), context.sessionId, context.clientId, context.command},
-                                  "Child process created");
-    }
+    const bool feedInput = !input.empty();
+    auto spawnLocal = [&](std::size_t) {
+        SpawnSpec spec;
+        spec.program = args.front(); // PATH lookup when there is no '/', like execvp
+        spec.argv = args;
+        spec.limits.cpuSeconds = kLocalCpuSeconds;
+        spec.limits.addressSpaceBytes = kLocalAddressSpaceBytes;
+        Logger::getInstance().log(LogLevel::DEBUG, context, "Creating IPC pipes");
+        spawnWorker(worker, std::move(spec), feedInput);
+        if (worker.process.running()) {
+            Logger::getInstance().log(
+                LogLevel::INFO, LogContext{worker.process.id(), context.sessionId, context.clientId, context.command},
+                "Child process created");
+        }
+    };
 
-    WorkerRun run(reactor(), workers, timeoutSec, nullptr);
+    WorkerRun run(reactor(), workers, timeoutSec, nullptr, 1, spawnLocal);
     run.run();
 
     Logger::getInstance().log(worker.exitCode() == 0 ? LogLevel::INFO : LogLevel::ERROR, context,
@@ -439,27 +494,32 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
                                                      const std::string& remoteCommand,
                                                      const LogContext& context,
                                                      int timeoutSec,
-                                                     psx::sink::Sink* sink) {
+                                                     psx::sink::Sink* sink,
+                                                     std::size_t concurrency) {
     if (clients.empty()) {
         throw std::runtime_error("no clients configured for remote execution");
     }
 
     std::vector<Worker> workers(clients.size());
     for (std::size_t index = 0; index < clients.size(); ++index) {
+        Worker& worker = workers[index];
+        worker.clientId = clients[index].clientId();
+        worker.context = LogContext{context.pid, context.sessionId, clients[index].clientId(),
+                                    "ssh " + clients[index].clientId() + " " + remoteCommand};
+    }
+
+    auto spawnRemote = [&](std::size_t index) {
         const ClientEntry& client = clients[index];
         Worker& worker = workers[index];
-        worker.clientId = client.clientId();
-        worker.context = LogContext{context.pid, context.sessionId, client.clientId(),
-                                    "ssh " + client.clientId() + " " + remoteCommand};
 
-        // Passwords never touch argv: sshpass reads the secret from an
-        // inherited pipe created here (non-inheritable everywhere else).
+        // Passwords never touch argv: sshpass reads the secret from an inherited
+        // pipe created here (non-inheritable everywhere else).
         Pipe passwordPipe;
         SpawnSpec spec;
         if (!client.password.empty()) {
             if (client.password.size() >= kMaxPasswordBytes) {
                 worker.failToStart("password too long for secure hand-off\n");
-                continue;
+                return;
             }
             auto created = Pipe::create();
             if (!created.ok()) {
@@ -485,15 +545,9 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
             Logger::getInstance().log(LogLevel::INFO, created, "Remote SSH worker created");
         }
         // passwordPipe closes here: only the child holds the secret now.
-    }
+    };
 
-    if (sink != nullptr) {
-        for (const auto& worker : workers) {
-            sink->stageStarted(worker.clientId);
-        }
-    }
-
-    WorkerRun run(reactor(), workers, timeoutSec, sink);
+    WorkerRun run(reactor(), workers, timeoutSec, sink, concurrency, spawnRemote);
     run.run();
 
     std::vector<ClientResult> clientResults;

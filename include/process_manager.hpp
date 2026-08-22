@@ -4,6 +4,7 @@
 #include "logger.hpp"
 #include "ssh_auth.hpp"
 
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <vector>
@@ -57,11 +58,15 @@ public:
     // When `sink` is non-null it receives live, line-framed, per-stage output
     // (host-tagged) during the run, plus a stageFinished per client and a
     // final runFinished; the returned Result still carries the full capture.
+    // `concurrency` bounds how many workers run at once (0 = all at once,
+    // the default is 64): a large fan-out spawns ssh processes in a sliding
+    // window rather than all at once.
     Result executeRemote(const std::vector<ClientEntry>& clients,
                          const std::string& remoteCommand,
                          const LogContext& context,
                          int timeoutSec = 0,
-                         psx::sink::Sink* sink = nullptr);
+                         psx::sink::Sink* sink = nullptr,
+                         std::size_t concurrency = 64);
 
 private:
     psx::runtime::Reactor& reactor();

@@ -157,6 +157,7 @@ case "$cmd" in
   pw)       echo "pw=$PSX_FAKE_PW"; exit 0 ;;
   big)      head -c 200000 /dev/zero | tr '\0' 'o'; head -c 100000 /dev/zero | tr '\0' 'e' >&2; exit 0 ;;
   echo)     shift; printf '%s\n' "$*"; exit 0 ;;
+  slow)     sleep 0.3; echo "host=$target"; exit 0 ;;
   *)        echo "fake ssh: unknown command '$last'" >&2; exit 9 ;;
 esac
 )sh");

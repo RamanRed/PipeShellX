@@ -13,6 +13,7 @@
 #include "psx/sink/stream_sink.hpp"
 #include "test_support.hpp"
 
+#include <chrono>
 #include <sstream>
 
 #include <chrono>
@@ -245,4 +246,58 @@ TEST_F(GoldenRemoteTest, SinkAndResultCaptureAgree) {
     ASSERT_EQ(result.clientResults.size(), 1U);
     EXPECT_EQ(result.clientResults[0].stdoutData, "host=alice@h1\n");
     EXPECT_EQ(out.str(), "CLIENT alice@h1\nhost=alice@h1\n");
+}
+
+// --- Sliding-window scheduler (-c concurrency) ---
+
+TEST_F(GoldenRemoteTest, LowConcurrencyStillRunsEveryHostCorrectly) {
+    std::vector<ClientEntry> clients;
+    for (int i = 0; i < 6; ++i) {
+        clients.push_back(client("u" + std::to_string(i), "h" + std::to_string(i)));
+    }
+    // Window of 2: workers spawn in waves but every one must run and report.
+    auto result = pm_.executeRemote(clients, "ok", context("ok"), 20, nullptr, /*concurrency=*/2);
+    EXPECT_EQ(result.exitCode, 0);
+    ASSERT_EQ(result.clientResults.size(), 6U);
+    for (int i = 0; i < 6; ++i) {
+        EXPECT_EQ(result.clientResults[i].clientId, "u" + std::to_string(i) + "@h" + std::to_string(i));
+        EXPECT_EQ(result.clientResults[i].stdoutData, "host=u" + std::to_string(i) + "@h" + std::to_string(i) + "\n");
+    }
+}
+
+TEST_F(GoldenRemoteTest, ConcurrencyBoundsHowManyWorkersRunAtOnce) {
+    std::vector<ClientEntry> clients;
+    for (int i = 0; i < 4; ++i) {
+        clients.push_back(client("u" + std::to_string(i), "h" + std::to_string(i)));
+    }
+    // Each `slow` worker sleeps ~0.3 s. Serialised (-c 1) that is ~1.2 s;
+    // fully parallel (-c 4) it is ~0.3 s. The gap proves the window throttles.
+    const auto t0 = std::chrono::steady_clock::now();
+    auto serial = pm_.executeRemote(clients, "slow", context("slow"), 30, nullptr, /*concurrency=*/1);
+    const auto serialTime = std::chrono::steady_clock::now() - t0;
+    EXPECT_EQ(serial.exitCode, 0) << serial.stderrData;
+
+    const auto t1 = std::chrono::steady_clock::now();
+    auto parallel = pm_.executeRemote(clients, "slow", context("slow"), 30, nullptr, /*concurrency=*/4);
+    const auto parallelTime = std::chrono::steady_clock::now() - t1;
+    EXPECT_EQ(parallel.exitCode, 0);
+
+    EXPECT_GE(serialTime, std::chrono::milliseconds(1000)) << "4x0.3s serialised should exceed 1s";
+    EXPECT_LT(parallelTime, std::chrono::milliseconds(900)) << "4x0.3s in parallel should be well under 1s";
+    EXPECT_GT(serialTime, parallelTime * 2) << "the window clearly throttles concurrency";
+}
+
+TEST_F(GoldenRemoteTest, TimeoutWithPendingWorkersDoesNotHang) {
+    std::vector<ClientEntry> clients;
+    for (int i = 0; i < 6; ++i) {
+        clients.push_back(client("u" + std::to_string(i), "h" + std::to_string(i)));
+    }
+    // Window 1, each host sleeps 0.3 s, 1 s deadline: only ~3 run before the
+    // deadline; the pending ones must be reported timed-out, not hang the run.
+    const auto t0 = std::chrono::steady_clock::now();
+    auto result = pm_.executeRemote(clients, "slow", context("slow"), 1, nullptr, /*concurrency=*/1);
+    const auto elapsed = std::chrono::steady_clock::now() - t0;
+    EXPECT_TRUE(result.timedOut);
+    EXPECT_EQ(result.clientResults.size(), 6U);
+    EXPECT_LT(elapsed, std::chrono::seconds(4)) << "must not wait for the un-spawned workers";
 }

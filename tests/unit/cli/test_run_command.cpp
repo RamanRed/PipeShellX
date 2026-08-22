@@ -46,6 +46,14 @@ TEST(ParseRunTest, SinkModesAndInventoryAndTimeout) {
     EXPECT_THROW(static_cast<void>(parseRun({"--stream", "--json", "--", "id"})), std::runtime_error); // one sink only
 }
 
+TEST(ParseRunTest, ConcurrencyFlag) {
+    EXPECT_EQ(psx::cli::parseRun({"--", "id"}).concurrency, 64);
+    EXPECT_EQ(psx::cli::parseRun({"-c", "8", "--", "id"}).concurrency, 8);
+    EXPECT_EQ(psx::cli::parseRun({"--concurrency", "256", "--", "id"}).concurrency, 256);
+    EXPECT_EQ(psx::cli::parseRun({"-c", "0", "--", "id"}).concurrency, 0); // 0 = all at once
+    EXPECT_THROW(static_cast<void>(psx::cli::parseRun({"-c", "x", "--", "id"})), std::runtime_error);
+}
+
 TEST(ParseRunTest, NoColorIsHonoured) {
     EXPECT_FALSE(parseRun({"--no-color", "--stream", "--", "id"}).colour);
     EXPECT_TRUE(parseRun({"--stream", "--", "id"}).colour);
