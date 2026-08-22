@@ -15,6 +15,10 @@ void appendLine(std::string& text, std::string_view line) {
 
 } // namespace
 
+void JsonSink::stageStarted(std::string_view stage) {
+    buffers_.erase(std::string(stage)); // a retry discards the failed attempt's buffered output
+}
+
 void JsonSink::line(std::string_view stage, Channel channel, std::string_view text) {
     Buffered& buffered = buffers_[std::string(stage)];
     appendLine(channel == Channel::Stdout ? buffered.stdoutText : buffered.stderrText, text);

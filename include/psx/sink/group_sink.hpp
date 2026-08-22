@@ -19,6 +19,7 @@ class GroupSink : public Sink {
 public:
     explicit GroupSink(std::ostream& out) : out_(out) {}
 
+    void stageStarted(std::string_view stage) override;
     void line(std::string_view stage, Channel channel, std::string_view text) override;
     void stageFinished(std::string_view stage, const StageResult& result) override;
 

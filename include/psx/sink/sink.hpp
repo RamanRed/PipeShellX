@@ -33,6 +33,11 @@ class Sink {
 public:
     virtual ~Sink() = default;
 
+    // Called at the start of each attempt for a stage (so more than once when a
+    // stage is retried). A buffering sink should reset this stage's buffer here
+    // so only the last attempt's output is retained — matching the captured
+    // Result. A live/streaming sink may have already emitted a superseded
+    // attempt's lines and cannot unsend them; that is acceptable.
     virtual void stageStarted(std::string_view /*stage*/) {}
     virtual void line(std::string_view stage, Channel channel, std::string_view text) = 0;
     virtual void stageFinished(std::string_view /*stage*/, const StageResult& /*result*/) {}

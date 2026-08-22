@@ -480,3 +480,22 @@ TEST_F(GoldenRemoteTest, AChangedHostKeyIsReportedDistinctly) {
         result.clientResults[0].errorMessage,
         "ERROR: host key changed (possible MITM) — verify the new key, then clear the old one with ssh-keygen -R");
 }
+
+// A retry discards the failed attempt's buffered output: a buffering sink shows
+// only the successful attempt (matching the last-attempt-only Result capture).
+TEST_F(GoldenRemoteTest, ABufferingSinkKeepsOnlyTheLastAttemptOnRetry) {
+    test_support::ScopedTempCwd cwd("retry-sink");
+    test_support::ScopedEnv okOn("PSX_FLAKY_OK_ON", std::string("2")); // succeed on attempt 2
+    test_support::ScopedEnv file("PSX_FLAKY_FILE", (cwd.path() / "n").string());
+    std::ostringstream out;
+    psx::sink::GroupSink sink(out);
+    auto result = pm_.executeRemote(
+        {client("u", "h")}, "flaky", context("flaky"),
+        {.timeoutSec = 10, .sink = &sink, .maxRetries = 3, .retryBaseDelay = 20ms, .retryMaxDelay = 200ms});
+    ASSERT_EQ(result.clientResults.size(), 1U);
+    EXPECT_EQ(result.clientResults[0].exitCode, 0) << result.clientResults[0].stderrData;
+    const std::string text = out.str();
+    EXPECT_NE(text.find("host=u@h"), std::string::npos) << text;  // the successful attempt
+    EXPECT_EQ(text.find("Connection refused"), std::string::npos) // the failed attempt was reset
+        << "failed-attempt stderr leaked into the buffered sink: " << text;
+}
