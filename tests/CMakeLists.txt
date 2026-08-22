@@ -17,6 +17,9 @@ else()
 endif()
 
 add_executable(pipeshellx_tests
+    unit/os/test_handle.cpp
+    unit/os/test_pipe.cpp
+    unit/os/test_result.cpp
     test_cli_options.cpp
     test_client_config.cpp
     test_command_executor.cpp

@@ -1,7 +1,21 @@
 find_package(Threads REQUIRED)
 
+# L0 — OS primitive backends (the only place platform headers may appear)
+if(WIN32)
+    message(FATAL_ERROR "The Win32 backend arrives in Phase 3 (PLAN.md)")
+else()
+    set(PIPESHELLX_OS_SOURCES
+        os/posix/error.cpp
+        os/posix/handle.cpp
+        os/posix/io.cpp
+        os/posix/pipe.cpp
+        os/posix/signal.cpp
+    )
+endif()
+
 # Core library
 add_library(pipeshellx_lib
+    ${PIPESHELLX_OS_SOURCES}
     cli_options.cpp
     client_config.cpp
     client_manager.cpp
