@@ -6,15 +6,18 @@ if(WIN32)
 else()
     set(PIPESHELLX_OS_SOURCES
         os/posix/child_exit.cpp
+        os/posix/console.cpp
         os/posix/error.cpp
         os/posix/handle.cpp
         os/posix/io.cpp
+        os/posix/paths.cpp
         os/posix/pipe.cpp
         os/posix/poller.cpp
         os/posix/poller_poll.cpp
         os/posix/process.cpp
         os/posix/signal.cpp
         os/posix/signal_source.cpp
+        os/posix/system.cpp
     )
     if(APPLE OR CMAKE_SYSTEM_NAME MATCHES "BSD|DragonFly")
         list(APPEND PIPESHELLX_OS_SOURCES

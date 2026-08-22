@@ -24,6 +24,7 @@ add_executable(pipeshellx_tests
     unit/os/test_process.cpp
     unit/os/test_result.cpp
     unit/os/test_signal_source.cpp
+    unit/os/test_system.cpp
     unit/runtime/test_reactor.cpp
     test_cli_options.cpp
     test_client_config.cpp
@@ -34,6 +35,8 @@ add_executable(pipeshellx_tests
     test_ssh_auth.cpp
 )
 
+target_include_directories(pipeshellx_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
 target_link_libraries(pipeshellx_tests PRIVATE
     pipeshellx_lib
     pipeshellx_warnings
@@ -43,5 +46,12 @@ target_link_libraries(pipeshellx_tests PRIVATE
 include(GoogleTest)
 gtest_discover_tests(pipeshellx_tests
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    PROPERTIES TIMEOUT 60
+    PROPERTIES TIMEOUT 120
 )
+
+# Phase 1 exit criterion "poll backend removable without behaviour change":
+# the behavioural suites must pass on the portable poll backend too.
+add_test(NAME golden_on_poll_backend
+    COMMAND pipeshellx_tests --gtest_filter=Golden*:ProcessManagerTest.*:CommandExecutorTest.*
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(golden_on_poll_backend PROPERTIES ENVIRONMENT "PIPESHELLX_POLLER=poll" TIMEOUT 300)

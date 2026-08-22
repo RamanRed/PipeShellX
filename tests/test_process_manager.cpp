@@ -2,8 +2,12 @@
 #include "test_support.hpp"
 #include <gtest/gtest.h>
 
+#include <cerrno>
 #include <chrono>
 #include <cstdlib>
+#include <fcntl.h>
+#include <set>
+#include <sys/wait.h>
 #include <unistd.h>
 
 class ProcessManagerTest : public ::testing::Test {};
@@ -117,4 +121,34 @@ TEST_F(ProcessManagerTest, TimeoutAbandonsPipesHeldOutsideTheProcessGroup) {
     EXPECT_TRUE(result.timedOut);
     EXPECT_GE(elapsed, std::chrono::milliseconds(2900)); // 1 s deadline + 2 s grace
     EXPECT_LT(elapsed, std::chrono::seconds(6));
+}
+
+// Phase 1 exit criterion: zero descriptor leaks and zero zombies in a soak.
+TEST_F(ProcessManagerTest, ExecuteSoakLeaksNeitherDescriptorsNorZombies) {
+    const int cycles = std::getenv("PIPESHELLX_SOAK") != nullptr ? 10000 : 300;
+    ProcessManager pm;
+    LogContext context{getpid(), "soak", "-", "echo"};
+    // The reactor and its event sources are created on first use and kept for
+    // the manager's lifetime; take the baseline after that one-time setup.
+    ASSERT_EQ(pm.execute({"echo", "warm-up"}, context).exitCode, 0);
+    std::set<int> before;
+    for (int fd = 0; fd < 1024; ++fd) {
+        if (::fcntl(fd, F_GETFD) != -1) {
+            before.insert(fd);
+        }
+    }
+    for (int i = 0; i < cycles; ++i) {
+        auto result = pm.execute({"echo", "soak"}, context, i % 2 == 0 ? "" : "input");
+        ASSERT_EQ(result.exitCode, 0) << "cycle " << i << ": " << result.stderrData;
+        ASSERT_EQ(result.stdoutData, "soak\n");
+    }
+    std::set<int> after;
+    for (int fd = 0; fd < 1024; ++fd) {
+        if (::fcntl(fd, F_GETFD) != -1) {
+            after.insert(fd);
+        }
+    }
+    EXPECT_EQ(after, before) << "descriptors leaked across execute() cycles";
+    EXPECT_EQ(::waitpid(-1, nullptr, WNOHANG), -1);
+    EXPECT_EQ(errno, ECHILD) << "a zombie survived the soak";
 }

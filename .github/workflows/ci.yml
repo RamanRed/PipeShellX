@@ -65,6 +65,14 @@ jobs:
           ./build/bin/PipeShellX --help
           ! ./build/bin/PipeShellX --bogus
 
+  layering:
+    name: Layering lint (platform headers, public types, layer order)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check layering rules
+        run: ./scripts/check_layering.sh
+
   sanitizers:
     name: ASan + UBSan (ubuntu, clang, Debug)
     runs-on: ubuntu-latest

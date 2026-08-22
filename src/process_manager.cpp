@@ -10,6 +10,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstddef>
+#include <cstdlib>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -325,9 +326,28 @@ ProcessManager::~ProcessManager() = default;
 ProcessManager::ProcessManager(ProcessManager&&) noexcept = default;
 ProcessManager& ProcessManager::operator=(ProcessManager&&) noexcept = default;
 
+// Test/diagnostic hook: PIPESHELLX_POLLER=poll|epoll|kqueue forces a
+// backend; anything else (or unset) means the platform's native one.
+psx::os::Poller::Backend pollerBackendFromEnvironment() {
+    const char* value = std::getenv("PIPESHELLX_POLLER");
+    const std::string_view choice = value != nullptr ? value : "";
+    if (choice == "poll") {
+        return psx::os::Poller::Backend::Poll;
+    }
+    if (choice == "epoll") {
+        return psx::os::Poller::Backend::Epoll;
+    }
+    if (choice == "kqueue") {
+        return psx::os::Poller::Backend::Kqueue;
+    }
+    return psx::os::Poller::Backend::Auto;
+}
+
 psx::runtime::Reactor& ProcessManager::reactor() {
     if (!reactor_) {
-        auto created = Reactor::create();
+        Reactor::Options options;
+        options.backend = pollerBackendFromEnvironment();
+        auto created = Reactor::create(options);
         if (!created.ok()) {
             fail("event loop creation failed", created.error());
         }

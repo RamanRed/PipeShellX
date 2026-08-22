@@ -1,5 +1,6 @@
 #include "cli_options.hpp"
 #include "logger.hpp"
+#include "psx/os/system.hpp"
 #include "terminal_client.hpp"
 
 #include <exception>
@@ -36,6 +37,12 @@ int main(int argc, char** argv) {
         }
 
         logger.log(LogLevel::INFO, "Starting " + cliVersionText() + " terminal client (log file: " + logFile + ")");
+        if (auto limit = psx::os::raiseHandleLimit(); limit.ok()) {
+            logger.log(LogLevel::DEBUG, "Open-handle limit: soft " + std::to_string(limit.value().soft) + ", hard " +
+                                            std::to_string(limit.value().hard));
+        } else {
+            logger.log(LogLevel::ERROR, "Could not raise the open-handle limit: " + limit.error().message());
+        }
         TerminalClient client;
         client.run();
         return 0;

@@ -3,8 +3,8 @@
 #include "command_executor.hpp"
 #include "logger.hpp"
 
-#include <termios.h>
-#include <unistd.h>
+#include "psx/os/console.hpp"
+#include "psx/os/system.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -42,8 +42,7 @@ std::string formatTerminalError(const std::string& message) {
     if (message.find("pipe creation failed") != std::string::npos ||
         message.find("read from pipe failed") != std::string::npos ||
         message.find("write to child stdin failed") != std::string::npos ||
-        message.find("poll failed") != std::string::npos ||
-        message.find("invalid pipe state") != std::string::npos ||
+        message.find("poll failed") != std::string::npos || message.find("invalid pipe state") != std::string::npos ||
         message.find("fcntl(") != std::string::npos) {
         return "ERROR: IPC pipe failure: " + message;
     }
@@ -55,8 +54,7 @@ std::string formatTerminalError(const std::string& message) {
 
 } // namespace
 
-TerminalClient::TerminalClient()
-    : running(true), clientManager("clients.txt") {
+TerminalClient::TerminalClient() : running(true), clientManager("clients.txt") {
     clientManager.load();
 }
 
@@ -86,16 +84,15 @@ void TerminalClient::printHistory() {
 
 void TerminalClient::printHelp() {
     printColored("Commands:\n", COLOR_BLUE);
-    std::cout
-        << "  add-client <ssh-url|user@host>\n"
-        << "  remove-client <client-id>\n"
-        << "  list-clients\n"
-        << "  status\n"
-        << "  run <command>\n"
-        << "  run-one <client-id> <command>\n"
-        << "  history\n"
-        << "  help\n"
-        << "  exit\n";
+    std::cout << "  add-client <ssh-url|user@host>\n"
+              << "  remove-client <client-id>\n"
+              << "  list-clients\n"
+              << "  status\n"
+              << "  run <command>\n"
+              << "  run-one <client-id> <command>\n"
+              << "  history\n"
+              << "  help\n"
+              << "  exit\n";
 }
 
 void TerminalClient::printClients() {
@@ -106,8 +103,8 @@ void TerminalClient::printClients() {
     }
 
     for (const auto& client : clientManager.clients()) {
-        std::cout << "  " << client.client.id << ": " << client.client.ssh_url
-                  << " [" << ClientManager::statusToString(client.status) << "]";
+        std::cout << "  " << client.client.id << ": " << client.client.ssh_url << " ["
+                  << ClientManager::statusToString(client.status) << "]";
         if (!client.lastError.empty()) {
             std::cout << " - " << client.lastError;
         }
@@ -122,8 +119,7 @@ void TerminalClient::printStatusTable() {
     }
 
     for (const auto& client : clientManager.clients()) {
-        std::cout << client.client.id << ' '
-                  << client.entry.clientId() << ' '
+        std::cout << client.client.id << ' ' << client.entry.clientId() << ' '
                   << ClientManager::statusToString(client.status) << '\n';
     }
 }
@@ -134,8 +130,8 @@ void TerminalClient::refreshClientStatuses(const std::vector<ProcessManager::Cli
             clientManager.updateClientStatus(result.clientId, ClientStatus::ONLINE);
         } else {
             const std::string error = result.errorMessage.empty()
-                ? "ERROR: command failed with exit code " + std::to_string(result.exitCode)
-                : result.errorMessage;
+                                          ? "ERROR: command failed with exit code " + std::to_string(result.exitCode)
+                                          : result.errorMessage;
             clientManager.updateClientStatus(result.clientId, ClientStatus::OFFLINE, error);
         }
     }
@@ -163,40 +159,19 @@ bool TerminalClient::promptPasswordRequired() {
 }
 
 std::optional<std::string> TerminalClient::promptPasswordSecurely() {
-    if (!isatty(STDIN_FILENO)) {
+    if (!psx::os::isInteractive(psx::os::StandardStream::Input)) {
         throw std::runtime_error("password prompt requires a terminal");
     }
 
     std::lock_guard<std::mutex> lock(outputMutex);
-    termios originalAttributes{};
-    if (tcgetattr(STDIN_FILENO, &originalAttributes) == -1) {
-        throw std::runtime_error("failed to read terminal attributes");
+    auto secret = psx::os::readSecret("Enter password: ");
+    if (secret.ok()) {
+        return std::move(secret.value());
     }
-
-    termios hiddenAttributes = originalAttributes;
-    hiddenAttributes.c_lflag &= static_cast<tcflag_t>(~ECHO);
-    if (tcsetattr(STDIN_FILENO, TCSANOW, &hiddenAttributes) == -1) {
-        throw std::runtime_error("failed to disable terminal echo");
+    if (secret.error().cls == psx::ErrorClass::Closed) {
+        return std::nullopt; // end of input at the prompt
     }
-
-    try {
-        std::cout << "Enter password: ";
-        std::cout.flush();
-
-        std::string password;
-        if (!std::getline(std::cin, password)) {
-            (void)tcsetattr(STDIN_FILENO, TCSANOW, &originalAttributes);
-            std::cout << '\n';
-            return std::nullopt;
-        }
-
-        std::cout << '\n';
-        (void)tcsetattr(STDIN_FILENO, TCSANOW, &originalAttributes);
-        return password;
-    } catch (...) {
-        (void)tcsetattr(STDIN_FILENO, TCSANOW, &originalAttributes);
-        throw;
-    }
+    throw std::runtime_error("failed to read the password: " + secret.error().message());
 }
 
 void TerminalClient::handleExit() {
@@ -260,7 +235,7 @@ bool TerminalClient::handleClientCommand(const std::string& command) {
             return true;
         }
         CommandExecutor executor;
-        const std::string sessionId = "interactive-" + std::to_string(getpid());
+        const std::string sessionId = "interactive-" + std::to_string(psx::os::currentProcessId());
         auto result = executor.executeOnClients("echo alive", clients, sessionId, nullptr, 10);
         refreshClientStatuses(result.clientResults);
         printStatusTable();
@@ -281,7 +256,7 @@ bool TerminalClient::handleClientCommand(const std::string& command) {
         }
 
         const auto clients = clientManager.selectClients(std::make_optional(identifier));
-        const std::string sessionId = "interactive-" + std::to_string(getpid());
+        const std::string sessionId = "interactive-" + std::to_string(psx::os::currentProcessId());
         std::atomic<bool> done(false);
         CommandExecutor executor;
         auto streamCallback = [&](const std::string& line, bool isStdout) {
@@ -297,11 +272,9 @@ bool TerminalClient::handleClientCommand(const std::string& command) {
                 }
             } catch (const std::exception& ex) {
                 const std::string userMessage = formatTerminalError(ex.what());
-                Logger::getInstance().log(
-                    LogLevel::ERROR,
-                    LogContext{getpid(), sessionId, identifier, remoteCommand},
-                    std::string("Targeted client execution failed: ") + ex.what()
-                );
+                Logger::getInstance().log(LogLevel::ERROR,
+                                          LogContext{psx::os::currentProcessId(), sessionId, identifier, remoteCommand},
+                                          std::string("Targeted client execution failed: ") + ex.what());
                 printError(userMessage);
             }
             done = true;
@@ -325,7 +298,7 @@ bool TerminalClient::handleClientCommand(const std::string& command) {
             return true;
         }
 
-        const std::string sessionId = "interactive-" + std::to_string(getpid());
+        const std::string sessionId = "interactive-" + std::to_string(psx::os::currentProcessId());
         std::atomic<bool> done(false);
         CommandExecutor executor;
         auto streamCallback = [&](const std::string& line, bool isStdout) {
@@ -341,11 +314,9 @@ bool TerminalClient::handleClientCommand(const std::string& command) {
                 }
             } catch (const std::exception& ex) {
                 const std::string userMessage = formatTerminalError(ex.what());
-                Logger::getInstance().log(
-                    LogLevel::ERROR,
-                    LogContext{getpid(), sessionId, "-", remoteCommand},
-                    std::string("Broadcast client execution failed: ") + ex.what()
-                );
+                Logger::getInstance().log(LogLevel::ERROR,
+                                          LogContext{psx::os::currentProcessId(), sessionId, "-", remoteCommand},
+                                          std::string("Broadcast client execution failed: ") + ex.what());
                 printError(userMessage);
             }
             done = true;
@@ -375,7 +346,7 @@ void TerminalClient::handleCommand(const std::string& command) {
     }
 
     history.push_back(command);
-    const std::string sessionId = "interactive-" + std::to_string(getpid());
+    const std::string sessionId = "interactive-" + std::to_string(psx::os::currentProcessId());
 
     // Capture client entries early so that in-memory passwords are preserved.
     // CommandExecutor::execute() reloads clients.txt from disk, which never
@@ -404,11 +375,8 @@ void TerminalClient::handleCommand(const std::string& command) {
             }
         } catch (const std::exception& ex) {
             const std::string userMessage = formatTerminalError(ex.what());
-            Logger::getInstance().log(
-                LogLevel::ERROR,
-                LogContext{getpid(), sessionId, "-", command},
-                std::string("Interactive command failed: ") + ex.what()
-            );
+            Logger::getInstance().log(LogLevel::ERROR, LogContext{psx::os::currentProcessId(), sessionId, "-", command},
+                                      std::string("Interactive command failed: ") + ex.what());
             printError(userMessage);
         }
         done = true;

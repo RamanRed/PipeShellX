@@ -7,17 +7,18 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
-#include <unistd.h>
 
-ClientManager::ClientManager(std::string configPath)
-    : configPath_(std::move(configPath)) {}
+#include "psx/os/system.hpp"
+
+ClientManager::ClientManager(std::string configPath) : configPath_(std::move(configPath)) {}
 
 void ClientManager::load() {
     ClientConfig config;
     try {
         config.loadFromFile(configPath_);
     } catch (const std::exception& ex) {
-        if (configPath_ == "clients.txt" && std::string(ex.what()).find("Failed to open client configuration file") != std::string::npos) {
+        if (configPath_ == "clients.txt" &&
+            std::string(ex.what()).find("Failed to open client configuration file") != std::string::npos) {
             clients_.clear();
             return;
         }
@@ -29,12 +30,7 @@ void ClientManager::load() {
     nextClientId_ = 1;
     for (const auto& entry : config.clients()) {
         clients_.push_back(ManagedClient{
-            Client{nextClientId_++, entry.serialize(), entry.password, false},
-            entry,
-            ClientStatus::UNKNOWN,
-            {},
-            true
-        });
+            Client{nextClientId_++, entry.serialize(), entry.password, false}, entry, ClientStatus::UNKNOWN, {}, true});
     }
 }
 
@@ -89,28 +85,16 @@ void ClientManager::addClient(const std::string& specification, const std::optio
         throw std::runtime_error("Client already exists: " + entry.clientId());
     }
 
-    const LogContext addContext{
-        getpid(),
-        "client-manager",
-        entry.clientId(),
-        "add-client " + entry.serialize()
-    };
+    const LogContext addContext{psx::os::currentProcessId(), "client-manager", entry.clientId(),
+                                "add-client " + entry.serialize()};
     Logger::getInstance().log(LogLevel::INFO, addContext, "Adding client");
 
     clients_.push_back(ManagedClient{
-        Client{nextClientId_++, entry.serialize(), entry.password, false},
-        entry,
-        ClientStatus::UNKNOWN,
-        {},
-        false
-    });
+        Client{nextClientId_++, entry.serialize(), entry.password, false}, entry, ClientStatus::UNKNOWN, {}, false});
     verifyClientConnectivity(clients_.back());
     save();
-    Logger::getInstance().log(
-        LogLevel::INFO,
-        addContext,
-        "Client added with status " + statusToString(clients_.back().status)
-    );
+    Logger::getInstance().log(LogLevel::INFO, addContext,
+                              "Client added with status " + statusToString(clients_.back().status));
 }
 
 bool ClientManager::removeClient(const std::string& identifier) {
@@ -119,12 +103,8 @@ bool ClientManager::removeClient(const std::string& identifier) {
         return false;
     }
 
-    const LogContext removeContext{
-        getpid(),
-        "client-manager",
-        it->entry.clientId(),
-        "remove-client " + identifier
-    };
+    const LogContext removeContext{psx::os::currentProcessId(), "client-manager", it->entry.clientId(),
+                                   "remove-client " + identifier};
     Logger::getInstance().log(LogLevel::INFO, removeContext, "Removing client");
 
     clients_.erase(it);
@@ -139,12 +119,8 @@ bool ClientManager::removeClient(int id) {
         return false;
     }
 
-    const LogContext removeContext{
-        getpid(),
-        "client-manager",
-        it->entry.clientId(),
-        "remove-client " + std::to_string(id)
-    };
+    const LogContext removeContext{psx::os::currentProcessId(), "client-manager", it->entry.clientId(),
+                                   "remove-client " + std::to_string(id)};
     Logger::getInstance().log(LogLevel::INFO, removeContext, "Removing client");
 
     clients_.erase(it);
@@ -219,29 +195,27 @@ void ClientManager::resetStatuses() noexcept {
 void ClientManager::verifyClientConnectivity(ManagedClient& client) {
     const std::string remoteCommand = "echo connected";
     const std::string sessionId = "client-verify-" + std::to_string(client.client.id);
-    const LogContext context{getpid(), sessionId, client.entry.clientId(), "ssh " + client.entry.clientId() + " " + remoteCommand};
+    const LogContext context{psx::os::currentProcessId(), sessionId, client.entry.clientId(),
+                             "ssh " + client.entry.clientId() + " " + remoteCommand};
 
     Logger::getInstance().log(LogLevel::INFO, context, "Verifying SSH connectivity");
 
     ProcessManager processManager;
     const auto result = processManager.executeRemote({client.entry}, remoteCommand, context, 10);
     const auto& clientResult = result.clientResults.front();
-    const bool connected =
-        clientResult.exitCode == 0 &&
-        !clientResult.timedOut &&
-        clientResult.stdoutData.find("connected") != std::string::npos;
+    const bool connected = clientResult.exitCode == 0 && !clientResult.timedOut &&
+                           clientResult.stdoutData.find("connected") != std::string::npos;
 
     client.status = connected ? ClientStatus::ONLINE : ClientStatus::OFFLINE;
     client.client.online = connected;
     client.client.ssh_url = client.entry.serialize();
     client.client.password = client.entry.password;
-    client.lastError = connected ? std::string() : (clientResult.errorMessage.empty() ? clientResult.stderrData : clientResult.errorMessage);
+    client.lastError = connected
+                           ? std::string()
+                           : (clientResult.errorMessage.empty() ? clientResult.stderrData : clientResult.errorMessage);
 
-    Logger::getInstance().log(
-        connected ? LogLevel::INFO : LogLevel::ERROR,
-        context,
-        connected ? "SSH connectivity verified" : client.lastError
-    );
+    Logger::getInstance().log(connected ? LogLevel::INFO : LogLevel::ERROR, context,
+                              connected ? "SSH connectivity verified" : client.lastError);
 }
 
 std::string ClientManager::statusToString(ClientStatus status) {
@@ -257,34 +231,27 @@ std::string ClientManager::statusToString(ClientStatus status) {
 }
 
 std::vector<ManagedClient>::iterator ClientManager::findClient(const std::string& identifier) {
-    return std::find_if(clients_.begin(), clients_.end(), [&](const ManagedClient& client) {
-        return matchesIdentifier(client, identifier);
-    });
+    return std::find_if(clients_.begin(), clients_.end(),
+                        [&](const ManagedClient& client) { return matchesIdentifier(client, identifier); });
 }
 
 std::vector<ManagedClient>::const_iterator ClientManager::findClient(const std::string& identifier) const {
-    return std::find_if(clients_.begin(), clients_.end(), [&](const ManagedClient& client) {
-        return matchesIdentifier(client, identifier);
-    });
+    return std::find_if(clients_.begin(), clients_.end(),
+                        [&](const ManagedClient& client) { return matchesIdentifier(client, identifier); });
 }
 
 std::vector<ManagedClient>::iterator ClientManager::findClient(int id) {
-    return std::find_if(clients_.begin(), clients_.end(), [&](const ManagedClient& client) {
-        return client.client.id == id;
-    });
+    return std::find_if(clients_.begin(), clients_.end(),
+                        [&](const ManagedClient& client) { return client.client.id == id; });
 }
 
 std::vector<ManagedClient>::const_iterator ClientManager::findClient(int id) const {
-    return std::find_if(clients_.begin(), clients_.end(), [&](const ManagedClient& client) {
-        return client.client.id == id;
-    });
+    return std::find_if(clients_.begin(), clients_.end(),
+                        [&](const ManagedClient& client) { return client.client.id == id; });
 }
 
 bool ClientManager::matchesIdentifier(const ManagedClient& client, const std::string& identifier) {
-    return identifier == std::to_string(client.client.id) ||
-           identifier == client.entry.clientId() ||
-           identifier == client.client.ssh_url ||
-           identifier == client.entry.sshTarget() ||
-           identifier == client.entry.host ||
-           identifier == client.entry.raw;
+    return identifier == std::to_string(client.client.id) || identifier == client.entry.clientId() ||
+           identifier == client.client.ssh_url || identifier == client.entry.sshTarget() ||
+           identifier == client.entry.host || identifier == client.entry.raw;
 }

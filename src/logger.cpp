@@ -1,23 +1,14 @@
 #include "logger.hpp"
 
-#include <unistd.h>
+#include "psx/os/paths.hpp"
+#include "psx/os/system.hpp"
 
 #include <chrono>
-#include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
-
-namespace {
-
-std::string nonEmptyEnv(const char* name) {
-    const char* value = std::getenv(name);
-    return value != nullptr ? std::string(value) : std::string();
-}
-
-} // namespace
 
 Logger::Logger() : currentLevel(LogLevel::INFO), mirrorToConsole(false) {}
 
@@ -70,14 +61,7 @@ bool Logger::enabled(LogLevel level) const noexcept {
 }
 
 std::string Logger::defaultLogFilePath() {
-    namespace fs = std::filesystem;
-    if (const std::string xdgState = nonEmptyEnv("XDG_STATE_HOME"); !xdgState.empty()) {
-        return (fs::path(xdgState) / "pipeshellx" / "pipeshellx.log").string();
-    }
-    if (const std::string home = nonEmptyEnv("HOME"); !home.empty()) {
-        return (fs::path(home) / ".local" / "state" / "pipeshellx" / "pipeshellx.log").string();
-    }
-    return "pipeshellx.log";
+    return (std::filesystem::path(psx::os::stateDirectory("pipeshellx")) / "pipeshellx.log").string();
 }
 
 std::string Logger::getTimestamp() {
@@ -113,7 +97,7 @@ void Logger::log(LogLevel level, const std::string& msg) {
     if (!enabled(level)) {
         return;
     }
-    log(level, LogContext{getpid(), "-", "-", "-"}, msg);
+    log(level, LogContext{psx::os::currentProcessId(), "-", "-", "-"}, msg);
 }
 
 void Logger::log(LogLevel level, const LogContext& context, const std::string& msg) {

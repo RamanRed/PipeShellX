@@ -1,13 +1,14 @@
 #include "command_executor.hpp"
 
-#include <filesystem>
-#include <sstream>
 #include <array>
 #include <cctype>
+#include <filesystem>
+#include <sstream>
 #include <stdexcept>
 #include <string_view>
 #include <unordered_set>
-#include <unistd.h>
+
+#include "psx/os/system.hpp"
 
 namespace {
 
@@ -15,9 +16,8 @@ constexpr std::size_t kMaxCommandLength = 1024;
 constexpr std::size_t kMaxArgumentLength = 256;
 
 const std::unordered_set<std::string_view>& allowedCommands() {
-    static const std::unordered_set<std::string_view> commands = {
-        "ls", "cat", "echo", "pwd", "whoami", "date", "uptime", "df", "du", "ps", "id", "hostname"
-    };
+    static const std::unordered_set<std::string_view> commands = {"ls",     "cat", "echo", "pwd", "whoami", "date",
+                                                                  "uptime", "df",  "du",   "ps",  "id",     "hostname"};
     return commands;
 }
 
@@ -64,7 +64,9 @@ CommandExecutor::CommandExecutor() {}
 CommandExecutor::~CommandExecutor() {}
 
 CommandExecutor::CommandExecutor(CommandExecutor&&) noexcept {}
-CommandExecutor& CommandExecutor::operator=(CommandExecutor&&) noexcept { return *this; }
+CommandExecutor& CommandExecutor::operator=(CommandExecutor&&) noexcept {
+    return *this;
+}
 
 void CommandExecutor::validateCommand(const std::vector<std::string>& args) {
     if (args.empty()) {
@@ -137,7 +139,7 @@ std::vector<std::string> CommandExecutor::parseCommand(const std::string& comman
 std::string CommandExecutor::resolveExecutablePath(const std::string& commandName) const {
     for (const std::string_view directory : trustedExecutableDirs()) {
         const std::string candidate = std::string(directory) + "/" + commandName;
-        if (access(candidate.c_str(), X_OK) == 0) {
+        if (psx::os::isExecutableFile(candidate)) {
             return candidate;
         }
     }
@@ -200,7 +202,7 @@ CommandResult CommandExecutor::executeRemoteCommand(const std::string& command,
                                                     const std::string& sessionId,
                                                     OutputCallback streamCallback,
                                                     int timeoutSec) {
-    LogContext context{getpid(), sessionId, "-", command};
+    LogContext context{psx::os::currentProcessId(), sessionId, "-", command};
     Logger::getInstance().log(LogLevel::INFO, context, "Received command for execution");
 
     auto args = parseCommand(command);
@@ -215,11 +217,8 @@ CommandResult CommandExecutor::executeRemoteCommand(const std::vector<std::strin
                                                     int timeoutSec) {
     const std::string remoteCommand = buildRemoteCommand(args);
     context.command = remoteCommand;
-    Logger::getInstance().log(
-        LogLevel::DEBUG,
-        context,
-        "Validated command and loaded " + std::to_string(clients.size()) + " remote clients"
-    );
+    Logger::getInstance().log(LogLevel::DEBUG, context,
+                              "Validated command and loaded " + std::to_string(clients.size()) + " remote clients");
 
     ProcessManager pm;
     Logger::getInstance().log(LogLevel::INFO, context, "Starting distributed SSH execution");
@@ -258,20 +257,15 @@ CommandResult CommandExecutor::executeRemoteCommand(const std::vector<std::strin
         }
     }
 
-    return CommandResult{
-        result.exitCode,
-        std::move(result.stdoutData),
-        std::move(result.stderrData),
-        result.timedOut,
-        std::move(result.clientResults)
-    };
+    return CommandResult{result.exitCode, std::move(result.stdoutData), std::move(result.stderrData), result.timedOut,
+                         std::move(result.clientResults)};
 }
 
 CommandResult CommandExecutor::execute(const std::string& command,
                                        const std::string& sessionId,
                                        OutputCallback streamCallback,
                                        int timeoutSec) {
-    LogContext context{getpid(), sessionId, "-", command};
+    LogContext context{psx::os::currentProcessId(), sessionId, "-", command};
     Logger::getInstance().log(LogLevel::INFO, context, "Received command for execution");
 
     auto args = parseCommand(command);
@@ -317,20 +311,12 @@ CommandResult CommandExecutor::runCommand(const std::vector<std::string>& args,
         streamLines(result.stderrData, false);
     }
 
-    Logger::getInstance().log(
-        result.exitCode == 0 ? LogLevel::INFO : LogLevel::ERROR,
-        context,
-        "Process execution finished with exit code " + std::to_string(result.exitCode) +
-            (result.timedOut ? " (timed out)" : "")
-    );
+    Logger::getInstance().log(result.exitCode == 0 ? LogLevel::INFO : LogLevel::ERROR, context,
+                              "Process execution finished with exit code " + std::to_string(result.exitCode) +
+                                  (result.timedOut ? " (timed out)" : ""));
 
     return CommandResult{
-        result.exitCode,
-        std::move(result.stdoutData),
-        std::move(result.stderrData),
-        result.timedOut,
-        {}
-    };
+        result.exitCode, std::move(result.stdoutData), std::move(result.stderrData), result.timedOut, {}};
 }
 
 CommandResult CommandExecutor::executeOnClients(const std::string& command,

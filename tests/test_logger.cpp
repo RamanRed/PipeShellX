@@ -194,8 +194,10 @@ TEST(LoggerPathTest, EmptyXdgStateHomeIsTreatedAsUnset) {
     EXPECT_EQ(Logger::defaultLogFilePath(), "/home/tester/.local/state/pipeshellx/pipeshellx.log");
 }
 
-TEST(LoggerPathTest, DefaultLogFileFallsBackToCwdWithoutHome) {
+TEST(LoggerPathTest, DefaultLogFileUsesTheAccountHomeWithoutHomeVariable) {
     test_support::ScopedEnv xdg("XDG_STATE_HOME", std::nullopt);
     test_support::ScopedEnv home("HOME", std::nullopt);
-    EXPECT_EQ(Logger::defaultLogFilePath(), "pipeshellx.log");
+    const std::string path = Logger::defaultLogFilePath();
+    EXPECT_TRUE(path.starts_with("/")) << path;
+    EXPECT_TRUE(path.ends_with("/.local/state/pipeshellx/pipeshellx.log")) << path;
 }
