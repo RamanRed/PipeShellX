@@ -58,6 +58,7 @@ add_library(pipeshellx_lib
     ${PIPESHELLX_INVENTORY_SOURCES}
     ${PIPESHELLX_POLICY_SOURCES}
     runtime/reactor.cpp
+    transport/frame_codec.cpp
     cli/hosts_command.cpp
     cli/ping_command.cpp
     cli/selection.cpp
