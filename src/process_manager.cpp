@@ -1,5 +1,6 @@
 #include "process_manager.hpp"
 
+#include "cli_options.hpp"
 #include "logger.hpp"
 #include "psx/os/io.hpp"
 #include "psx/os/pipe.hpp"
@@ -70,6 +71,7 @@ struct Worker {
     bool stdinClosed = false;
     bool exited = false;
     bool timedOut = false;
+    bool cancelled = false;
     std::uint64_t droppedBytes = 0; // bytes discarded from stdout/stderr by the ring
     bool counted = false;           // WorkerRun: already subtracted from the remaining count
     bool spawned = false;           // WorkerRun: spawnFn has been invoked for this worker
@@ -112,11 +114,13 @@ public:
               std::size_t concurrency,
               std::function<void(std::size_t)> spawn,
               psx::stream::OverflowPolicy policy,
-              std::size_t ringBytes)
+              std::size_t ringBytes,
+              bool cancellable)
         : reactor_(reactor), workers_(workers), timeoutSec_(timeoutSec), sink_(sink),
           concurrency_(concurrency == 0 ? workers.size() : concurrency), spawn_(std::move(spawn)),
           // Block (or a 0 ring) captures everything; a drop policy bounds it.
-          outputCap_(policy == psx::stream::OverflowPolicy::Block ? 0 : ringBytes), outputPolicy_(policy) {}
+          outputCap_(policy == psx::stream::OverflowPolicy::Block ? 0 : ringBytes), outputPolicy_(policy),
+          cancellable_(cancellable) {}
 
     // The reactor is cached and reused across runs; a timer left in it after
     // this WorkerRun is destroyed would fire into freed memory. Cancel any
@@ -128,12 +132,24 @@ public:
         if (drainTimer_ != 0) {
             reactor_.cancel(drainTimer_);
         }
+        if (signalRegistered_) {
+            // The reactor outlives this run; drop the handler so a later SIGINT
+            // cannot dispatch into this freed WorkerRun.
+            (void)reactor_.onSignal({});
+        }
     }
 
     bool anyTimedOut() const noexcept { return anyTimedOut_; }
+    bool wasCancelled() const noexcept { return cancelled_; }
 
     void run() {
         remaining_ = workers_.size();
+        if (cancellable_) {
+            // A SIGINT (Ctrl-C) cancels the run gracefully. onSignal is a no-op
+            // (Unsupported) when the reactor has no SignalSource; cancellation is
+            // then simply unavailable, never a crash.
+            signalRegistered_ = reactor_.onSignal([this](psx::os::Signal) { onCancel(); }).ok();
+        }
         if (timeoutSec_ > 0) {
             deadlineTimer_ = reactor_.after(std::chrono::seconds(timeoutSec_), [this] { onDeadline(); });
         }
@@ -335,13 +351,37 @@ private:
         fillSlots(); // spawn the next pending worker into the freed slot
     }
 
+    enum class StopReason { Deadline, Cancel };
+
     void onDeadline() {
         deadlineTimer_ = 0; // fired: nothing to cancel later
-        // Pending workers never got a slot; they are timed out without running.
+        teardown(StopReason::Deadline);
+    }
+
+    // SIGINT/Ctrl-C: stop the run promptly and report it as cancelled (exit 130),
+    // distinct from a deadline. Idempotent: a second signal while draining is a
+    // no-op. A cancel sends SIGTERM first (the drain grace escalates to SIGKILL),
+    // so a well-behaved child gets to clean up.
+    void onCancel() {
+        if (cancelled_) {
+            return;
+        }
+        Logger::getInstance().log(LogLevel::INFO, workers_.empty() ? LogContext{} : workers_.front().context,
+                                  "Cancellation requested (SIGINT); draining workers");
+        teardown(StopReason::Cancel);
+    }
+
+    void teardown(StopReason reason) {
+        const bool cancel = reason == StopReason::Cancel;
+        if (cancel) {
+            cancelled_ = true;
+        } else {
+            anyTimedOut_ = true;
+        }
+        // Pending workers never got a slot; they end without running.
         while (nextToSpawn_ < workers_.size()) {
             Worker& pending = workers_[nextToSpawn_++];
-            pending.timedOut = true;
-            anyTimedOut_ = true;
+            mark(pending, reason);
             pending.stdoutClosed = pending.stderrClosed = pending.stdinClosed = pending.exited = true;
             account(pending);
         }
@@ -349,19 +389,30 @@ private:
             if (worker.complete()) {
                 continue;
             }
-            worker.timedOut = true;
-            anyTimedOut_ = true;
-            // SIGKILL the whole process group so a grandchild that stayed in it
+            mark(worker, reason);
+            // Signal the whole process group so a grandchild that stayed in it
             // dies too. This is valid while the group is non-empty (its id is
             // not recycled until the last member exits); a descendant that left
             // via setsid empties the group and is unreachable anyway, which the
             // drain grace below bounds. Signalling after the leader is reaped is
-            // deliberate for the grandchild case (regression-tested).
-            (void)worker.process.signal(psx::os::StopSignal::Kill);
+            // deliberate for the grandchild case (regression-tested). Deadline
+            // uses SIGKILL; cancel uses SIGTERM and lets the grace escalate.
+            (void)worker.process.signal(cancel ? psx::os::StopSignal::Graceful : psx::os::StopSignal::Kill);
             Logger::getInstance().log(LogLevel::ERROR, worker.context,
-                                      "Command timed out; sent SIGKILL to process group");
+                                      cancel ? "Run cancelled; sent SIGTERM to process group"
+                                             : "Command timed out; sent SIGKILL to process group");
         }
-        drainTimer_ = reactor_.after(kDrainGrace, [this] { onDrainExpired(); });
+        if (drainTimer_ == 0) {
+            drainTimer_ = reactor_.after(kDrainGrace, [this] { onDrainExpired(); });
+        }
+    }
+
+    void mark(Worker& worker, StopReason reason) {
+        if (reason == StopReason::Cancel) {
+            worker.cancelled = true;
+        } else {
+            worker.timedOut = true;
+        }
     }
 
     void onDrainExpired() {
@@ -375,8 +426,11 @@ private:
             closeStream(worker.stderrReader, worker.stderrToken, worker.stderrClosed);
             closeStream(worker.stdinWriter, worker.stdinToken, worker.stdinClosed);
             if (!worker.exited) {
+                // A cancel sent SIGTERM; anything still alive after the grace is
+                // SIGKILLed now so the reap below cannot block.
+                (void)worker.process.signal(psx::os::StopSignal::Kill);
                 (void)reactor_.unwatchChild(worker.process.id());
-                onExit(worker); // SIGKILLed: the wait returns promptly
+                onExit(worker); // now dying: the wait returns promptly
             }
             Logger::getInstance().log(LogLevel::ERROR, worker.context,
                                       "Pipes still open after the SIGKILL grace period; abandoning remaining output");
@@ -399,6 +453,9 @@ private:
     psx::runtime::TimerId deadlineTimer_ = 0;
     psx::runtime::TimerId drainTimer_ = 0;
     bool anyTimedOut_ = false;
+    bool cancellable_ = false;
+    bool cancelled_ = false;
+    bool signalRegistered_ = false;
 };
 
 // Creates the stdio pipes for a worker, spawns it, and leaves the parent ends
@@ -455,10 +512,15 @@ ProcessManager::~ProcessManager() = default;
 ProcessManager::ProcessManager(ProcessManager&&) noexcept = default;
 ProcessManager& ProcessManager::operator=(ProcessManager&&) noexcept = default;
 
-psx::runtime::Reactor& ProcessManager::reactor() {
+psx::runtime::Reactor& ProcessManager::reactor(bool withSignals) {
     if (!reactor_) {
         Reactor::Options options;
         options.backend = Reactor::backendFromEnvironment();
+        if (withSignals) {
+            // Ctrl-C (and SIGTERM) become reactor events instead of killing the
+            // controller, so an in-flight run can drain and report exit 130.
+            options.signals = {psx::os::Signal::Interrupt, psx::os::Signal::Terminate};
+        }
         auto created = Reactor::create(options);
         if (!created.ok()) {
             fail("event loop creation failed", created.error());
@@ -498,13 +560,15 @@ ProcessManager::Result ProcessManager::execute(const std::vector<std::string>& a
         }
     };
 
-    WorkerRun run(reactor(), workers, timeoutSec, nullptr, 1, spawnLocal, psx::stream::OverflowPolicy::Block, 0);
+    WorkerRun run(reactor(), workers, timeoutSec, nullptr, 1, spawnLocal, psx::stream::OverflowPolicy::Block, 0,
+                  /*cancellable=*/false);
     run.run();
 
     Logger::getInstance().log(worker.exitCode() == 0 ? LogLevel::INFO : LogLevel::ERROR, context,
                               "Child exited with status " + std::to_string(worker.exitCode()) +
                                   (worker.timedOut ? " (timed out)" : ""));
-    return Result{worker.exitCode(), std::move(worker.stdoutData), std::move(worker.stderrData), worker.timedOut, {}};
+    return Result{worker.exitCode(), std::move(worker.stdoutData), std::move(worker.stderrData),
+                  worker.timedOut,   /*cancelled=*/false,          {}};
 }
 
 ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEntry>& clients,
@@ -515,7 +579,8 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
                                                      std::size_t concurrency,
                                                      psx::stream::OverflowPolicy policy,
                                                      std::size_t ringBytes,
-                                                     const std::string& controlPath) {
+                                                     const std::string& controlPath,
+                                                     bool cancellable) {
     if (clients.empty()) {
         throw std::runtime_error("no clients configured for remote execution");
     }
@@ -570,7 +635,8 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
         // passwordPipe closes here: only the child holds the secret now.
     };
 
-    WorkerRun run(reactor(), workers, timeoutSec, sink, concurrency, spawnRemote, policy, ringBytes);
+    WorkerRun run(reactor(/*withSignals=*/cancellable), workers, timeoutSec, sink, concurrency, spawnRemote, policy,
+                  ringBytes, cancellable);
     run.run();
 
     std::vector<ClientResult> clientResults;
@@ -587,7 +653,8 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
                                              std::move(worker.stderrData),
                                              {},
                                              worker.timedOut,
-                                             worker.droppedBytes});
+                                             worker.droppedBytes,
+                                             worker.cancelled});
     }
 
     for (std::size_t index = 0; index < clientResults.size(); ++index) {
@@ -595,6 +662,11 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
         if (!clientResults[index].errorMessage.empty()) {
             Logger::getInstance().log(LogLevel::ERROR, workers[index].context, clientResults[index].errorMessage);
         }
+    }
+
+    const bool cancelled = run.wasCancelled();
+    if (cancelled) {
+        overallExitCode = kExitCancelled; // 130: the CLI surfaces this verbatim
     }
 
     if (sink != nullptr) {
@@ -609,11 +681,15 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
                                                        clientResult.errorMessage, clientResult.droppedBytes});
         }
         sink->runFinished(psx::sink::RunSummary{clientResults.size(), succeeded, clientResults.size() - succeeded,
-                                                totalDropped, /*cancelled=*/false});
+                                                totalDropped, cancelled});
     }
 
-    return Result{overallExitCode, formatClientResults(clientResults, true), formatClientResults(clientResults, false),
-                  run.anyTimedOut(), std::move(clientResults)};
+    return Result{overallExitCode,
+                  formatClientResults(clientResults, true),
+                  formatClientResults(clientResults, false),
+                  run.anyTimedOut(),
+                  cancelled,
+                  std::move(clientResults)};
 }
 
 std::string ProcessManager::formatClientResults(const std::vector<ClientResult>& clientResults, bool useStdout) const {
@@ -634,6 +710,9 @@ std::string ProcessManager::formatClientResults(const std::vector<ClientResult>&
 }
 
 std::string ProcessManager::classifyRemoteError(const ClientResult& clientResult) const {
+    if (clientResult.cancelled) {
+        return "ERROR: cancelled";
+    }
     if (clientResult.timedOut) {
         return "ERROR: command timed out";
     }

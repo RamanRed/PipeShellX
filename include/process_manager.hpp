@@ -31,6 +31,7 @@ public:
         std::string errorMessage;
         bool timedOut;
         std::uint64_t droppedBytes = 0; // bytes discarded by a drop-policy ring
+        bool cancelled = false;         // run was cancelled (SIGINT) before this stage finished
     };
 
     struct Result {
@@ -38,6 +39,7 @@ public:
         std::string stdoutData;
         std::string stderrData;
         bool timedOut;
+        bool cancelled = false; // the run was cancelled by SIGINT (exit 130)
         std::vector<ClientResult> clientResults;
     };
 
@@ -67,6 +69,8 @@ public:
     // only the newest/oldest `ringBytes` of each stream (dropped bytes counted),
     // so `--stream` over an endless command keeps a flat controller RSS; Block
     // (or ringBytes 0) captures everything. The sink still sees every byte live.
+    // When `cancellable`, a SIGINT during the run drains in-flight workers (TERM
+    // then a KILL grace) and returns Result::cancelled (the CLI maps that to 130).
     Result executeRemote(const std::vector<ClientEntry>& clients,
                          const std::string& remoteCommand,
                          const LogContext& context,
@@ -75,10 +79,11 @@ public:
                          std::size_t concurrency = 64,
                          psx::stream::OverflowPolicy policy = psx::stream::OverflowPolicy::Block,
                          std::size_t ringBytes = 0,
-                         const std::string& controlPath = {});
+                         const std::string& controlPath = {},
+                         bool cancellable = false);
 
 private:
-    psx::runtime::Reactor& reactor();
+    psx::runtime::Reactor& reactor(bool withSignals = false);
     std::string formatClientResults(const std::vector<ClientResult>& clientResults, bool useStdout) const;
     std::string classifyRemoteError(const ClientResult& clientResult) const;
 

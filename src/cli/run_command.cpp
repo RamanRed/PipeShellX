@@ -1,5 +1,6 @@
 #include "psx/cli/run_command.hpp"
 
+#include "cli_options.hpp"
 #include "client_config.hpp"
 #include "logger.hpp"
 #include "process_manager.hpp"
@@ -245,7 +246,10 @@ int runSubcommand(const RunInvocation& invocation, std::ostream& out, std::ostre
     const LogContext context{psx::os::currentProcessId(), "run", "-", remoteCommand};
     const auto result = manager.executeRemote(clients, remoteCommand, context, invocation.timeoutSec, sink.get(),
                                               static_cast<std::size_t>(invocation.concurrency), invocation.policy,
-                                              invocation.ringBytes, controlPath);
+                                              invocation.ringBytes, controlPath, /*cancellable=*/true);
+    if (result.cancelled) {
+        return kExitCancelled; // 130
+    }
     return result.exitCode == 0 ? 0 : 1;
 }
 

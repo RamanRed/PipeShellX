@@ -5,6 +5,7 @@
 
 #include <cerrno>
 #include <chrono>
+#include <csignal>
 #include <cstdlib>
 #include <fcntl.h>
 #include <set>
@@ -84,6 +85,49 @@ TEST_F(ProcessManagerTest, RemoteTimeoutStillFiresForHungWorker) {
     EXPECT_EQ(result.clientResults.front().errorMessage, "ERROR: command timed out");
     EXPECT_GE(elapsed, std::chrono::milliseconds(900));
     EXPECT_LT(elapsed, std::chrono::seconds(4));
+}
+
+// SIGINT during a cancellable run drains the in-flight workers and reports the
+// run as cancelled (the CLI maps that to exit 130) rather than as a timeout.
+// The killer thread self-blocks SIGINT so the signal is caught only by the
+// reactor's SignalSource (signalfd blocks it; the kqueue backend SIG_IGNs it).
+TEST_F(ProcessManagerTest, InterruptCancelsAnInFlightRun) {
+    test_support::SilentListener listener; // ssh connects but hangs waiting for a banner
+    ProcessManager pm;
+    ClientEntry client;
+    client.user = "nobody";
+    client.host = "127.0.0.1";
+    client.port = listener.port();
+    LogContext context{getpid(), "test", client.clientId(), "ssh true"};
+
+    const pid_t self = getpid();
+    std::thread killer([self] {
+        sigset_t block;
+        sigemptyset(&block);
+        sigaddset(&block, SIGINT);
+        ::pthread_sigmask(SIG_BLOCK, &block, nullptr); // never take the default action here
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        ::kill(self, SIGINT);
+    });
+
+    const auto start = std::chrono::steady_clock::now();
+    // A generous 30 s deadline: cancellation, not the deadline, must end the run.
+    const auto result = pm.executeRemote({client}, "true", context, /*timeoutSec=*/30, /*sink=*/nullptr,
+                                         /*concurrency=*/64, psx::stream::OverflowPolicy::Block, /*ringBytes=*/0,
+                                         /*controlPath=*/"", /*cancellable=*/true);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    killer.join();
+
+    EXPECT_TRUE(result.cancelled);
+    EXPECT_EQ(result.exitCode, 130);
+    EXPECT_FALSE(result.timedOut);
+    ASSERT_EQ(result.clientResults.size(), 1U);
+    EXPECT_TRUE(result.clientResults.front().cancelled);
+    EXPECT_FALSE(result.clientResults.front().timedOut);
+    EXPECT_EQ(result.clientResults.front().errorMessage, "ERROR: cancelled");
+    // Ended promptly after the ~200 ms signal + drain grace, far short of the deadline.
+    EXPECT_GE(elapsed, std::chrono::milliseconds(150));
+    EXPECT_LT(elapsed, std::chrono::seconds(5));
 }
 
 // Regression: after the child was reaped, the old timeout branch ran
