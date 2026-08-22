@@ -222,7 +222,7 @@ CommandResult CommandExecutor::executeRemoteCommand(const std::vector<std::strin
 
     ProcessManager pm;
     Logger::getInstance().log(LogLevel::INFO, context, "Starting distributed SSH execution");
-    auto result = pm.executeRemote(clients, remoteCommand, context, timeoutSec);
+    auto result = pm.executeRemote(clients, remoteCommand, context, {.timeoutSec = timeoutSec});
 
     if (streamCallback) {
         for (const auto& clientResult : result.clientResults) {

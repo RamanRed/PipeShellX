@@ -87,7 +87,7 @@ TEST(GoldenLocalTest, MissingExecutableIsExitCode127WithStderr) {
 
 TEST_F(GoldenRemoteTest, OutputIsGroupedPerClientInInputOrder) {
     const std::vector<ClientEntry> clients{client("alice", "h1"), client("bob", "h2")};
-    auto result = pm_.executeRemote(clients, "ok", context("ok"), 10);
+    auto result = pm_.executeRemote(clients, "ok", context("ok"), {.timeoutSec = 10});
 
     EXPECT_EQ(result.exitCode, 0);
     EXPECT_FALSE(result.timedOut);
@@ -104,8 +104,8 @@ TEST_F(GoldenRemoteTest, OutputIsGroupedPerClientInInputOrder) {
 TEST_F(GoldenRemoteTest, PartialFailureKeepsEveryClientAndAggregatesTheExitCode) {
     const std::vector<ClientEntry> clients{client("a", "ok-host"), client("b", "bad-host")};
     // The fake ssh keys off the remote command, so use two calls to mix outcomes.
-    auto good = pm_.executeRemote({clients[0]}, "ok", context("ok"), 10);
-    auto bad = pm_.executeRemote({clients[1]}, "fail 3", context("fail"), 10);
+    auto good = pm_.executeRemote({clients[0]}, "ok", context("ok"), {.timeoutSec = 10});
+    auto bad = pm_.executeRemote({clients[1]}, "fail 3", context("fail"), {.timeoutSec = 10});
     EXPECT_EQ(good.exitCode, 0);
     EXPECT_EQ(bad.exitCode, 3);
     ASSERT_EQ(bad.clientResults.size(), 1U);
@@ -117,33 +117,34 @@ TEST_F(GoldenRemoteTest, PartialFailureKeepsEveryClientAndAggregatesTheExitCode)
 
 TEST_F(GoldenRemoteTest, SshFailuresAreClassified) {
     const ClientEntry c = client("u", "h");
-    EXPECT_EQ(pm_.executeRemote({c}, "refused", context("refused"), 10).clientResults[0].errorMessage,
+    EXPECT_EQ(pm_.executeRemote({c}, "refused", context("refused"), {.timeoutSec = 10}).clientResults[0].errorMessage,
               "ERROR: connection failed");
-    EXPECT_EQ(pm_.executeRemote({c}, "denied", context("denied"), 10).clientResults[0].errorMessage,
+    EXPECT_EQ(pm_.executeRemote({c}, "denied", context("denied"), {.timeoutSec = 10}).clientResults[0].errorMessage,
               "ERROR: authentication failed");
-    EXPECT_EQ(pm_.executeRemote({c}, "hostkey", context("hostkey"), 10).clientResults[0].errorMessage,
+    EXPECT_EQ(pm_.executeRemote({c}, "hostkey", context("hostkey"), {.timeoutSec = 10}).clientResults[0].errorMessage,
               "ERROR: host key verification failed");
-    EXPECT_EQ(pm_.executeRemote({c}, "refused", context("refused"), 10).exitCode, 255);
+    EXPECT_EQ(pm_.executeRemote({c}, "refused", context("refused"), {.timeoutSec = 10}).exitCode, 255);
 }
 
 TEST_F(GoldenRemoteTest, RemoteCommandStderrIsNotMisreadAsAnSshFailure) {
     // The remote command runs (ssh exits with the command's code, not 255) and
     // prints text that looks like an ssh diagnostic; it must be reported as a
     // plain command failure, never "authentication failed".
-    auto denied = pm_.executeRemote({client("u", "h")}, "fail 13:Permission denied", context("cmd"), 10);
+    auto denied =
+        pm_.executeRemote({client("u", "h")}, "fail 13:Permission denied", context("cmd"), {.timeoutSec = 10});
     ASSERT_EQ(denied.clientResults.size(), 1U);
     EXPECT_EQ(denied.clientResults[0].exitCode, 13);
     EXPECT_EQ(denied.clientResults[0].errorMessage, "ERROR: command failed with exit code 13");
 
     // A genuine ssh failure (exit 255) is still classified.
-    auto refused = pm_.executeRemote({client("u", "h")}, "refused", context("ssh"), 10);
+    auto refused = pm_.executeRemote({client("u", "h")}, "refused", context("ssh"), {.timeoutSec = 10});
     EXPECT_EQ(refused.clientResults[0].errorMessage, "ERROR: connection failed");
 }
 
 TEST_F(GoldenRemoteTest, PasswordReachesSshpassThroughTheDescriptor) {
     ClientEntry c = client("u", "h");
     c.password = "s3cret pa$$";
-    auto result = pm_.executeRemote({c}, "pw", context("pw"), 10);
+    auto result = pm_.executeRemote({c}, "pw", context("pw"), {.timeoutSec = 10});
     EXPECT_EQ(result.exitCode, 0) << result.stderrData;
     EXPECT_EQ(result.clientResults[0].stdoutData, "pw=s3cret pa$$\n");
 }
@@ -151,7 +152,7 @@ TEST_F(GoldenRemoteTest, PasswordReachesSshpassThroughTheDescriptor) {
 TEST_F(GoldenRemoteTest, TimeoutKillsHungWorkersAndReportsIt) {
     const std::vector<ClientEntry> clients{client("u", "h1"), client("u", "h2")};
     const auto start = std::chrono::steady_clock::now();
-    auto result = pm_.executeRemote(clients, "hang", context("hang"), 1);
+    auto result = pm_.executeRemote(clients, "hang", context("hang"), {.timeoutSec = 1});
     const auto elapsed = std::chrono::steady_clock::now() - start;
     EXPECT_TRUE(result.timedOut);
     EXPECT_NE(result.exitCode, 0);
@@ -165,7 +166,7 @@ TEST_F(GoldenRemoteTest, TimeoutKillsHungWorkersAndReportsIt) {
 }
 
 TEST_F(GoldenRemoteTest, LargeRemoteOutputIsCapturedCompletely) {
-    auto result = pm_.executeRemote({client("u", "h")}, "big", context("big"), 20);
+    auto result = pm_.executeRemote({client("u", "h")}, "big", context("big"), {.timeoutSec = 20});
     EXPECT_EQ(result.exitCode, 0);
     ASSERT_EQ(result.clientResults.size(), 1U);
     EXPECT_EQ(result.clientResults[0].stdoutData.size(), 200000U);
@@ -200,7 +201,7 @@ TEST_F(GoldenRemoteTest, GroupSinkRendersEachClientBlock) {
     std::ostringstream out;
     psx::sink::GroupSink sink(out);
     const std::vector<ClientEntry> clients{client("alice", "h1"), client("bob", "h2")};
-    auto result = pm_.executeRemote(clients, "ok", context("ok"), 10, &sink);
+    auto result = pm_.executeRemote(clients, "ok", context("ok"), {.timeoutSec = 10, .sink = &sink});
     EXPECT_EQ(result.exitCode, 0);
     // Grouped per client, in client order, headers + stdout lines.
     EXPECT_EQ(out.str(), "CLIENT alice@h1\nhost=alice@h1\nCLIENT bob@h2\nhost=bob@h2\n");
@@ -209,7 +210,7 @@ TEST_F(GoldenRemoteTest, GroupSinkRendersEachClientBlock) {
 TEST_F(GoldenRemoteTest, GroupSinkRendersTheNormalizedErrorForAFailure) {
     std::ostringstream out;
     psx::sink::GroupSink sink(out);
-    pm_.executeRemote({client("u", "h")}, "refused", context("refused"), 10, &sink);
+    pm_.executeRemote({client("u", "h")}, "refused", context("refused"), {.timeoutSec = 10, .sink = &sink});
     EXPECT_EQ(out.str(), "CLIENT u@h\nERROR: connection failed\n");
 }
 
@@ -217,7 +218,7 @@ TEST_F(GoldenRemoteTest, StreamSinkEmitsHostTaggedLinesLive) {
     std::ostringstream out;
     std::ostringstream err;
     psx::sink::StreamSink sink(out, err, /*colour=*/false);
-    pm_.executeRemote({client("u", "h")}, "big", context("big"), 20, &sink);
+    pm_.executeRemote({client("u", "h")}, "big", context("big"), {.timeoutSec = 20, .sink = &sink});
     // 200 000 'o' bytes with no newline -> one very long line, host-tagged.
     const std::string text = out.str();
     ASSERT_FALSE(text.empty());
@@ -231,8 +232,8 @@ TEST_F(GoldenRemoteTest, JsonSinkEmitsOneObjectPerStageAndASummary) {
     psx::sink::JsonSink sink(out);
     const std::vector<ClientEntry> clients{client("a", "h1"), client("b", "h2")};
     // a: ok (exit 0); b: fail 3
-    pm_.executeRemote({clients[0]}, "ok", context("ok"), 10, &sink);
-    pm_.executeRemote({clients[1]}, "fail 3", context("fail"), 10, &sink);
+    pm_.executeRemote({clients[0]}, "ok", context("ok"), {.timeoutSec = 10, .sink = &sink});
+    pm_.executeRemote({clients[1]}, "fail 3", context("fail"), {.timeoutSec = 10, .sink = &sink});
     const std::string text = out.str();
     EXPECT_NE(text.find(R"("stage":"a@h1")"), std::string::npos) << text;
     EXPECT_NE(text.find(R"("stdout":"host=a@h1")"), std::string::npos) << text;
@@ -243,7 +244,7 @@ TEST_F(GoldenRemoteTest, JsonSinkEmitsOneObjectPerStageAndASummary) {
 TEST_F(GoldenRemoteTest, SinkAndResultCaptureAgree) {
     std::ostringstream out;
     psx::sink::GroupSink sink(out);
-    auto result = pm_.executeRemote({client("alice", "h1")}, "ok", context("ok"), 10, &sink);
+    auto result = pm_.executeRemote({client("alice", "h1")}, "ok", context("ok"), {.timeoutSec = 10, .sink = &sink});
     // The Result still carries the full capture (API unchanged) and matches.
     ASSERT_EQ(result.clientResults.size(), 1U);
     EXPECT_EQ(result.clientResults[0].stdoutData, "host=alice@h1\n");
@@ -258,7 +259,7 @@ TEST_F(GoldenRemoteTest, LowConcurrencyStillRunsEveryHostCorrectly) {
         clients.push_back(client("u" + std::to_string(i), "h" + std::to_string(i)));
     }
     // Window of 2: workers spawn in waves but every one must run and report.
-    auto result = pm_.executeRemote(clients, "ok", context("ok"), 20, nullptr, /*concurrency=*/2);
+    auto result = pm_.executeRemote(clients, "ok", context("ok"), {.timeoutSec = 20, .concurrency = 2});
     EXPECT_EQ(result.exitCode, 0);
     ASSERT_EQ(result.clientResults.size(), 6U);
     for (int i = 0; i < 6; ++i) {
@@ -275,12 +276,12 @@ TEST_F(GoldenRemoteTest, ConcurrencyBoundsHowManyWorkersRunAtOnce) {
     // Each `slow` worker sleeps ~0.3 s. Serialised (-c 1) that is ~1.2 s;
     // fully parallel (-c 4) it is ~0.3 s. The gap proves the window throttles.
     const auto t0 = std::chrono::steady_clock::now();
-    auto serial = pm_.executeRemote(clients, "slow", context("slow"), 30, nullptr, /*concurrency=*/1);
+    auto serial = pm_.executeRemote(clients, "slow", context("slow"), {.timeoutSec = 30, .concurrency = 1});
     const auto serialTime = std::chrono::steady_clock::now() - t0;
     EXPECT_EQ(serial.exitCode, 0) << serial.stderrData;
 
     const auto t1 = std::chrono::steady_clock::now();
-    auto parallel = pm_.executeRemote(clients, "slow", context("slow"), 30, nullptr, /*concurrency=*/4);
+    auto parallel = pm_.executeRemote(clients, "slow", context("slow"), {.timeoutSec = 30, .concurrency = 4});
     const auto parallelTime = std::chrono::steady_clock::now() - t1;
     EXPECT_EQ(parallel.exitCode, 0);
 
@@ -297,7 +298,7 @@ TEST_F(GoldenRemoteTest, TimeoutWithPendingWorkersDoesNotHang) {
     // Window 1, each host sleeps 0.3 s, 1 s deadline: only ~3 run before the
     // deadline; the pending ones must be reported timed-out, not hang the run.
     const auto t0 = std::chrono::steady_clock::now();
-    auto result = pm_.executeRemote(clients, "slow", context("slow"), 1, nullptr, /*concurrency=*/1);
+    auto result = pm_.executeRemote(clients, "slow", context("slow"), {.timeoutSec = 1, .concurrency = 1});
     const auto elapsed = std::chrono::steady_clock::now() - t0;
     EXPECT_TRUE(result.timedOut);
     EXPECT_EQ(result.clientResults.size(), 6U);
@@ -310,8 +311,9 @@ TEST_F(GoldenRemoteTest, DropOldestRingBoundsTheCapturedOutput) {
     // `big` writes 200000 'o' to stdout and 100000 'e' to stderr. A 64 KiB ring
     // with drop-oldest keeps only the newest 65536 bytes of each; the rest is
     // dropped and counted.
-    auto result = pm_.executeRemote({client("u", "h")}, "big", context("big"), 20, nullptr, 1,
-                                    psx::stream::OverflowPolicy::DropOldest, 65536);
+    auto result = pm_.executeRemote(
+        {client("u", "h")}, "big", context("big"),
+        {.timeoutSec = 20, .concurrency = 1, .policy = psx::stream::OverflowPolicy::DropOldest, .ringBytes = 65536});
     ASSERT_EQ(result.clientResults.size(), 1U);
     EXPECT_EQ(result.clientResults[0].stdoutData.size(), 65536U);
     EXPECT_EQ(result.clientResults[0].stderrData.size(), 65536U);
@@ -319,15 +321,17 @@ TEST_F(GoldenRemoteTest, DropOldestRingBoundsTheCapturedOutput) {
 }
 
 TEST_F(GoldenRemoteTest, DropNewestRingKeepsTheOldestBytes) {
-    auto result = pm_.executeRemote({client("u", "h")}, "big", context("big"), 20, nullptr, 1,
-                                    psx::stream::OverflowPolicy::DropNewest, 65536);
+    auto result = pm_.executeRemote(
+        {client("u", "h")}, "big", context("big"),
+        {.timeoutSec = 20, .concurrency = 1, .policy = psx::stream::OverflowPolicy::DropNewest, .ringBytes = 65536});
     EXPECT_EQ(result.clientResults[0].stdoutData.size(), 65536U);
     EXPECT_EQ(result.clientResults[0].droppedBytes, (200000U - 65536U) + (100000U - 65536U));
 }
 
 TEST_F(GoldenRemoteTest, BlockPolicyIgnoresTheRingAndCapturesEverything) {
-    auto result = pm_.executeRemote({client("u", "h")}, "big", context("big"), 20, nullptr, 1,
-                                    psx::stream::OverflowPolicy::Block, 65536);
+    auto result = pm_.executeRemote(
+        {client("u", "h")}, "big", context("big"),
+        {.timeoutSec = 20, .concurrency = 1, .policy = psx::stream::OverflowPolicy::Block, .ringBytes = 65536});
     EXPECT_EQ(result.clientResults[0].stdoutData.size(), 200000U);
     EXPECT_EQ(result.clientResults[0].droppedBytes, 0U);
 }
@@ -338,8 +342,12 @@ TEST_F(GoldenRemoteTest, ADropRingStillStreamsEveryByteToTheSink) {
     std::ostringstream out;
     std::ostringstream err;
     psx::sink::StreamSink sink(out, err, false);
-    pm_.executeRemote({client("u", "h")}, "big", context("big"), 20, &sink, 1, psx::stream::OverflowPolicy::DropOldest,
-                      4096);
+    pm_.executeRemote({client("u", "h")}, "big", context("big"),
+                      {.timeoutSec = 20,
+                       .sink = &sink,
+                       .concurrency = 1,
+                       .policy = psx::stream::OverflowPolicy::DropOldest,
+                       .ringBytes = 4096});
     // 200000 'o' with no newline -> one host-tagged line of exactly that length.
     const std::string prefix = "[u@h] ";
     ASSERT_EQ(out.str().rfind(prefix, 0), 0U);

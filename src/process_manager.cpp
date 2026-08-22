@@ -574,13 +574,7 @@ ProcessManager::Result ProcessManager::execute(const std::vector<std::string>& a
 ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEntry>& clients,
                                                      const std::string& remoteCommand,
                                                      const LogContext& context,
-                                                     int timeoutSec,
-                                                     psx::sink::Sink* sink,
-                                                     std::size_t concurrency,
-                                                     psx::stream::OverflowPolicy policy,
-                                                     std::size_t ringBytes,
-                                                     const std::string& controlPath,
-                                                     bool cancellable) {
+                                                     const RemoteRunOptions& options) {
     if (clients.empty()) {
         throw std::runtime_error("no clients configured for remote execution");
     }
@@ -621,7 +615,7 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
             spec.extraHandles = {{&passwordPipe.reader, kPasswordFd}};
         }
         SshOptions sshOptions;
-        sshOptions.controlPath = controlPath;
+        sshOptions.controlPath = options.controlPath;
         spec.argv =
             buildSshCommandArguments(client, remoteCommand, client.password.empty() ? -1 : kPasswordFd, sshOptions);
         spec.program = spec.argv.front();
@@ -635,8 +629,8 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
         // passwordPipe closes here: only the child holds the secret now.
     };
 
-    WorkerRun run(reactor(/*withSignals=*/cancellable), workers, timeoutSec, sink, concurrency, spawnRemote, policy,
-                  ringBytes, cancellable);
+    WorkerRun run(reactor(/*withSignals=*/options.cancellable), workers, options.timeoutSec, options.sink,
+                  options.concurrency, spawnRemote, options.policy, options.ringBytes, options.cancellable);
     run.run();
 
     std::vector<ClientResult> clientResults;
@@ -669,19 +663,19 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
         overallExitCode = kExitCancelled; // 130: the CLI surfaces this verbatim
     }
 
-    if (sink != nullptr) {
+    if (options.sink != nullptr) {
         std::size_t succeeded = 0;
         std::uint64_t totalDropped = 0;
         for (const auto& clientResult : clientResults) {
             const bool ok = clientResult.exitCode == 0 && !clientResult.timedOut && clientResult.errorMessage.empty();
             succeeded += ok ? 1 : 0;
             totalDropped += clientResult.droppedBytes;
-            sink->stageFinished(clientResult.clientId,
-                                psx::sink::StageResult{clientResult.exitCode, clientResult.timedOut,
-                                                       clientResult.errorMessage, clientResult.droppedBytes});
+            options.sink->stageFinished(clientResult.clientId,
+                                        psx::sink::StageResult{clientResult.exitCode, clientResult.timedOut,
+                                                               clientResult.errorMessage, clientResult.droppedBytes});
         }
-        sink->runFinished(psx::sink::RunSummary{clientResults.size(), succeeded, clientResults.size() - succeeded,
-                                                totalDropped, cancelled});
+        options.sink->runFinished(psx::sink::RunSummary{clientResults.size(), succeeded,
+                                                        clientResults.size() - succeeded, totalDropped, cancelled});
     }
 
     return Result{overallExitCode,

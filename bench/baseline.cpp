@@ -191,7 +191,7 @@ void runFanoutBenchmark(const std::vector<int>& sizes, const std::string& user) 
     const LogContext context{getpid(), "bench", "localhost", "ssh localhost"};
 
     std::cout << "\n### SSH fan-out (`ssh localhost uptime`, agentless)\n\n";
-    const auto probeResult = manager.executeRemote({probe}, "true", context, 10);
+    const auto probeResult = manager.executeRemote({probe}, "true", context, {.timeoutSec = 10});
     if (probeResult.exitCode != 0 || probeResult.timedOut) {
         const auto& clientResult = probeResult.clientResults.front();
         std::cout << "SKIPPED: `ssh " << user << "@localhost` not usable ("
@@ -204,7 +204,7 @@ void runFanoutBenchmark(const std::vector<int>& sizes, const std::string& user) 
         std::vector<ClientEntry> clients(static_cast<std::size_t>(size), probe);
         const int fdsBefore = openDescriptorCount();
         const auto t0 = std::chrono::steady_clock::now();
-        const auto result = manager.executeRemote(clients, "uptime", context, 120);
+        const auto result = manager.executeRemote(clients, "uptime", context, {.timeoutSec = 120});
         const auto wall = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         const int fdsAfter = openDescriptorCount();
 

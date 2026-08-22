@@ -244,9 +244,14 @@ int runSubcommand(const RunInvocation& invocation, std::ostream& out, std::ostre
     auto sink = makeSink(invocation, out, err, colourTty);
     ProcessManager manager;
     const LogContext context{psx::os::currentProcessId(), "run", "-", remoteCommand};
-    const auto result = manager.executeRemote(clients, remoteCommand, context, invocation.timeoutSec, sink.get(),
-                                              static_cast<std::size_t>(invocation.concurrency), invocation.policy,
-                                              invocation.ringBytes, controlPath, /*cancellable=*/true);
+    const auto result = manager.executeRemote(clients, remoteCommand, context,
+                                              {.timeoutSec = invocation.timeoutSec,
+                                               .sink = sink.get(),
+                                               .concurrency = static_cast<std::size_t>(invocation.concurrency),
+                                               .policy = invocation.policy,
+                                               .ringBytes = invocation.ringBytes,
+                                               .controlPath = controlPath,
+                                               .cancellable = true});
     if (result.cancelled) {
         return kExitCancelled; // 130
     }

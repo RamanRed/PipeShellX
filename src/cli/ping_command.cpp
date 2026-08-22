@@ -85,7 +85,8 @@ int pingSubcommand(const PingInvocation& invocation, std::ostream& out, std::ost
 
     ProcessManager manager;
     const LogContext context{psx::os::currentProcessId(), "ping", "-", "echo connected"};
-    const auto result = manager.executeRemote(resolved.clients, "echo connected", context, invocation.timeoutSec);
+    const auto result =
+        manager.executeRemote(resolved.clients, "echo connected", context, {.timeoutSec = invocation.timeoutSec});
 
     bool anyOffline = false;
     for (const auto& client : result.clientResults) {

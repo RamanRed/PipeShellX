@@ -51,7 +51,7 @@ TEST_F(ProcessManagerTest, FastRemoteFailureIsNotReportedAsTimeout) {
     LogContext context{getpid(), "test", client.clientId(), "ssh true"};
 
     const auto start = std::chrono::steady_clock::now();
-    const auto result = pm.executeRemote({client}, "true", context, 10);
+    const auto result = pm.executeRemote({client}, "true", context, {.timeoutSec = 10});
     const auto elapsed = std::chrono::steady_clock::now() - start;
 
     ASSERT_EQ(result.clientResults.size(), 1U);
@@ -76,7 +76,7 @@ TEST_F(ProcessManagerTest, RemoteTimeoutStillFiresForHungWorker) {
     LogContext context{getpid(), "test", client.clientId(), "ssh true"};
 
     const auto start = std::chrono::steady_clock::now();
-    const auto result = pm.executeRemote({client}, "true", context, 1);
+    const auto result = pm.executeRemote({client}, "true", context, {.timeoutSec = 1});
     const auto elapsed = std::chrono::steady_clock::now() - start;
 
     ASSERT_EQ(result.clientResults.size(), 1U);
@@ -112,9 +112,7 @@ TEST_F(ProcessManagerTest, InterruptCancelsAnInFlightRun) {
 
     const auto start = std::chrono::steady_clock::now();
     // A generous 30 s deadline: cancellation, not the deadline, must end the run.
-    const auto result = pm.executeRemote({client}, "true", context, /*timeoutSec=*/30, /*sink=*/nullptr,
-                                         /*concurrency=*/64, psx::stream::OverflowPolicy::Block, /*ringBytes=*/0,
-                                         /*controlPath=*/"", /*cancellable=*/true);
+    const auto result = pm.executeRemote({client}, "true", context, {.timeoutSec = 30, .cancellable = true});
     const auto elapsed = std::chrono::steady_clock::now() - start;
     killer.join();
 

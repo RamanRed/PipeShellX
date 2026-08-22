@@ -59,28 +59,37 @@ public:
                    const LogContext& context,
                    const std::string& input = "",
                    int timeoutSec = 0);
-    // When `sink` is non-null it receives live, line-framed, per-stage output
-    // (host-tagged) during the run, plus a stageFinished per client and a
-    // final runFinished; the returned Result still carries the full capture.
-    // `concurrency` bounds how many workers run at once (0 = all at once,
-    // the default is 64): a large fan-out spawns ssh processes in a sliding
-    // window rather than all at once.
-    // `policy`/`ringBytes` bound the captured output: a drop-policy ring keeps
-    // only the newest/oldest `ringBytes` of each stream (dropped bytes counted),
-    // so `--stream` over an endless command keeps a flat controller RSS; Block
-    // (or ringBytes 0) captures everything. The sink still sees every byte live.
-    // When `cancellable`, a SIGINT during the run drains in-flight workers (TERM
-    // then a KILL grace) and returns Result::cancelled (the CLI maps that to 130).
+    // Options for executeRemote(). Grouped so the call site names what it sets
+    // and callers that only need a timeout stay a one-liner.
+    struct RemoteRunOptions {
+        // Per-stage + global deadline in seconds; 0 disables it.
+        int timeoutSec = 0;
+        // When non-null, receives live line-framed per-stage output (host-tagged),
+        // a stageFinished per client and a final runFinished. The returned Result
+        // still carries the full capture regardless.
+        psx::sink::Sink* sink = nullptr;
+        // How many workers run at once (0 = all): a large fan-out spawns ssh in a
+        // sliding window instead of all at once.
+        std::size_t concurrency = 64;
+        // policy/ringBytes bound the captured output: a drop-policy ring keeps only
+        // the newest/oldest ringBytes of each stream (drops counted), so --stream
+        // over an endless command keeps flat RSS; Block (or ringBytes 0) keeps all.
+        psx::stream::OverflowPolicy policy = psx::stream::OverflowPolicy::Block;
+        std::size_t ringBytes = 0;
+        // Non-empty enables ssh ControlMaster reuse with this socket path template.
+        std::string controlPath;
+        // When true a SIGINT drains in-flight workers (TERM then a KILL grace) and
+        // the run reports Result::cancelled (the CLI maps that to exit 130).
+        bool cancellable = false;
+    };
+
+    // Callers pass a RemoteRunOptions (use {} for all-defaults). A default
+    // argument here is not possible: a `= {}` default cannot see the nested
+    // struct's member initializers while ProcessManager is still incomplete.
     Result executeRemote(const std::vector<ClientEntry>& clients,
                          const std::string& remoteCommand,
                          const LogContext& context,
-                         int timeoutSec = 0,
-                         psx::sink::Sink* sink = nullptr,
-                         std::size_t concurrency = 64,
-                         psx::stream::OverflowPolicy policy = psx::stream::OverflowPolicy::Block,
-                         std::size_t ringBytes = 0,
-                         const std::string& controlPath = {},
-                         bool cancellable = false);
+                         const RemoteRunOptions& options);
 
 private:
     psx::runtime::Reactor& reactor(bool withSignals = false);

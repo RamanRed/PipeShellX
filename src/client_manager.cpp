@@ -206,7 +206,7 @@ void ClientManager::verifyClientConnectivity(ManagedClient& client) {
     Logger::getInstance().log(LogLevel::INFO, context, "Verifying SSH connectivity");
 
     ProcessManager processManager;
-    const auto result = processManager.executeRemote({client.entry}, remoteCommand, context, 10);
+    const auto result = processManager.executeRemote({client.entry}, remoteCommand, context, {.timeoutSec = 10});
     const auto& clientResult = result.clientResults.front();
     const bool connected = clientResult.exitCode == 0 && !clientResult.timedOut &&
                            clientResult.stdoutData.find("connected") != std::string::npos;
