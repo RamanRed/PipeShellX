@@ -4,7 +4,13 @@
 // *audit* the abstractions (descriptor enumeration, inheritance flags); the
 // code under test must never need them.
 
+#include "psx/os/backend.hpp"
+#include "psx/os/handle.hpp"
+
+#include <cerrno>
+#include <chrono>
 #include <fcntl.h>
+#include <poll.h>
 #include <set>
 #include <unistd.h>
 
@@ -40,6 +46,17 @@ inline std::set<int> newDescriptors(const std::set<int>& before, const std::set<
         }
     }
     return created;
+}
+
+// Blocks until `handle` is readable or `timeout` elapses (plain poll(2), so
+// the Poller under test is not part of the observation).
+inline bool waitReadable(const psx::os::Handle& handle, std::chrono::milliseconds timeout) {
+    pollfd fd{static_cast<int>(psx::os::Backend::native(handle)), POLLIN, 0};
+    int ready = 0;
+    do {
+        ready = ::poll(&fd, 1, static_cast<int>(timeout.count()));
+    } while (ready == -1 && errno == EINTR);
+    return ready > 0 && (fd.revents & (POLLIN | POLLHUP)) != 0;
 }
 
 } // namespace os_test

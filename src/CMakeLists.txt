@@ -5,6 +5,7 @@ if(WIN32)
     message(FATAL_ERROR "The Win32 backend arrives in Phase 3 (PLAN.md)")
 else()
     set(PIPESHELLX_OS_SOURCES
+        os/posix/child_exit.cpp
         os/posix/error.cpp
         os/posix/handle.cpp
         os/posix/io.cpp
@@ -13,11 +14,18 @@ else()
         os/posix/poller_poll.cpp
         os/posix/process.cpp
         os/posix/signal.cpp
+        os/posix/signal_source.cpp
     )
     if(APPLE OR CMAKE_SYSTEM_NAME MATCHES "BSD|DragonFly")
-        list(APPEND PIPESHELLX_OS_SOURCES os/posix/poller_kqueue.cpp)
+        list(APPEND PIPESHELLX_OS_SOURCES
+            os/posix/child_exit_kqueue.cpp
+            os/posix/poller_kqueue.cpp
+            os/posix/signal_source_kqueue.cpp)
     elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        list(APPEND PIPESHELLX_OS_SOURCES os/posix/poller_epoll.cpp)
+        list(APPEND PIPESHELLX_OS_SOURCES
+            os/posix/child_exit_pidfd.cpp
+            os/posix/poller_epoll.cpp
+            os/posix/signal_source_signalfd.cpp)
     endif()
 endif()
 
