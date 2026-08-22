@@ -45,9 +45,16 @@ End of stream is a zero-byte read or a hang-up with nothing left to read;
 the handle is then unregistered and closed. Input is written on
 writability and the writer closed after the last byte, so the child sees EOF.
 
-Bounded buffering with backpressure (stop reading a stream whose buffer is
-full so the producer blocks) arrives with the L2 `Stream` in Phase 2; today
-the per-worker `std::string` still grows with the output.
+The L2 stream primitives now exist (`include/psx/stream/`): `BoundedBuffer`
+(a capacity-bounded ring with `block`/`drop-oldest`/`drop-newest` policies),
+`LineFramer` (whole-line framing, CRLF, length cap), `CreditWindow`
+(HTTP/2-style flow control for the backplane) and `Stream` (the
+`Open→HalfClosed→Closed` state machine whose `writable()` is the backpressure
+signal). Wiring them into `ProcessManager` — deregistering read interest when
+a `Block` buffer fills, so the kernel pipe fills and the producer blocks
+instead of the controller's memory growing — lands with the live `--stream`
+sink, since backpressure is only meaningful once a sink drains the buffer.
+Until then the per-worker `std::string` still grows with the output.
 
 ## Child Exit and Timeouts
 
