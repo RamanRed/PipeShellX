@@ -60,6 +60,7 @@ add_library(pipeshellx_lib
     runtime/reactor.cpp
     transport/frame_codec.cpp
     transport/open_request.cpp
+    transport/control_payloads.cpp
     cli/hosts_command.cpp
     cli/ping_command.cpp
     cli/selection.cpp

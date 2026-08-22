@@ -44,6 +44,7 @@ add_executable(pipeshellx_tests
     unit/audit/test_audit_log.cpp
     unit/transport/test_frame_codec.cpp
     unit/transport/test_open_request.cpp
+    unit/transport/test_control_payloads.cpp
     test_cli_options.cpp
     test_client_config.cpp
     test_command_executor.cpp
