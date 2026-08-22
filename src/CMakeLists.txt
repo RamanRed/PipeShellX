@@ -6,6 +6,7 @@ if(WIN32)
 else()
     set(PIPESHELLX_STREAM_SOURCES
         stream/bounded_buffer.cpp
+        stream/line_framer.cpp
     )
     set(PIPESHELLX_OS_SOURCES
         os/posix/child_exit.cpp
