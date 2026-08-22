@@ -142,12 +142,16 @@ public:
         writeScript("ssh", R"sh(#!/bin/sh
 prev=""; last=""
 for a in "$@"; do prev="$last"; last="$a"; done
-case "$last" in
-  ok)       echo "host=$prev"; exit 0 ;;
-  fail*:*)  code="${last#fail }"; echo "${code#*:}" >&2; exit "${code%%:*}" ;;
-  fail*)    echo "failing" >&2; exit "${last#fail }" ;;
-  refused)  echo "ssh: connect to host $prev port 22: Connection refused" >&2; exit 255 ;;
-  denied)   echo "$prev: Permission denied (publickey)." >&2; exit 255 ;;
+target="$prev"
+# Strip one shell-quoting level the way a real remote shell would, so both an
+# unquoted command ("ok") and a per-argument-quoted one ("'\''ok'\''") dispatch alike.
+eval "set -- $last" 2>/dev/null || set -- "$last"
+cmd="$1"; rest="$*"
+case "$cmd" in
+  ok)       echo "host=$target"; exit 0 ;;
+  fail)     r="${rest#fail }"; case "$r" in *:*) echo "${r#*:}" >&2; exit "${r%%:*}" ;; *) echo "failing" >&2; exit "$r" ;; esac ;;
+  refused)  echo "ssh: connect to host $target port 22: Connection refused" >&2; exit 255 ;;
+  denied)   echo "$target: Permission denied (publickey)." >&2; exit 255 ;;
   hostkey)  echo "Host key verification failed." >&2; exit 255 ;;
   hang)     sleep 30; exit 0 ;;
   pw)       echo "pw=$PSX_FAKE_PW"; exit 0 ;;

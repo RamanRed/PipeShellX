@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <charconv>
+#include <fstream>
+#include <sstream>
 #include <stdexcept>
 
 namespace psx::inventory {
@@ -207,6 +209,16 @@ Inventory Inventory::parse(std::string_view iniText, const std::string& sourcePa
     }
 
     return inventory;
+}
+
+Inventory Inventory::loadFromFile(const std::string& path) {
+    std::ifstream file(path);
+    if (!file.is_open()) {
+        throw std::runtime_error("inventory: cannot open '" + path + "'");
+    }
+    std::stringstream buffer;
+    buffer << file.rdbuf();
+    return parse(buffer.str(), path);
 }
 
 Inventory Inventory::importClientsTxt(std::string_view text, const std::string& sourcePath) {

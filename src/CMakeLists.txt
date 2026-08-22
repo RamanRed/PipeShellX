@@ -53,6 +53,8 @@ add_library(pipeshellx_lib
     ${PIPESHELLX_SINK_SOURCES}
     ${PIPESHELLX_INVENTORY_SOURCES}
     runtime/reactor.cpp
+    cli/hosts_command.cpp
+    cli/run_command.cpp
     cli_options.cpp
     client_config.cpp
     client_manager.cpp
