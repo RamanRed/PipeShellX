@@ -200,3 +200,14 @@ TEST(SshAuthTest, DetectsHostKeyVerificationFailures) {
     EXPECT_FALSE(isSshHostKeyFailure("Permission denied (publickey)."));
     EXPECT_FALSE(isSshHostKeyFailure(""));
 }
+
+TEST(SshAuthTest, RetryableFailuresAreTransientTransportOnly) {
+    EXPECT_TRUE(isRetryableSshFailure("ssh: connect to host h port 22: Connection refused"));
+    EXPECT_TRUE(isRetryableSshFailure("connection timed out"));
+    EXPECT_TRUE(isRetryableSshFailure("could not resolve hostname h"));
+    EXPECT_TRUE(isRetryableSshFailure("No route to host"));
+    // Permanent failures: retrying cannot help.
+    EXPECT_FALSE(isRetryableSshFailure("Permission denied (publickey)."));
+    EXPECT_FALSE(isRetryableSshFailure("Host key verification failed."));
+    EXPECT_FALSE(isRetryableSshFailure("hello from the remote command"));
+}

@@ -158,6 +158,8 @@ RunInvocation parseRun(const std::vector<std::string>& args) {
             setSink(invocation, SinkMode::Json, sinkSet);
         } else if (arg == "--reuse") {
             invocation.reuse = true;
+        } else if (arg == "--retries") {
+            invocation.retries = parseIntArg(valueFor(i, arg), "--retries");
         } else if (arg == "--no-color" || arg == "--no-colour") {
             invocation.colour = false;
         } else {
@@ -251,7 +253,8 @@ int runSubcommand(const RunInvocation& invocation, std::ostream& out, std::ostre
                                                .policy = invocation.policy,
                                                .ringBytes = invocation.ringBytes,
                                                .controlPath = controlPath,
-                                               .cancellable = true});
+                                               .cancellable = true,
+                                               .maxRetries = invocation.retries});
     if (result.cancelled) {
         return kExitCancelled; // 130
     }

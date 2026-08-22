@@ -5,6 +5,7 @@
 #include "psx/os/io.hpp"
 #include "psx/os/pipe.hpp"
 #include "psx/os/process.hpp"
+#include "psx/runtime/backoff.hpp"
 #include "psx/runtime/reactor.hpp"
 #include "psx/sink/sink.hpp"
 #include "psx/stream/line_framer.hpp"
@@ -13,10 +14,12 @@
 #include <cstddef>
 #include <functional>
 #include <optional>
+#include <random>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -72,6 +75,8 @@ struct Worker {
     bool exited = false;
     bool timedOut = false;
     bool cancelled = false;
+    int attempt = 0;                // retries performed so far (0 on the first run)
+    bool awaitingRetry = false;     // finished a failed attempt, waiting on a backoff timer
     std::uint64_t droppedBytes = 0; // bytes discarded from stdout/stderr by the ring
     bool counted = false;           // WorkerRun: already subtracted from the remaining count
     bool spawned = false;           // WorkerRun: spawnFn has been invoked for this worker
@@ -85,6 +90,27 @@ struct Worker {
         failureMessage = message;
         stderrData = std::move(message);
         stdoutClosed = stderrClosed = stdinClosed = exited = true;
+    }
+
+    // Wipe the per-attempt state so a retry starts clean, keeping identity
+    // (clientId/context/input) and the retry counter. Fresh pipes and Process
+    // are installed by spawnWorker(); the old handles were already closed.
+    void resetForRetry() {
+        failureMessage.clear();
+        stdoutData.clear();
+        stderrData.clear();
+        status.reset();
+        stdoutFramer = psx::stream::LineFramer{};
+        stderrFramer = psx::stream::LineFramer{};
+        stdoutToken = stderrToken = stdinToken = 0;
+        stdoutClosed = stderrClosed = stdinClosed = false;
+        exited = false;
+        timedOut = false;
+        cancelled = false;
+        droppedBytes = 0;
+        inputWritten = 0;
+        counted = false;
+        awaitingRetry = false;
     }
 
     // v0.1.0 contract: exit code, -1 when signal-terminated, 127 when not started.
@@ -115,12 +141,16 @@ public:
               std::function<void(std::size_t)> spawn,
               psx::stream::OverflowPolicy policy,
               std::size_t ringBytes,
-              bool cancellable)
+              bool cancellable,
+              int maxRetries,
+              std::chrono::milliseconds retryBase,
+              std::chrono::milliseconds retryCap)
         : reactor_(reactor), workers_(workers), timeoutSec_(timeoutSec), sink_(sink),
           concurrency_(concurrency == 0 ? workers.size() : concurrency), spawn_(std::move(spawn)),
           // Block (or a 0 ring) captures everything; a drop policy bounds it.
           outputCap_(policy == psx::stream::OverflowPolicy::Block ? 0 : ringBytes), outputPolicy_(policy),
-          cancellable_(cancellable) {}
+          cancellable_(cancellable), maxRetries_(maxRetries), retryBase_(retryBase), retryCap_(retryCap),
+          rng_(std::random_device{}()) {}
 
     // The reactor is cached and reused across runs; a timer left in it after
     // this WorkerRun is destroyed would fire into freed memory. Cancel any
@@ -136,6 +166,9 @@ public:
             // The reactor outlives this run; drop the handler so a later SIGINT
             // cannot dispatch into this freed WorkerRun.
             (void)reactor_.onSignal({});
+        }
+        for (auto& [index, timer] : retryTimers_) {
+            reactor_.cancel(timer);
         }
     }
 
@@ -170,8 +203,14 @@ private:
             return;
         }
         filling_ = true;
-        while (inFlight_ < concurrency_ && nextToSpawn_ < workers_.size()) {
-            const std::size_t index = nextToSpawn_++;
+        while (inFlight_ < concurrency_ && (!retryQueue_.empty() || nextToSpawn_ < workers_.size())) {
+            std::size_t index;
+            if (!retryQueue_.empty()) {
+                index = retryQueue_.front();
+                retryQueue_.erase(retryQueue_.begin());
+            } else {
+                index = nextToSpawn_++;
+            }
             Worker& worker = workers_[index];
             worker.spawned = true;
             spawn_(index);
@@ -188,12 +227,54 @@ private:
     // O(1) completion tracking: each worker is subtracted from `remaining_`
     // exactly once, when it first becomes complete; the loop stops at zero.
     void account(Worker& worker) {
-        if (!worker.counted && worker.complete()) {
-            worker.counted = true;
-            if (--remaining_ == 0) {
-                reactor_.stop();
-            }
+        if (worker.counted || worker.awaitingRetry || !worker.complete()) {
+            return;
         }
+        // Fully finished one attempt: retry a transient transport failure (unless
+        // the run is being cancelled) before counting it as done.
+        if (!cancelled_ && worker.attempt < maxRetries_ && retryable(worker)) {
+            scheduleRetry(worker);
+            return;
+        }
+        worker.counted = true;
+        if (--remaining_ == 0) {
+            reactor_.stop();
+        }
+    }
+
+    // Only ssh's own transient transport failures (exit 255 + connect/unreachable
+    // on stderr) are retried. A command's own non-zero exit, an auth/host-key
+    // failure, a timeout or a start failure are permanent.
+    bool retryable(const Worker& worker) const {
+        return !worker.timedOut && worker.failureMessage.empty() && worker.exitCode() == 255 &&
+               isRetryableSshFailure(worker.stderrData);
+    }
+
+    void scheduleRetry(Worker& worker) {
+        worker.awaitingRetry = true;
+        ++worker.attempt;
+        const double draw = std::uniform_real_distribution<double>(0.0, 1.0)(rng_);
+        const auto delay = psx::runtime::backoffDelay(worker.attempt, retryBase_, retryCap_, draw);
+        const std::size_t index = static_cast<std::size_t>(&worker - workers_.data());
+        Logger::getInstance().log(LogLevel::INFO, worker.context,
+                                  "Transient failure; retry " + std::to_string(worker.attempt) + "/" +
+                                      std::to_string(maxRetries_) + " in " + std::to_string(delay.count()) + " ms");
+        retryTimers_[index] = reactor_.after(delay, [this, index] { onRetry(index); });
+    }
+
+    void onRetry(std::size_t index) {
+        retryTimers_.erase(index);
+        Worker& worker = workers_[index];
+        worker.awaitingRetry = false;
+        if (cancelled_) {
+            // Cancelled while backing off: this attempt is the last, as cancelled.
+            worker.cancelled = true;
+            account(worker); // still exited + closed from the failed attempt
+            return;
+        }
+        worker.resetForRetry();
+        retryQueue_.push_back(index);
+        fillSlots();
     }
 
     void watch(Worker& worker, Handle& handle, psx::os::Interest interest, Token& token, Reactor::IoHandler handler) {
@@ -378,6 +459,19 @@ private:
         } else {
             anyTimedOut_ = true;
         }
+        // Abandon pending backoff timers; those workers end on this attempt.
+        for (auto& [index, timer] : retryTimers_) {
+            reactor_.cancel(timer);
+        }
+        retryTimers_.clear();
+        // Workers already reset and queued for a respawn end now, too.
+        for (std::size_t index : retryQueue_) {
+            Worker& queued = workers_[index];
+            mark(queued, reason);
+            queued.stdoutClosed = queued.stderrClosed = queued.stdinClosed = queued.exited = true;
+            account(queued);
+        }
+        retryQueue_.clear();
         // Pending workers never got a slot; they end without running.
         while (nextToSpawn_ < workers_.size()) {
             Worker& pending = workers_[nextToSpawn_++];
@@ -386,6 +480,17 @@ private:
             account(pending);
         }
         for (auto& worker : workers_) {
+            if (worker.counted) {
+                continue;
+            }
+            if (worker.awaitingRetry) {
+                // Was waiting on a (now-cancelled) backoff timer; already exited
+                // and drained from its failed attempt, so just finalize it.
+                worker.awaitingRetry = false;
+                mark(worker, reason);
+                account(worker);
+                continue;
+            }
             if (worker.complete()) {
                 continue;
             }
@@ -456,6 +561,12 @@ private:
     bool cancellable_ = false;
     bool cancelled_ = false;
     bool signalRegistered_ = false;
+    int maxRetries_ = 0;
+    std::chrono::milliseconds retryBase_{200};
+    std::chrono::milliseconds retryCap_{30000};
+    std::mt19937 rng_;
+    std::unordered_map<std::size_t, psx::runtime::TimerId> retryTimers_;
+    std::vector<std::size_t> retryQueue_;
 };
 
 // Creates the stdio pipes for a worker, spawns it, and leaves the parent ends
@@ -561,7 +672,8 @@ ProcessManager::Result ProcessManager::execute(const std::vector<std::string>& a
     };
 
     WorkerRun run(reactor(), workers, timeoutSec, nullptr, 1, spawnLocal, psx::stream::OverflowPolicy::Block, 0,
-                  /*cancellable=*/false);
+                  /*cancellable=*/false, /*maxRetries=*/0, std::chrono::milliseconds{200},
+                  std::chrono::milliseconds{30000});
     run.run();
 
     Logger::getInstance().log(worker.exitCode() == 0 ? LogLevel::INFO : LogLevel::ERROR, context,
@@ -630,7 +742,8 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
     };
 
     WorkerRun run(reactor(/*withSignals=*/options.cancellable), workers, options.timeoutSec, options.sink,
-                  options.concurrency, spawnRemote, options.policy, options.ringBytes, options.cancellable);
+                  options.concurrency, spawnRemote, options.policy, options.ringBytes, options.cancellable,
+                  options.maxRetries, options.retryBaseDelay, options.retryMaxDelay);
     run.run();
 
     std::vector<ClientResult> clientResults;
@@ -648,7 +761,8 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
                                              {},
                                              worker.timedOut,
                                              worker.droppedBytes,
-                                             worker.cancelled});
+                                             worker.cancelled,
+                                             worker.attempt + 1});
     }
 
     for (std::size_t index = 0; index < clientResults.size(); ++index) {

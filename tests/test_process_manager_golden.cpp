@@ -5,6 +5,8 @@
 
 #include <gtest/gtest.h>
 
+using namespace std::chrono_literals;
+
 #include "client_config.hpp"
 #include "command_executor.hpp"
 #include "process_manager.hpp"
@@ -354,4 +356,46 @@ TEST_F(GoldenRemoteTest, ADropRingStillStreamsEveryByteToTheSink) {
     EXPECT_EQ(out.str().size(), prefix.size() + 200000U + 1U) << "sink received all 200000 bytes";
     // The summary reports drops.
     EXPECT_NE(err.str().find("dropped"), std::string::npos) << err.str();
+}
+
+// --- Retries: transient transport failures back off and retry (Phase 2) ---
+
+TEST_F(GoldenRemoteTest, PersistentTransientFailureExhaustsRetries) {
+    // `refused` fails with "Connection refused" (exit 255) every time: with two
+    // retries it is attempted three times, then reported as a connection failure.
+    auto result =
+        pm_.executeRemote({client("u", "h")}, "refused", context("refused"),
+                          {.timeoutSec = 10, .maxRetries = 2, .retryBaseDelay = 20ms, .retryMaxDelay = 200ms});
+    ASSERT_EQ(result.clientResults.size(), 1U);
+    EXPECT_EQ(result.clientResults[0].attempts, 3); // 1 initial + 2 retries
+    EXPECT_EQ(result.clientResults[0].exitCode, 255);
+    EXPECT_EQ(result.clientResults[0].errorMessage, "ERROR: connection failed");
+}
+
+TEST_F(GoldenRemoteTest, ATransientFailureRecoversOnRetry) {
+    test_support::ScopedTempCwd cwd("flaky");
+    test_support::ScopedEnv okOn("PSX_FLAKY_OK_ON", std::string("2"));           // succeed on attempt 2
+    test_support::ScopedEnv file("PSX_FLAKY_FILE", (cwd.path() / "n").string()); // counter file
+    auto result =
+        pm_.executeRemote({client("u", "h")}, "flaky", context("flaky"),
+                          {.timeoutSec = 10, .maxRetries = 3, .retryBaseDelay = 20ms, .retryMaxDelay = 200ms});
+    ASSERT_EQ(result.clientResults.size(), 1U);
+    EXPECT_EQ(result.clientResults[0].exitCode, 0) << result.clientResults[0].stderrData;
+    EXPECT_EQ(result.clientResults[0].attempts, 2);
+    EXPECT_TRUE(result.clientResults[0].errorMessage.empty());
+    EXPECT_EQ(result.clientResults[0].stdoutData, "host=u@h\n");
+}
+
+TEST_F(GoldenRemoteTest, AnAuthFailureIsNotRetried) {
+    auto result = pm_.executeRemote({client("u", "h")}, "denied", context("denied"),
+                                    {.timeoutSec = 10, .maxRetries = 3, .retryBaseDelay = 20ms});
+    EXPECT_EQ(result.clientResults[0].attempts, 1); // permanent: no retry
+    EXPECT_EQ(result.clientResults[0].errorMessage, "ERROR: authentication failed");
+}
+
+TEST_F(GoldenRemoteTest, ACommandsOwnNonZeroExitIsNotRetried) {
+    auto result = pm_.executeRemote({client("u", "h")}, "fail 7", context("fail"),
+                                    {.timeoutSec = 10, .maxRetries = 3, .retryBaseDelay = 20ms});
+    EXPECT_EQ(result.clientResults[0].attempts, 1); // a real result, not a transport failure
+    EXPECT_EQ(result.clientResults[0].exitCode, 7);
 }

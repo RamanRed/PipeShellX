@@ -143,3 +143,8 @@ bool isSshAuthenticationFailure(const std::string& stderrText) {
 bool isSshHostKeyFailure(const std::string& stderrText) {
     return containsAny(toLowerCopy(stderrText), kHostKeyNeedles);
 }
+
+bool isRetryableSshFailure(const std::string& stderrText) {
+    const std::string lowered = toLowerCopy(stderrText);
+    return containsAny(lowered, kUnreachableNeedles) || containsAny(lowered, kConnectionNeedles);
+}

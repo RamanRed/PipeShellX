@@ -39,3 +39,8 @@ std::optional<std::string> classifySshFailure(const std::string& stderrText);
 
 bool isSshAuthenticationFailure(const std::string& stderrText);
 bool isSshHostKeyFailure(const std::string& stderrText);
+
+// True for *transient* transport failures worth retrying (host unreachable or a
+// failed/refused/reset connection). Auth and host-key failures are permanent
+// and return false — retrying them is futile.
+bool isRetryableSshFailure(const std::string& stderrText);
