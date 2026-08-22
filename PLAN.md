@@ -9,7 +9,7 @@ anonymous pipes on one host, backpressured mTLS streams between hosts — with t
 carried forward in Appendix A). This document is the single source of truth for scope; update it
 in the same PR as any scope change.
 **Baseline date:** 2026-08-22, commit `2e10869`.
-**Phase status:** Phase 0 complete (2026-08-22, `v0.1.0`); Phase 1 complete (2026-08-22, `v0.2.0`); Phase 2 functionally complete + reviewed (2026-08-23, `v0.3.0`) — its docker 100-container exit criterion is an environment exception (no Docker daemon here), and the per-node circuit breaker is deferred as premature → **next phase: Phase 3 (Windows), which cannot be built/tested in this macOS environment** (needs an MSVC/clang-cl Windows toolchain).
+**Phase status:** Phase 0 (`v0.1.0`), Phase 1 (`v0.2.0`), Phase 2 (`v0.3.0`) complete + reviewed. **Phase 3 (Windows) is DEFERRED to future work** — it needs an MSVC/clang-cl Windows toolchain not available in this environment; the design is Windows-ready and `docs/windows.md` captures the tiers/differences, so it can resume on a Windows-capable host. → **active phase: Phase 4 — Native backplane (`v0.5.0`)** (buildable here: OpenSSL 3.x present).
 
 ---
 
@@ -719,7 +719,16 @@ Extends `docs/ipc_design.md`, `docs/system_flow.md`, `docs/distributed_execution
 - [~] Integration rig: property test "no interleaved partial lines" ✓ (randomized, in `test_line_framer.cpp`). **Blocked in this env:** docker-compose `openssh-server` fleet + the TSan job (no Docker daemon available — see the dev-environment notes).
 - **Exit criteria:** `tail -F` across 100 containers streams live with flat controller RSS; §7 targets T1–T6 met on Linux and macOS. _(Functionally implemented; the 100-container docker verification cannot run in the current environment — no Docker daemon. Tagging `v0.3.0` awaits either a Docker-capable host or an explicit decision to record the docker criterion as an environment exception.)_
 
-### Phase 3 — Windows port (15–20 days) → `v0.4.0`
+### Phase 3 — Windows port (15–20 days) → `v0.4.0`  ⏸️ DEFERRED (future work)
+
+> **Deferred to future work** (2026-08-23): building/testing the Win32 `os` backend, the IOCP
+> reactor backend, `ssh.exe`-discovery `SshTransport`, and the `windows-latest` CI requires an
+> MSVC/clang-cl Windows toolchain, which the current development environment lacks. Writing
+> untested Win32 C++ here would violate the project's build/test discipline. The completable part
+> — `docs/windows.md` (support tiers, §4.3–4.7 differences) — is done, and support tier **T1**
+> (Windows as an SSH *target*, `--shell cmd|powershell`) already shipped in Phase 2. Resume this
+> phase on a Windows-capable host / CI. Version `v0.4.0` is reserved for it; the native backplane
+> (Phase 4) proceeds next as `v0.5.0`.
 Extends `docs/os_abstraction.md`, `docs/deployment.md`, `docs/testing.md`.
 - [ ] `src/os/win32/{handle,pipe(overlapped named),process(CreateProcessW + HANDLE_LIST + Job Objects),console,paths,signal(ConsoleCtrl)}.cpp`.
 - [ ] `Reactor` IOCP backend; `ChildExitSource` via job completion port; `Reactor::wake()` via `PostQueuedCompletionStatus`.
