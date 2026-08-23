@@ -99,9 +99,26 @@ the process exits `130`.
 the same `run_id` keys the audit records, so a run’s logs and audit trail can be
 joined offline.
 
-## Roadmap (Phase 5)
+## Pipelines (`pipe`)
 
-`pipeshellx pipe` will connect stages placed on different nodes with `'|'`
-edges (`'cmd'@host '|' 'cmd'@local`), and `pipeline.yaml` will describe general
-DAGs. `merge`, `group`, `json`, `consensus`, and `spool` become sink *stages*
+`pipeshellx pipe` composes stages into a pipeline. Each stage is a single-quoted
+command (or a bare token) with an optional `@placement`; `|` joins them, and a
+`|` *inside* the quotes is literal:
+
+```bash
+# local pipeline (available now)
+pipeshellx pipe "'grep ERROR app.log' | 'sort -u' | 'head -n 20'"
+```
+
+A local pipeline runs as a real Unix pipeline: each stage's stdout feeds the
+next stage's stdin, the last stage's stdout is the command's output, stderr is
+inherited, and the exit code follows `pipefail` (the rightmost non-zero stage,
+else 0). Ctrl-C cancels it (exit `130`); a malformed spec or a cycle exits `2`.
+
+### Roadmap (Phase 5)
+
+Cross-node placement (`'cmd'@host | 'cmd'@local`) runs the marked stages on
+remote nodes over the native backplane, forwarding stdin/stdout across the
+connection; `pipeline.yaml` will describe general DAGs (fan-in/out, named
+edges). `merge`, `group`, `json`, `consensus`, and `spool` become sink *stages*
 in that model; `run` is `pipe` with a merge sink. See `PLAN.md` §5.

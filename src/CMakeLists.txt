@@ -85,6 +85,7 @@ add_library(pipeshellx_lib
     cli/hosts_command.cpp
     cli/ping_command.cpp
     cli/selection.cpp
+    cli/pipe_command.cpp
     cli/run_command.cpp
     cli_options.cpp
     client_config.cpp

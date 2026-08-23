@@ -4,6 +4,7 @@
 #include "psx/cli/hosts_command.hpp"
 #include "psx/cli/node_command.hpp"
 #include "psx/cli/ping_command.hpp"
+#include "psx/cli/pipe_command.hpp"
 #include "psx/cli/run_command.hpp"
 #include "psx/os/console.hpp"
 #include "psx/os/io.hpp"
@@ -62,6 +63,7 @@ Commands:
          [--transport native --cert F --key F --ca F [--native-port P] [--crl F]]
          -- <command...>                              run a command on hosts
   ping   [-i FILE] [-g GROUP|-t TAG|-H h1,h2] [--timeout S]   probe reachability
+  pipe   "'cmd'@place | 'cmd2'@place2"                   run a pipeline (local stages)
   hosts  [-i FILE]                                     list inventory hosts
   ca     init --cn NAME --dir DIR | issue --san URI --ca DIR --out PFX  (native transport)
          | revoke --ca DIR (--cert F|--serial HEX) | sign --ca DIR --csr F --san URI --out F
@@ -131,6 +133,11 @@ int main(int argc, char** argv) {
             std::cerr << "pipeshellx ca: this build has no native transport support (OpenSSL)\n";
             return kExitUsage;
 #endif
+        }
+
+        if (!args.empty() && args[0] == "pipe") {
+            std::vector<std::string> rest(args.begin() + 1, args.end());
+            return psx::cli::pipeSubcommand(rest, std::cout, std::cerr);
         }
 
         if (!args.empty() && args[0] == "hosts") {
