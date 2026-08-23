@@ -284,19 +284,28 @@ int runNative(const RunInvocation& invocation,
     }
     psx::runtime::Reactor& r = *reactor.value();
 
-    // A line framer per host feeds the sink whole lines from the raw stream bytes.
-    auto framers = std::make_shared<std::unordered_map<std::string, psx::stream::LineFramer>>();
-    auto emit = [sink](const std::string& host, std::string_view line) {
+    // A line framer per host and channel feeds the sink whole lines from the raw
+    // stream bytes, keeping stdout and stderr distinct as they are over SSH.
+    struct HostFramers {
+        psx::stream::LineFramer out;
+        psx::stream::LineFramer err;
+    };
+    auto framers = std::make_shared<std::unordered_map<std::string, HostFramers>>();
+    auto emit = [sink](const std::string& host, psx::sink::Channel channel, std::string_view line) {
         if (sink != nullptr) {
-            sink->line(host, psx::sink::Channel::Stdout, line);
+            sink->line(host, channel, line);
         }
     };
-    psx::transport::NativeController controller(r, {.certificatePem = *cert, .privateKeyPem = *key, .caPem = *ca},
-                                                [framers, emit](const std::string& host, std::string_view bytes) {
-                                                    (*framers)[host].push(
-                                                        std::span<const char>(bytes.data(), bytes.size()),
-                                                        [&](std::string_view line, bool) { emit(host, line); });
-                                                });
+    psx::transport::NativeController controller(
+        r, {.certificatePem = *cert, .privateKeyPem = *key, .caPem = *ca},
+        [framers, emit](const std::string& host, std::string_view bytes, psx::transport::Channel channel) {
+            const bool err = channel == psx::transport::Channel::Stderr;
+            HostFramers& hf = (*framers)[host];
+            const auto sinkChannel = err ? psx::sink::Channel::Stderr : psx::sink::Channel::Stdout;
+            (err ? hf.err : hf.out)
+                .push(std::span<const char>(bytes.data(), bytes.size()),
+                      [&](std::string_view line, bool) { emit(host, sinkChannel, line); });
+        });
 
     std::vector<psx::transport::NativeController::Target> targets;
     targets.reserve(clients.size());
@@ -315,7 +324,9 @@ int runNative(const RunInvocation& invocation,
         targets, invocation.command, [&](std::vector<psx::transport::NativeController::HostResult> results) {
             std::size_t succeeded = 0;
             for (auto& res : results) {
-                (*framers)[res.host].flush([&](std::string_view line, bool) { emit(res.host, line); });
+                HostFramers& hf = (*framers)[res.host];
+                hf.out.flush([&](std::string_view line, bool) { emit(res.host, psx::sink::Channel::Stdout, line); });
+                hf.err.flush([&](std::string_view line, bool) { emit(res.host, psx::sink::Channel::Stderr, line); });
                 const bool ok = res.ok && res.exitCode == 0 && res.error.empty();
                 succeeded += ok ? 1 : 0;
                 if (!ok && exitCode == 0) {

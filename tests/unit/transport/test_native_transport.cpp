@@ -51,9 +51,12 @@ struct NodeStage : SessionHandler {
 struct ControllerSink : SessionHandler {
     Reactor* reactor = nullptr;
     std::string data;
+    std::string stderrData;
     bool exited = false;
     ExitStatus status{};
-    void onData(StreamId, std::string_view d, bool) override { data.append(d); }
+    void onData(StreamId, std::string_view d, bool, Channel channel) override {
+        (channel == Channel::Stderr ? stderrData : data).append(d);
+    }
     void onExit(StreamId, const ExitStatus& s) override {
         exited = true;
         status = s;
@@ -192,9 +195,10 @@ struct ConsumingSink : SessionHandler {
     Session* session = nullptr;
     Reactor* reactor = nullptr;
     std::string data;
+    std::string stderrData;
     bool exited = false;
-    void onData(StreamId id, std::string_view d, bool) override {
-        data.append(d);
+    void onData(StreamId id, std::string_view d, bool, Channel channel) override {
+        (channel == Channel::Stderr ? stderrData : data).append(d);
         session->consume(id, static_cast<std::uint32_t>(d.size()));
     }
     void onExit(StreamId, const ExitStatus&) override {
@@ -632,4 +636,60 @@ TEST(NativeTransportTest, LeaseKeepsAnIdleConnectionAlive) {
     ASSERT_TRUE(r.run().ok());
 
     EXPECT_FALSE(errored) << "the lease falsely fenced a healthy idle connection";
+}
+
+// A real stage that writes to both fds; the node tags each pipe's bytes with its
+// channel, and the controller separates them (as the SSH path does).
+TEST(NodeStageRunnerTest, SplitsStdoutAndStderrOnTheWire) {
+    auto listener = Socket::listen("127.0.0.1", 0);
+    ASSERT_TRUE(listener.ok());
+    auto clientSock = Socket::connect("127.0.0.1", listener.value().localPort().value());
+    ASSERT_TRUE(clientSock.ok());
+    Socket serverSock = acceptWithin(listener.value());
+    ASSERT_TRUE(serverSock.valid());
+
+    const auto ctlId = tls_test::generateSelfSigned("psx://controller");
+    const auto nodeId = tls_test::generateSelfSigned("psx://node/1");
+    auto ctlTls = Tls::create(
+        {.certificatePem = ctlId.certPem, .privateKeyPem = ctlId.keyPem, .caPem = nodeId.certPem, .isServer = false});
+    auto nodeTls = Tls::create(
+        {.certificatePem = nodeId.certPem, .privateKeyPem = nodeId.keyPem, .caPem = ctlId.certPem, .isServer = true});
+    ASSERT_TRUE(ctlTls.ok() && nodeTls.ok());
+
+    auto reactor = Reactor::create();
+    ASSERT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+
+    NodeStageRunner runner(r);
+    ConsumingSink sink;
+    sink.reactor = &r;
+    bool errored = false;
+    NativeTransport* ctlPtr = nullptr;
+
+    NativeTransport node(r, std::move(serverSock), std::move(nodeTls.value()), Role::Node, runner,
+                         {.onError = [&](psx::Error) {
+                             errored = true;
+                             r.stop();
+                         }});
+    runner.bind(node.session());
+    NativeTransport ctl(
+        r, std::move(clientSock.value()), std::move(ctlTls.value()), Role::Controller, sink,
+        {.onReady = [&] { ctlPtr->session().open({.argv = {"sh", "-c", "printf OUT; printf ERR 1>&2"}}); },
+         .onError =
+             [&](psx::Error) {
+                 errored = true;
+                 r.stop();
+             }});
+    sink.session = &ctl.session();
+    ctlPtr = &ctl;
+
+    ASSERT_TRUE(node.start().ok());
+    ASSERT_TRUE(ctl.start().ok());
+    r.after(std::chrono::seconds(5), [&] { r.stop(); });
+    ASSERT_TRUE(r.run().ok());
+
+    EXPECT_FALSE(errored);
+    ASSERT_TRUE(sink.exited);
+    EXPECT_EQ(sink.data, "OUT");       // stdout channel
+    EXPECT_EQ(sink.stderrData, "ERR"); // stderr channel, kept distinct
 }

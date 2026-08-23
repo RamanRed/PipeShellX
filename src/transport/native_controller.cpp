@@ -16,13 +16,13 @@ struct NativeController::Conn : SessionHandler {
     bool done = false;
     std::unique_ptr<NativeTransport> transport; // declared last: destroyed first
 
-    void onData(StreamId id, std::string_view data, bool /*endStream*/) override {
+    void onData(StreamId id, std::string_view data, bool /*endStream*/, Channel channel) override {
         if (session != nullptr) {
             session->consume(id, static_cast<std::uint32_t>(data.size())); // grant credit
         }
         result.output.append(data);
         if (owner->onOutput_) {
-            owner->onOutput_(result.host, data);
+            owner->onOutput_(result.host, data, channel);
         }
     }
     void onExit(StreamId /*id*/, const psx::os::ExitStatus& status) override {

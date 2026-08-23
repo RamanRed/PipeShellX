@@ -20,6 +20,8 @@ enum class FrameType : std::uint8_t {
 
 // Per-type flag bits. kEndStream marks the last frame of a stream (half-close).
 inline constexpr std::uint8_t kFlagEndStream = 0x01;
+// On a DATA frame, marks the payload as the stage's stderr; unset means stdout.
+inline constexpr std::uint8_t kFlagStderr = 0x02;
 
 // One protocol frame: a typed, flagged, stream-scoped, length-delimited unit.
 struct Frame {

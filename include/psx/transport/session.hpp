@@ -7,6 +7,7 @@
 #include "psx/transport/open_request.hpp"
 
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <string>
 #include <string_view>
@@ -20,6 +21,10 @@ using StreamId = std::uint32_t;
 // (to run stages); the Node receives them and reports results.
 enum class Role : std::uint8_t { Controller, Node };
 
+// A stage's output channel, carried on DATA frames (kFlagStderr) so the two
+// streams stay distinct on the wire, as they are over SSH.
+enum class Channel : std::uint8_t { Stdout = 0, Stderr = 1 };
+
 // Per-stream receive window (HTTP/2-style credit flow control). Both peers start
 // each stream at this window; kMaxStreamWindow is the value a window may not
 // exceed after a WINDOW_UPDATE (a flow-control error otherwise).
@@ -32,7 +37,7 @@ class SessionHandler {
 public:
     virtual ~SessionHandler() = default;
     virtual void onOpen(StreamId /*id*/, const OpenRequest& /*request*/) {} // Node: a stage was opened
-    virtual void onData(StreamId /*id*/, std::string_view /*bytes*/, bool /*endStream*/) {}
+    virtual void onData(StreamId /*id*/, std::string_view /*bytes*/, bool /*endStream*/, Channel /*channel*/) {}
     virtual void onExit(StreamId /*id*/, const psx::os::ExitStatus& /*status*/) {} // Controller: the stage exited
     virtual void onGoAway() {}                                                     // peer is draining
     virtual void onPong() {}                                                       // lease keep-alive reply
@@ -59,8 +64,10 @@ public:
 
     // Controller only: open a stream to run `request`; returns the new stream id.
     StreamId open(const OpenRequest& request);
-    // Send stream payload; `endStream` half-closes this side's send direction.
-    void sendData(StreamId id, std::string_view bytes, bool endStream);
+    // Send stream payload on `channel`; `endStream` half-closes this side's send
+    // direction. Channels share the stream's one credit window and their emission
+    // order is preserved on the wire.
+    void sendData(StreamId id, std::string_view bytes, bool endStream, Channel channel = Channel::Stdout);
     // Node only: report the stage's exit; terminal for the stream.
     void sendExit(StreamId id, const psx::os::ExitStatus& status);
     // The receiving app consumed `n` bytes previously delivered via onData for
@@ -88,10 +95,15 @@ private:
         explicit Stream(std::uint32_t window) : recvWindow(window), sendCredit(window) {}
         psx::stream::CreditWindow recvWindow; // inbound: enforce the window, generate WINDOW_UPDATE
         std::uint32_t sendCredit;             // outbound: bytes we may still send on this stream
-        std::string sendBuffer;               // outbound bytes waiting on credit
-        bool sendEndPending = false;          // an endStream queued behind buffered bytes
-        bool exitPending = false;             // an EXIT queued behind still-buffered DATA
-        psx::os::ExitStatus exitStatus{};     // the deferred EXIT's status
+        struct Segment {
+            Channel channel;
+            std::string bytes;
+        };
+        std::deque<Segment> sendQueue;    // channel-tagged outbound bytes waiting on credit
+        std::size_t sendBytes = 0;        // total bytes across sendQueue (for the high-water mark)
+        bool sendEndPending = false;      // an endStream queued behind buffered bytes
+        bool exitPending = false;         // an EXIT queued behind still-buffered DATA
+        psx::os::ExitStatus exitStatus{}; // the deferred EXIT's status
     };
 
     void send(const Frame& frame);

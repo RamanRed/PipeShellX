@@ -10,6 +10,9 @@ namespace {
 psx::Error protocolError(const char* what) {
     return psx::Error{psx::ErrorClass::Other, 0, what};
 }
+std::uint8_t channelFlag(Channel channel) {
+    return channel == Channel::Stderr ? kFlagStderr : 0;
+}
 } // namespace
 
 Session::Session(Role role, WriteFn write, SessionHandler& handler, std::uint32_t initialWindow)
@@ -28,55 +31,67 @@ StreamId Session::open(const OpenRequest& request) {
     return id;
 }
 
-void Session::sendData(StreamId id, std::string_view bytes, bool endStream) {
+void Session::sendData(StreamId id, std::string_view bytes, bool endStream, Channel channel) {
     auto it = streams_.find(id);
     if (it == streams_.end()) {
         return; // unknown stream: nothing to send
     }
-    it->second.sendBuffer.append(bytes);
-    if (endStream) {
-        it->second.sendEndPending = true;
+    Stream& stream = it->second;
+    if (!bytes.empty()) {
+        stream.sendQueue.push_back({channel, std::string(bytes)});
+        stream.sendBytes += bytes.size();
     }
-    flushStream(id, it->second);
+    if (endStream) {
+        stream.sendEndPending = true;
+    }
+    flushStream(id, stream);
 }
 
 void Session::flushStream(StreamId id, Stream& stream) {
-    const bool wasFull = stream.sendBuffer.size() >= initialWindow_;
-    while (!stream.sendBuffer.empty() && stream.sendCredit > 0) {
-        const auto chunk =
-            static_cast<std::uint32_t>(std::min<std::size_t>(stream.sendBuffer.size(), stream.sendCredit));
-        const bool last = (chunk == stream.sendBuffer.size()) && stream.sendEndPending;
-        send(Frame{.type = FrameType::Data,
-                   .flags = static_cast<std::uint8_t>(last ? kFlagEndStream : 0),
-                   .streamId = id,
-                   .payload = stream.sendBuffer.substr(0, chunk)});
+    const bool wasFull = stream.sendBytes >= initialWindow_;
+    while (!stream.sendQueue.empty() && stream.sendCredit > 0) {
+        Stream::Segment& front = stream.sendQueue.front();
+        const auto chunk = static_cast<std::uint32_t>(std::min<std::size_t>(front.bytes.size(), stream.sendCredit));
+        // The stream's endStream flag rides the last byte of the last segment.
+        const bool drainsQueue = chunk == front.bytes.size() && stream.sendQueue.size() == 1;
+        const bool last = drainsQueue && stream.sendEndPending;
+        std::uint8_t flags = channelFlag(front.channel);
+        if (last) {
+            flags |= kFlagEndStream;
+        }
+        send(Frame{.type = FrameType::Data, .flags = flags, .streamId = id, .payload = front.bytes.substr(0, chunk)});
         stream.sendCredit -= chunk;
-        stream.sendBuffer.erase(0, chunk);
+        stream.sendBytes -= chunk;
+        if (chunk == front.bytes.size()) {
+            stream.sendQueue.pop_front();
+        } else {
+            front.bytes.erase(0, chunk);
+        }
         if (last) {
             stream.sendEndPending = false;
         }
     }
     // A pending end that has no (more) buffered bytes rides a zero-length frame.
-    if (stream.sendBuffer.empty() && stream.sendEndPending) {
+    if (stream.sendQueue.empty() && stream.sendEndPending) {
         send(Frame{.type = FrameType::Data, .flags = kFlagEndStream, .streamId = id, .payload = {}});
         stream.sendEndPending = false;
     }
     // A deferred EXIT rides out once its DATA has fully drained (terminal).
-    if (stream.sendBuffer.empty() && !stream.sendEndPending && stream.exitPending) {
+    if (stream.sendQueue.empty() && !stream.sendEndPending && stream.exitPending) {
         const auto status = stream.exitStatus;
         send(Frame{.type = FrameType::Exit, .flags = kFlagEndStream, .streamId = id, .payload = encodeExit(status)});
         streams_.erase(id); // invalidates `stream`; nothing below may touch it
         return;
     }
     // The buffer drained back below the high-water mark: the producer may resume.
-    if (wasFull && stream.sendBuffer.size() < initialWindow_ && streamWritable_) {
+    if (wasFull && stream.sendBytes < initialWindow_ && streamWritable_) {
         streamWritable_(id);
     }
 }
 
 bool Session::streamWritable(StreamId id) const {
     auto it = streams_.find(id);
-    return it == streams_.end() || it->second.sendBuffer.size() < initialWindow_;
+    return it == streams_.end() || it->second.sendBytes < initialWindow_;
 }
 
 void Session::consume(StreamId id, std::uint32_t n) {
@@ -96,7 +111,7 @@ void Session::sendExit(StreamId id, const psx::os::ExitStatus& status) {
         return; // already closed
     }
     Stream& stream = it->second;
-    if (!stream.sendBuffer.empty() || stream.sendEndPending) {
+    if (!stream.sendQueue.empty() || stream.sendEndPending) {
         // DATA is still flow-controlled in the buffer; EXIT must not overtake it.
         // flushStream() emits it once the buffer drains.
         stream.exitPending = true;
@@ -157,7 +172,8 @@ psx::Result<void> Session::dispatch(Frame&& frame) {
                 return protocolError("DATA exceeds the stream's flow-control window");
             }
             const bool endStream = (frame.flags & kFlagEndStream) != 0;
-            handler_.onData(frame.streamId, frame.payload, endStream);
+            const Channel channel = (frame.flags & kFlagStderr) != 0 ? Channel::Stderr : Channel::Stdout;
+            handler_.onData(frame.streamId, frame.payload, endStream, channel);
             return {};
         }
         case FrameType::Exit: {

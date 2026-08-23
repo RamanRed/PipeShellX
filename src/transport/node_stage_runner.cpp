@@ -117,7 +117,8 @@ void NodeStageRunner::onReadable(StreamId id, bool isStdout) {
                 closeReader(isStdout, stage);
                 break;
             }
-            session_->sendData(id, std::string_view(buffer.data(), got.value()), /*endStream=*/false);
+            session_->sendData(id, std::string_view(buffer.data(), got.value()), /*endStream=*/false,
+                               isStdout ? Channel::Stdout : Channel::Stderr);
             continue;
         }
         if (got.error().cls == psx::ErrorClass::WouldBlock) {

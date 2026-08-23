@@ -31,8 +31,8 @@ public:
         std::string error;  // non-empty on a transport/auth failure
         std::string output; // merged stdout+stderr bytes
     };
-    // Live output callback: (host, bytes) as each DATA chunk arrives.
-    using OnOutput = std::function<void(const std::string&, std::string_view)>;
+    // Live output callback: (host, bytes, channel) as each DATA chunk arrives.
+    using OnOutput = std::function<void(const std::string&, std::string_view, Channel)>;
 
     NativeController(psx::runtime::Reactor& reactor, psx::os::TlsConfig controllerConfig, OnOutput onOutput = {});
     ~NativeController();

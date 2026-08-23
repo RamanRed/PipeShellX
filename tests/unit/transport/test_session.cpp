@@ -17,11 +17,15 @@ namespace {
 struct Recorder : SessionHandler {
     std::vector<std::pair<StreamId, OpenRequest>> opens;
     std::vector<std::tuple<StreamId, std::string, bool>> datas;
+    std::vector<Channel> channels; // the channel of each onData, in arrival order
     std::vector<std::pair<StreamId, ExitStatus>> exits;
     int goAways = 0;
     int pongs = 0;
     void onOpen(StreamId id, const OpenRequest& r) override { opens.emplace_back(id, r); }
-    void onData(StreamId id, std::string_view b, bool e) override { datas.emplace_back(id, std::string(b), e); }
+    void onData(StreamId id, std::string_view b, bool e, Channel c) override {
+        datas.emplace_back(id, std::string(b), e);
+        channels.push_back(c);
+    }
     void onExit(StreamId id, const ExitStatus& s) override { exits.emplace_back(id, s); }
     void onGoAway() override { ++goAways; }
     void onPong() override { ++pongs; }
@@ -261,4 +265,25 @@ TEST(SessionTest, StreamWritableSignalsBackpressureAndResumeOnCredit) {
     EXPECT_EQ(link.nodeBytes(), "0123456789ABCDEFGHIJKLMN");
     EXPECT_TRUE(link.a.streamWritable(id));
     EXPECT_TRUE(resumed);
+}
+
+TEST(SessionTest, InterleavedStdoutAndStderrKeepTheirChannelAndOrder) {
+    Link link;
+    const StreamId id = link.a.open({.argv = {"x"}, .cwd = ""});
+    ASSERT_TRUE(link.pump().ok());
+
+    // The node interleaves the two channels; each DATA frame carries its channel.
+    link.b.sendData(id, "out-1", /*endStream=*/false, Channel::Stdout);
+    link.b.sendData(id, "err-1", /*endStream=*/false, Channel::Stderr);
+    link.b.sendData(id, "out-2", /*endStream=*/false, Channel::Stdout);
+    ASSERT_TRUE(link.pump().ok());
+
+    ASSERT_EQ(link.ctl.datas.size(), 3U);
+    EXPECT_EQ(std::get<1>(link.ctl.datas[0]), "out-1");
+    EXPECT_EQ(std::get<1>(link.ctl.datas[1]), "err-1");
+    EXPECT_EQ(std::get<1>(link.ctl.datas[2]), "out-2");
+    ASSERT_EQ(link.ctl.channels.size(), 3U);
+    EXPECT_EQ(link.ctl.channels[0], Channel::Stdout);
+    EXPECT_EQ(link.ctl.channels[1], Channel::Stderr);
+    EXPECT_EQ(link.ctl.channels[2], Channel::Stdout);
 }
