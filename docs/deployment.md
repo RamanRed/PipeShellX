@@ -186,6 +186,21 @@ family, …) appropriate for a daemon that runs remote commands; run it under a
 dedicated unprivileged `User=` (default `pipeshellx`). Review the emitted file
 before installing.
 
+### Metrics / status endpoint
+
+Pass `--control PATH` to make the node listen on a local AF_UNIX socket that
+answers each connection with a one-line JSON metrics snapshot:
+
+```bash
+pipeshellx node --cert ... --key ... --ca ... --listen 0.0.0.0:7433 --control /run/pipeshellx/node.ctl
+pipeshellx node status --control /run/pipeshellx/node.ctl
+# {"accepted_total":42,"active_connections":3,"active_stages":5}
+```
+
+`accepted_total` is cumulative since start; `active_connections` and
+`active_stages` are current. The socket is local-only (file permissions gate
+access) and is removed on a clean shutdown.
+
 ### Resource Controls
 
 The application already applies hardcoded child CPU and memory limits. For real deployment:

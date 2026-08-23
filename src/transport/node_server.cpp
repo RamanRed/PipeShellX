@@ -59,6 +59,17 @@ void NodeServer::acceptOne(psx::os::Socket socket) {
         return; // drop this connection
     }
     connections_.emplace(id, Connection{std::move(runner), std::move(transport)});
+    ++acceptedTotal_;
+}
+
+NodeServer::Metrics NodeServer::metrics() const {
+    Metrics snapshot;
+    snapshot.acceptedTotal = acceptedTotal_;
+    snapshot.activeConnections = connections_.size();
+    for (const auto& [id, connection] : connections_) {
+        snapshot.activeStages += connection.runner->runningStages();
+    }
+    return snapshot;
 }
 
 void NodeServer::dropConnection(std::uint64_t id) {

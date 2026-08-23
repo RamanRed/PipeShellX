@@ -36,6 +36,14 @@ public:
 
     std::size_t connectionCount() const noexcept { return connections_.size(); }
 
+    // A snapshot of the daemon's activity for the local metrics endpoint.
+    struct Metrics {
+        std::uint64_t acceptedTotal = 0;   // connections accepted since start
+        std::size_t activeConnections = 0; // currently open
+        std::size_t activeStages = 0;      // stages running now, across all connections
+    };
+    Metrics metrics() const;
+
 private:
     struct Connection {
         std::unique_ptr<NodeStageRunner> runner;
@@ -55,6 +63,7 @@ private:
     std::unordered_map<std::uint64_t, Connection> connections_;
     std::vector<std::uint64_t> pendingRemoval_;
     std::uint64_t nextConnId_ = 1;
+    std::uint64_t acceptedTotal_ = 0;
     bool reapScheduled_ = false;
 };
 

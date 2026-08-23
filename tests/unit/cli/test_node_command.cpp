@@ -150,3 +150,10 @@ TEST(NodeCommandTest, UnitGeneratorsRejectMissingFlags) {
     EXPECT_EQ(nodeSubcommand({"systemd-unit", "--cert", "x"}, out, err), 2);
     EXPECT_EQ(nodeSubcommand({"launchd-plist"}, out, err), 2);
 }
+
+TEST(NodeCommandTest, StatusRejectsMissingControlAndUnreachableSocket) {
+    std::ostringstream out, err;
+    EXPECT_EQ(nodeSubcommand({"status"}, out, err), 2); // no --control
+    // A control path that isn't a live socket fails cleanly (not a crash).
+    EXPECT_EQ(nodeSubcommand({"status", "--control", "/no/such/pipeshellx.sock"}, out, err), 2);
+}

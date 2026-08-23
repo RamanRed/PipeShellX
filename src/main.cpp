@@ -68,6 +68,7 @@ Commands:
   node   --cert F --key F --ca F --listen HOST:PORT [--allow SANs] [--crl F]   run the node daemon
   node   keygen --san URI --out PFX                    generate a node key + CSR (enroll)
   node   systemd-unit|launchd-plist --cert F --key F --ca F --listen H:P   emit a service unit
+  node   status --control PATH                         query a running node daemon
   shell  [--verbose] [--log-file PATH]                 interactive REPL (default)
 
   --version   print the version and exit

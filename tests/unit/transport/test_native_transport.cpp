@@ -404,6 +404,13 @@ TEST(NodeServerTest, AcceptsAControllerAndRunsAStageWithCaIssuedCerts) {
     EXPECT_EQ(sink.data, "via-node-server\n"); // the stage ran on the accepted connection
     EXPECT_EQ(sink.status.code, 0);
     EXPECT_EQ(server.connectionCount(), 1U); // the controller's connection was accepted and kept
+
+    // Metrics snapshot (the `node status` source): one connection accepted and
+    // still open; the echo stage has already exited, so none is running.
+    const auto snapshot = server.metrics();
+    EXPECT_EQ(snapshot.acceptedTotal, 1U);
+    EXPECT_EQ(snapshot.activeConnections, 1U);
+    EXPECT_EQ(snapshot.activeStages, 0U);
 }
 
 TEST(NodeServerTest, DropsAnUnauthorizedConnectionAndReapsIt) {

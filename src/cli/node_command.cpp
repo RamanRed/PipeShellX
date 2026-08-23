@@ -1,17 +1,22 @@
 #include "psx/cli/node_command.hpp"
 
 #include "psx/ca/certificate_authority.hpp"
+#include "psx/os/io.hpp"
 #include "psx/os/socket.hpp"
 #include "psx/os/tls.hpp"
 #include "psx/runtime/reactor.hpp"
 #include "psx/transport/node_server.hpp"
 
 #include <charconv>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <span>
 #include <sstream>
+#include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_set>
 #include <vector>
 
@@ -182,6 +187,68 @@ int nodeLaunchdPlist(const std::vector<std::string>& args, std::ostream& out, st
     return 0;
 }
 
+std::string metricsJson(const psx::transport::NodeServer::Metrics& m) {
+    std::ostringstream json;
+    json << "{\"accepted_total\":" << m.acceptedTotal << ",\"active_connections\":" << m.activeConnections
+         << ",\"active_stages\":" << m.activeStages << "}\n";
+    return json.str();
+}
+
+// Answers each pending control connection with a one-shot metrics snapshot, then
+// closes it (the client reads to EOF). The snapshot is tiny, so a single
+// non-blocking write drains it; the short loop covers a partial write.
+void serveControl(const psx::transport::NodeServer& server, const psx::os::Socket& listener) {
+    while (true) {
+        auto conn = listener.accept();
+        if (!conn.ok()) {
+            break; // WouldBlock: no more pending connections
+        }
+        const std::string body = metricsJson(server.metrics());
+        std::size_t sent = 0;
+        for (int i = 0; i < 1000 && sent < body.size(); ++i) {
+            auto wrote =
+                psx::os::write(conn.value().handle(), std::span<const char>(body.data() + sent, body.size() - sent));
+            if (wrote.ok()) {
+                sent += wrote.value();
+            } else if (wrote.error().cls != psx::ErrorClass::WouldBlock) {
+                break; // peer gone; drop this one
+            }
+        }
+    }
+}
+
+// `node status --control PATH`: read the daemon's metrics snapshot and print it.
+int nodeStatus(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
+    const auto control = flag(args, 1, "--control");
+    if (!control) {
+        err << "Usage: pipeshellx node status --control PATH\n";
+        return 2;
+    }
+    auto sock = psx::os::Socket::connectUnix(*control);
+    if (!sock.ok()) {
+        err << "pipeshellx node status: cannot connect to " << *control << ": " << sock.error().message() << "\n";
+        return 2;
+    }
+    std::string body;
+    char buffer[512];
+    for (int i = 0; i < 5000; ++i) { // poll to EOF (bounded ~5 s)
+        auto got = psx::os::read(sock.value().handle(), std::span<char>(buffer, sizeof(buffer)));
+        if (got.ok()) {
+            if (got.value() == 0) {
+                break; // EOF: the daemon finished the snapshot
+            }
+            body.append(buffer, got.value());
+        } else if (got.error().cls == psx::ErrorClass::WouldBlock) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        } else {
+            err << "pipeshellx node status: " << got.error().message() << "\n";
+            return 2;
+        }
+    }
+    out << body;
+    return body.empty() ? 2 : 0;
+}
+
 } // namespace
 
 int nodeSubcommand(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
@@ -194,6 +261,9 @@ int nodeSubcommand(const std::vector<std::string>& args, std::ostream& out, std:
     if (!args.empty() && args[0] == "launchd-plist") {
         return nodeLaunchdPlist(args, out, err);
     }
+    if (!args.empty() && args[0] == "status") {
+        return nodeStatus(args, out, err);
+    }
     const std::size_t from = (!args.empty() && args[0] == "run") ? 1 : 0;
 
     const auto certPath = flag(args, from, "--cert");
@@ -201,7 +271,8 @@ int nodeSubcommand(const std::vector<std::string>& args, std::ostream& out, std:
     const auto caPath = flag(args, from, "--ca");
     const auto listen = flag(args, from, "--listen");
     if (!certPath || !keyPath || !caPath || !listen) {
-        err << "Usage: pipeshellx node --cert F --key F --ca F --listen HOST:PORT [--allow SAN[,SAN...]] [--crl F]\n";
+        err << "Usage: pipeshellx node --cert F --key F --ca F --listen HOST:PORT [--allow SAN[,SAN...]] [--crl F] "
+               "[--control PATH]\n";
         return 2;
     }
 
@@ -270,10 +341,39 @@ int nodeSubcommand(const std::vector<std::string>& args, std::ostream& out, std:
         return 2;
     }
 
+    // Optional local control endpoint: an AF_UNIX socket that answers each
+    // connection with a metrics snapshot (see `node status`).
+    const auto controlPath = flag(args, from, "--control");
+    psx::os::Socket controlListener;
+    if (controlPath) {
+        auto listening = psx::os::Socket::listenUnix(*controlPath);
+        if (!listening.ok()) {
+            err << "pipeshellx node: cannot listen on control socket " << *controlPath << ": "
+                << listening.error().message() << "\n";
+            return 2;
+        }
+        controlListener = std::move(listening.value());
+        auto watched = reactor.value()->watch(
+            controlListener.handle(), psx::os::Interest::Readable,
+            [&server, &controlListener](psx::os::Readiness) { serveControl(server, controlListener); });
+        if (!watched.ok()) {
+            err << "pipeshellx node: " << watched.error().message() << "\n";
+            return 2;
+        }
+    }
+
     (void)reactor.value()->onSignal([&reactor](psx::os::Signal) { reactor.value()->stop(); });
-    out << "pipeshellx node listening on " << host << ":" << port << "\n";
+    out << "pipeshellx node listening on " << host << ":" << port;
+    if (controlPath) {
+        out << " (control " << *controlPath << ")";
+    }
+    out << "\n";
     out.flush();
     (void)reactor.value()->run();
+    if (controlPath) {
+        std::error_code ec;
+        std::filesystem::remove(*controlPath, ec); // clean up the socket file
+    }
     return 0;
 }
 
