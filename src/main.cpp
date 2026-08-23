@@ -1,5 +1,6 @@
 #include "cli_options.hpp"
 #include "logger.hpp"
+#include "psx/cli/ca_command.hpp"
 #include "psx/cli/hosts_command.hpp"
 #include "psx/cli/ping_command.hpp"
 #include "psx/cli/run_command.hpp"
@@ -60,6 +61,7 @@ Commands:
          -- <command...>                              run a command on hosts
   ping   [-i FILE] [-g GROUP|-t TAG|-H h1,h2] [--timeout S]   probe reachability
   hosts  [-i FILE]                                     list inventory hosts
+  ca     init --cn NAME --dir DIR | issue --san URI --ca DIR --out PFX  (native transport)
   shell  [--verbose] [--log-file PATH]                 interactive REPL (default)
 
   --version   print the version and exit
@@ -101,6 +103,16 @@ int main(int argc, char** argv) {
                 std::cerr << "pipeshellx ping: " << ex.what() << "\n";
                 return kExitUsage;
             }
+        }
+
+        if (!args.empty() && args[0] == "ca") {
+            std::vector<std::string> rest(args.begin() + 1, args.end());
+#if defined(PIPESHELLX_HAVE_TLS)
+            return psx::cli::caSubcommand(rest, std::cout, std::cerr);
+#else
+            std::cerr << "pipeshellx ca: this build has no native transport support (OpenSSL)\n";
+            return kExitUsage;
+#endif
         }
 
         if (!args.empty() && args[0] == "hosts") {

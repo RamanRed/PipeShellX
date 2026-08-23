@@ -23,7 +23,8 @@ endif()
 set(PIPESHELLX_TLS_TEST_SOURCES "")
 if(PIPESHELLX_NATIVE_TRANSPORT AND OpenSSL_FOUND)
     set(PIPESHELLX_TLS_TEST_SOURCES unit/os/test_tls.cpp unit/transport/test_tls_stream.cpp
-        unit/transport/test_native_transport.cpp unit/ca/test_certificate_authority.cpp)
+        unit/transport/test_native_transport.cpp unit/ca/test_certificate_authority.cpp
+        unit/cli/test_ca_command.cpp)
 endif()
 
 add_executable(pipeshellx_tests
