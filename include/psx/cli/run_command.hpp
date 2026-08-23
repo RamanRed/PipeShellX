@@ -43,6 +43,11 @@ struct RunInvocation {
     RemoteShell shell = RemoteShell::Posix; // --shell: remote command quoting (posix/cmd/powershell)
     bool failFast = false;                  // --fail-fast: abort the run on the first final failure
     std::string auditPath;                  // --audit-log FILE: append a JSONL audit trail (empty = off)
+    bool native = false;                    // --transport native: use the psx/1 mTLS backplane instead of ssh
+    std::string certPath;                   // --cert: controller certificate (native)
+    std::string keyPath;                    // --key: controller private key (native)
+    std::string caPath;                     // --ca: trusted CA (native)
+    int nativePort = 7433;                  // --native-port: the node listener port (native)
     bool colour = true;                     // --no-color turns it off
     std::vector<std::string> command;       // the argv after `--`
 };

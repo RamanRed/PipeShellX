@@ -45,6 +45,10 @@ public:
                             const std::vector<std::string>& command,
                             std::function<void(std::vector<HostResult>)> onComplete);
 
+    // Fail every still-running target with `reason` (e.g. a run deadline); this
+    // completes the run via onComplete like any other finish.
+    void cancel(const std::string& reason);
+
 private:
     struct Conn;
     void onConnDone(std::size_t index);

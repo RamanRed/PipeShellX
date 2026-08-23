@@ -108,6 +108,14 @@ psx::Result<void> NativeController::start(const std::vector<Target>& targets,
     return {};
 }
 
+void NativeController::cancel(const std::string& reason) {
+    for (auto& conn : conns_) {
+        if (!conn->done) {
+            conn->fail(reason);
+        }
+    }
+}
+
 void NativeController::onConnDone(std::size_t /*index*/) {
     if (remaining_ > 0) {
         --remaining_;

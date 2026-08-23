@@ -13,6 +13,17 @@
 #include "psx/sink/group_sink.hpp"
 #include "psx/sink/json_sink.hpp"
 #include "psx/sink/stream_sink.hpp"
+
+#if defined(PIPESHELLX_HAVE_TLS)
+#include "psx/os/tls.hpp"
+#include "psx/runtime/reactor.hpp"
+#include "psx/stream/line_framer.hpp"
+#include "psx/transport/native_controller.hpp"
+
+#include <chrono>
+#include <span>
+#include <unordered_map>
+#endif
 #include "ssh_auth.hpp"
 
 #include <charconv>
@@ -185,6 +196,21 @@ RunInvocation parseRun(const std::vector<std::string>& args) {
             invocation.shell = parseShell(valueFor(i, arg));
         } else if (arg == "--audit-log") {
             invocation.auditPath = valueFor(i, arg);
+        } else if (arg == "--transport") {
+            const std::string value = valueFor(i, arg);
+            if (value == "native") {
+                invocation.native = true;
+            } else if (value != "ssh") {
+                throw CliError("--transport must be ssh or native, got '" + value + "'");
+            }
+        } else if (arg == "--cert") {
+            invocation.certPath = valueFor(i, arg);
+        } else if (arg == "--key") {
+            invocation.keyPath = valueFor(i, arg);
+        } else if (arg == "--ca") {
+            invocation.caPath = valueFor(i, arg);
+        } else if (arg == "--native-port") {
+            invocation.nativePort = parseIntArg(valueFor(i, arg), "--native-port");
         } else if (arg == "--no-color" || arg == "--no-colour") {
             invocation.colour = false;
         } else {
@@ -221,6 +247,100 @@ makeSink(const RunInvocation& invocation, std::ostream& out, std::ostream& err, 
 
 } // namespace
 
+#if defined(PIPESHELLX_HAVE_TLS)
+namespace {
+
+std::optional<std::string> slurpFile(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        return std::nullopt;
+    }
+    std::stringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
+
+// Runs the command on each host over the psx/1 native mTLS backplane.
+int runNative(const RunInvocation& invocation,
+              const std::vector<ClientEntry>& clients,
+              psx::sink::Sink* sink,
+              std::ostream& err) {
+    if (invocation.certPath.empty() || invocation.keyPath.empty() || invocation.caPath.empty()) {
+        err << "pipeshellx run: --transport native requires --cert, --key and --ca\n";
+        return 2;
+    }
+    const auto cert = slurpFile(invocation.certPath);
+    const auto key = slurpFile(invocation.keyPath);
+    const auto ca = slurpFile(invocation.caPath);
+    if (!cert || !key || !ca) {
+        err << "pipeshellx run: cannot read --cert/--key/--ca\n";
+        return 2;
+    }
+
+    auto reactor = psx::runtime::Reactor::create();
+    if (!reactor.ok()) {
+        err << "pipeshellx run: " << reactor.error().message() << "\n";
+        return 2;
+    }
+    psx::runtime::Reactor& r = *reactor.value();
+
+    // A line framer per host feeds the sink whole lines from the raw stream bytes.
+    auto framers = std::make_shared<std::unordered_map<std::string, psx::stream::LineFramer>>();
+    auto emit = [sink](const std::string& host, std::string_view line) {
+        if (sink != nullptr) {
+            sink->line(host, psx::sink::Channel::Stdout, line);
+        }
+    };
+    psx::transport::NativeController controller(r, {.certificatePem = *cert, .privateKeyPem = *key, .caPem = *ca},
+                                                [framers, emit](const std::string& host, std::string_view bytes) {
+                                                    (*framers)[host].push(
+                                                        std::span<const char>(bytes.data(), bytes.size()),
+                                                        [&](std::string_view line, bool) { emit(host, line); });
+                                                });
+
+    std::vector<psx::transport::NativeController::Target> targets;
+    targets.reserve(clients.size());
+    for (const auto& client : clients) {
+        targets.push_back({.host = client.host, .port = static_cast<std::uint16_t>(invocation.nativePort)});
+        if (sink != nullptr) {
+            sink->stageStarted(client.host);
+        }
+    }
+
+    int exitCode = 0;
+    (void)controller.start(
+        targets, invocation.command, [&](std::vector<psx::transport::NativeController::HostResult> results) {
+            std::size_t succeeded = 0;
+            for (auto& res : results) {
+                (*framers)[res.host].flush([&](std::string_view line, bool) { emit(res.host, line); });
+                const bool ok = res.ok && res.exitCode == 0 && res.error.empty();
+                succeeded += ok ? 1 : 0;
+                if (!ok && exitCode == 0) {
+                    exitCode = 1;
+                }
+                if (sink != nullptr) {
+                    sink->stageFinished(res.host, psx::sink::StageResult{.exitCode = res.exitCode,
+                                                                         .timedOut = false,
+                                                                         .errorMessage = res.error,
+                                                                         .droppedBytes = 0});
+                }
+            }
+            if (sink != nullptr) {
+                sink->runFinished(
+                    psx::sink::RunSummary{results.size(), succeeded, results.size() - succeeded, 0, false});
+            }
+            r.stop();
+        });
+    if (invocation.timeoutSec > 0) {
+        r.after(std::chrono::seconds(invocation.timeoutSec), [&] { controller.cancel("timed out"); });
+    }
+    (void)r.run();
+    return exitCode;
+}
+
+} // namespace
+#endif // PIPESHELLX_HAVE_TLS
+
 int runSubcommand(const RunInvocation& invocation, std::ostream& out, std::ostream& err, bool colourTty) {
     if (!invocation.policyPath.empty()) {
         try {
@@ -240,6 +360,16 @@ int runSubcommand(const RunInvocation& invocation, std::ostream& out, std::ostre
         return resolved.exitCode;
     }
     const std::vector<ClientEntry>& clients = resolved.clients;
+
+    if (invocation.native) {
+#if defined(PIPESHELLX_HAVE_TLS)
+        auto nativeSink = makeSink(invocation, out, err, colourTty);
+        return runNative(invocation, clients, nativeSink.get(), err);
+#else
+        err << "pipeshellx run: this build has no native transport support (OpenSSL)\n";
+        return 2;
+#endif
+    }
 
     // Quote the remote command line for the target shell (POSIX by default).
     const std::string remoteCommand = quoteRemoteCommand(invocation.command, invocation.shell);

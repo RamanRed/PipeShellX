@@ -59,6 +59,7 @@ Commands:
   run    [-i FILE] [-g GROUP|-t TAG|-H h1,h2] [--stream|--group|--json]
          [-c N] [--timeout S] [--overflow P] [--ring SIZE] [--policy FILE] [--reuse]
          [--retries N] [--fail-fast] [--shell S] [--audit-log FILE] [--no-color]
+         [--transport native --cert F --key F --ca F [--native-port P]]
          -- <command...>                              run a command on hosts
   ping   [-i FILE] [-g GROUP|-t TAG|-H h1,h2] [--timeout S]   probe reachability
   hosts  [-i FILE]                                     list inventory hosts

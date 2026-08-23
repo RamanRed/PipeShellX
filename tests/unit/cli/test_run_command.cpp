@@ -77,6 +77,19 @@ TEST(ParseRunTest, PolicyFileFlag) {
     EXPECT_THROW(static_cast<void>(psx::cli::parseRun({"--policy", "--", "id"})), std::runtime_error);
 }
 
+TEST(ParseRunTest, TransportNativeAndItsFlags) {
+    EXPECT_FALSE(psx::cli::parseRun({"--", "id"}).native);
+    EXPECT_FALSE(psx::cli::parseRun({"--transport", "ssh", "--", "id"}).native);
+    const auto n = psx::cli::parseRun(
+        {"--transport", "native", "--cert", "c", "--key", "k", "--ca", "a", "--native-port", "9000", "--", "id"});
+    EXPECT_TRUE(n.native);
+    EXPECT_EQ(n.certPath, "c");
+    EXPECT_EQ(n.keyPath, "k");
+    EXPECT_EQ(n.caPath, "a");
+    EXPECT_EQ(n.nativePort, 9000);
+    EXPECT_THROW(psx::cli::parseRun({"--transport", "bogus", "--", "id"}), psx::cli::CliError);
+}
+
 TEST(ParseRunTest, ShellSelectsTheRemoteQuoting) {
     EXPECT_EQ(psx::cli::parseRun({"--", "id"}).shell, RemoteShell::Posix); // default
     EXPECT_EQ(psx::cli::parseRun({"--shell", "cmd", "--", "id"}).shell, RemoteShell::Cmd);
