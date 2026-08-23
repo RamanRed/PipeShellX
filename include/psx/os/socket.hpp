@@ -31,6 +31,13 @@ public:
     // A listening socket bound to host:port (SO_REUSEADDR). Port 0 asks the OS
     // for an ephemeral port — read it back with localPort().
     static Result<Socket> listen(const std::string& host, std::uint16_t port, int backlog = 128);
+
+    // AF_UNIX stream sockets for a node's local control endpoint. connectUnix is
+    // effectively immediate but still non-blocking (connectResult() applies).
+    // listenUnix unlinks a stale socket file at `path` before binding; the caller
+    // removes the file when done. Fails if `path` exceeds the platform limit.
+    static Result<Socket> connectUnix(const std::string& path);
+    static Result<Socket> listenUnix(const std::string& path, int backlog = 128);
     // Accepts one pending connection; a WouldBlock error means none is ready.
     Result<Socket> accept() const;
 

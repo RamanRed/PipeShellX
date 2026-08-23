@@ -12,6 +12,7 @@
 #include <netinet/in.h>
 #include <string>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 namespace psx::os {
@@ -138,6 +139,56 @@ Result<Socket> Socket::accept() const {
         return flags.error();
     }
     return Socket(Backend::adopt(rawFd));
+}
+
+namespace {
+// Creates an AF_UNIX stream socket bound (server) or connected (client) to path.
+Result<Handle> makeUnixSocket(const std::string& path, bool server, int backlog) {
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    if (path.size() >= sizeof(addr.sun_path)) {
+        return Error{ErrorClass::InvalidArgument, 0, "unix socket path too long"};
+    }
+    std::memcpy(addr.sun_path, path.data(), path.size()); // struct is zero-filled: NUL-terminated
+    const int rawFd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    if (rawFd == -1) {
+        return posix::fromErrno("socket", errno);
+    }
+    if (auto flags = makeNonBlockingCloexec(rawFd); !flags.ok()) {
+        (void)::close(rawFd);
+        return flags.error();
+    }
+    const auto* sa = reinterpret_cast<const sockaddr*>(&addr);
+    if (server) {
+        (void)::unlink(path.c_str()); // drop a stale socket file from a prior run
+        if (::bind(rawFd, sa, sizeof(addr)) != 0 || ::listen(rawFd, backlog) != 0) {
+            Error e = posix::fromErrno("bind/listen", errno);
+            (void)::close(rawFd);
+            return e;
+        }
+    } else if (::connect(rawFd, sa, sizeof(addr)) != 0 && errno != EINPROGRESS) {
+        Error e = posix::fromErrno("connect", errno);
+        (void)::close(rawFd);
+        return e;
+    }
+    return Backend::adopt(rawFd);
+}
+} // namespace
+
+Result<Socket> Socket::listenUnix(const std::string& path, int backlog) {
+    auto handle = makeUnixSocket(path, /*server=*/true, backlog);
+    if (!handle.ok()) {
+        return handle.error();
+    }
+    return Socket(std::move(handle.value()));
+}
+
+Result<Socket> Socket::connectUnix(const std::string& path) {
+    auto handle = makeUnixSocket(path, /*server=*/false, 0);
+    if (!handle.ok()) {
+        return handle.error();
+    }
+    return Socket(std::move(handle.value()));
 }
 
 Result<std::uint16_t> Socket::localPort() const {

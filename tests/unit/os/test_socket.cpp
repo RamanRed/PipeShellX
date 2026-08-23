@@ -1,6 +1,7 @@
 #include "psx/os/socket.hpp"
 
 #include "psx/os/io.hpp"
+#include "test_support.hpp"
 
 #include <gtest/gtest.h>
 
@@ -103,4 +104,27 @@ TEST(SocketTest, AcceptWithNoPendingConnectionWouldBlock) {
     auto accepted = listener.value().accept();
     EXPECT_FALSE(accepted.ok());
     EXPECT_EQ(accepted.error().cls, psx::ErrorClass::WouldBlock);
+}
+
+TEST(SocketTest, UnixDomainConnectAcceptAndTransfer) {
+    test_support::ScopedTempCwd cwd("unix-sock");
+    const std::string path = "control.sock"; // relative to the temp cwd: keeps sun_path short
+
+    auto listener = Socket::listenUnix(path);
+    ASSERT_TRUE(listener.ok()) << (listener.ok() ? "" : listener.error().message());
+    auto client = Socket::connectUnix(path);
+    ASSERT_TRUE(client.ok()) << (client.ok() ? "" : client.error().message());
+    Socket server = acceptWithin(listener.value());
+    ASSERT_TRUE(server.valid());
+    ASSERT_TRUE(client.value().connectResult().ok());
+
+    // Server -> client (the metrics-endpoint direction).
+    const std::string payload = R"({"active_connections":3})";
+    ASSERT_TRUE(psx::os::write(server.handle(), std::span<const char>(payload.data(), payload.size())).ok());
+    EXPECT_EQ(readN(client.value(), payload.size()), payload);
+}
+
+TEST(SocketTest, ListenUnixRejectsAnOverlongPath) {
+    const std::string tooLong(200, 'a'); // exceeds sun_path
+    EXPECT_FALSE(Socket::listenUnix(tooLong).ok());
 }
