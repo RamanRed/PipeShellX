@@ -7,7 +7,9 @@
 
 #include "psx/pipeline/distributed_runner.hpp"
 #include "psx/pipeline/fanin_pipeline.hpp"
+
 #include "psx/pipeline/segmented_pipeline.hpp"
+#include "psx/transport/canary_controller.hpp"
 
 #include "psx/os/socket.hpp"
 #include "psx/os/tls.hpp"
@@ -1430,4 +1432,87 @@ TEST(FanInPipelineTest, MergesSourcesIntoALocalDownstream) {
     ASSERT_TRUE(result.completed) << result.error;
     EXPECT_NE(result.output.find("3"), std::string::npos) << "wc -l should count 3 merged lines";
     EXPECT_EQ(result.exitCode, 0);
+}
+
+namespace {
+struct CanaryResult {
+    std::vector<psx::transport::CanaryController::HostResult> results;
+    std::uint64_t acceptedByNode = 0;
+    bool completed = false;
+};
+// Runs a canary rollout of `command` over `numTargets` connections to one node.
+CanaryResult runCanary(const std::vector<std::string>& command, std::size_t canaryCount, int numTargets) {
+    using psx::ca::CertificateAuthority;
+    using psx::transport::CanaryController;
+
+    CanaryResult out;
+    auto ca = CertificateAuthority::create("psx-fleet");
+    EXPECT_TRUE(ca.ok());
+    auto nodeId = ca.value().issue("psx://node/1");
+    auto ctlId = ca.value().issue("psx://controller");
+    EXPECT_TRUE(nodeId.ok() && ctlId.ok());
+    const std::string caCert = ca.value().certificatePem();
+
+    auto listener = Socket::listen("127.0.0.1", 0);
+    EXPECT_TRUE(listener.ok());
+    const std::uint16_t port = listener.value().localPort().value();
+
+    auto reactor = Reactor::create();
+    EXPECT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+
+    NodeServer server(r, std::move(listener.value()),
+                      {.certificatePem = nodeId.value().certificatePem,
+                       .privateKeyPem = nodeId.value().privateKeyPem,
+                       .caPem = caCert},
+                      {});
+    EXPECT_TRUE(server.start().ok());
+
+    auto controller =
+        std::make_unique<CanaryController>(r, psx::os::TlsConfig{.certificatePem = ctlId.value().certificatePem,
+                                                                 .privateKeyPem = ctlId.value().privateKeyPem,
+                                                                 .caPem = caCert});
+    std::vector<CanaryController::Target> targets(
+        static_cast<std::size_t>(numTargets),
+        CanaryController::Target{.host = "127.0.0.1", .port = port, .expectedSan = ""});
+
+    EXPECT_TRUE(controller
+                    ->start(targets, canaryCount, command,
+                            [&](std::vector<CanaryController::HostResult> results) {
+                                out.results = std::move(results);
+                                out.completed = true;
+                                r.stop();
+                            })
+                    .ok());
+    r.after(std::chrono::seconds(10), [&] { r.stop(); });
+    EXPECT_TRUE(r.run().ok());
+    out.acceptedByNode = server.metrics().acceptedTotal;
+    return out;
+}
+} // namespace
+
+// Canary succeeds: the rest of the fleet is rolled out too.
+TEST(CanaryControllerTest, SuccessfulCanaryRollsOutTheRest) {
+    auto out = runCanary({"/bin/echo", "ok"}, /*canaryCount=*/1, /*numTargets=*/3);
+    ASSERT_TRUE(out.completed);
+    ASSERT_EQ(out.results.size(), 3U);
+    for (const auto& res : out.results) {
+        EXPECT_TRUE(res.ok);
+        EXPECT_EQ(res.exitCode, 0);
+    }
+    EXPECT_EQ(out.acceptedByNode, 3U); // all hosts ran
+}
+
+// Canary fails: the rest are skipped, never contacted.
+TEST(CanaryControllerTest, FailedCanarySkipsTheRest) {
+    auto out = runCanary({"/bin/sh", "-c", "exit 1"}, /*canaryCount=*/1, /*numTargets=*/3);
+    ASSERT_TRUE(out.completed);
+    ASSERT_EQ(out.results.size(), 3U);
+    EXPECT_TRUE(out.results[0].ok);        // the canary ran...
+    EXPECT_EQ(out.results[0].exitCode, 1); // ...but exited non-zero (a failure)
+    for (std::size_t i = 1; i < out.results.size(); ++i) {
+        EXPECT_FALSE(out.results[i].ok);
+        EXPECT_NE(out.results[i].error.find("canary"), std::string::npos); // skipped
+    }
+    EXPECT_EQ(out.acceptedByNode, 1U) << "only the canary connected; the rest were skipped";
 }
