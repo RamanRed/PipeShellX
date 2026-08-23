@@ -1,6 +1,7 @@
 #include "psx/transport/native_transport.hpp"
 
 #include "psx/ca/certificate_authority.hpp"
+#include "psx/transport/native_controller.hpp"
 #include "psx/transport/node_server.hpp"
 #include "psx/transport/node_stage_runner.hpp"
 
@@ -445,4 +446,92 @@ TEST(NodeServerTest, DropsAnUnauthorizedConnectionAndReapsIt) {
     ASSERT_TRUE(r.run().ok());
 
     EXPECT_EQ(server.connectionCount(), 0U) << "the unauthorized connection must be reaped";
+}
+
+namespace {
+// Stands up a NodeServer on a fresh listener; returns {server-owning-reactor use}.
+struct Fleet {
+    psx::ca::CertificateAuthority ca;
+    psx::ca::Identity nodeId;
+    psx::ca::Identity ctlId;
+    std::string caCert;
+};
+
+Fleet makeFleet() {
+    auto ca = psx::ca::CertificateAuthority::create("psx-fleet");
+    EXPECT_TRUE(ca.ok());
+    auto nodeId = ca.value().issue("psx://node/1");
+    auto ctlId = ca.value().issue("psx://controller");
+    EXPECT_TRUE(nodeId.ok() && ctlId.ok());
+    std::string caCert = ca.value().certificatePem();
+    return {std::move(ca.value()), std::move(nodeId.value()), std::move(ctlId.value()), std::move(caCert)};
+}
+} // namespace
+
+TEST(NativeControllerTest, RunsACommandOnANodeAndCollectsOutput) {
+    Fleet fleet = makeFleet();
+
+    auto listener = Socket::listen("127.0.0.1", 0);
+    ASSERT_TRUE(listener.ok());
+    const std::uint16_t port = listener.value().localPort().value();
+
+    auto reactor = Reactor::create();
+    ASSERT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+
+    psx::transport::NodeServer server(r, std::move(listener.value()),
+                                      {.certificatePem = fleet.nodeId.certificatePem,
+                                       .privateKeyPem = fleet.nodeId.privateKeyPem,
+                                       .caPem = fleet.caCert},
+                                      [](std::string_view san) { return san == "psx://controller"; });
+    ASSERT_TRUE(server.start().ok());
+
+    psx::transport::NativeController controller(r, {.certificatePem = fleet.ctlId.certificatePem,
+                                                    .privateKeyPem = fleet.ctlId.privateKeyPem,
+                                                    .caPem = fleet.caCert});
+
+    std::vector<psx::transport::NativeController::HostResult> results;
+    ASSERT_TRUE(controller
+                    .start({{.host = "127.0.0.1", .port = port, .expectedSan = "psx://node/1"}},
+                           {"/bin/echo", "native-run"},
+                           [&](std::vector<psx::transport::NativeController::HostResult> res) {
+                               results = std::move(res);
+                               r.stop();
+                           })
+                    .ok());
+    r.after(std::chrono::seconds(5), [&] { r.stop(); });
+    ASSERT_TRUE(r.run().ok());
+
+    ASSERT_EQ(results.size(), 1U);
+    EXPECT_TRUE(results[0].ok) << results[0].error;
+    EXPECT_EQ(results[0].exitCode, 0);
+    EXPECT_EQ(results[0].output, "native-run\n");
+    EXPECT_EQ(results[0].host, "127.0.0.1");
+}
+
+TEST(NativeControllerTest, ReportsAnErrorForAnUnreachableNode) {
+    Fleet fleet = makeFleet();
+    auto reactor = Reactor::create();
+    ASSERT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+
+    psx::transport::NativeController controller(r, {.certificatePem = fleet.ctlId.certificatePem,
+                                                    .privateKeyPem = fleet.ctlId.privateKeyPem,
+                                                    .caPem = fleet.caCert});
+
+    // Port 1 on loopback: connection refused.
+    std::vector<psx::transport::NativeController::HostResult> results;
+    ASSERT_TRUE(controller
+                    .start({{.host = "127.0.0.1", .port = 1, .expectedSan = "psx://node/1"}}, {"/bin/echo", "x"},
+                           [&](std::vector<psx::transport::NativeController::HostResult> res) {
+                               results = std::move(res);
+                               r.stop();
+                           })
+                    .ok());
+    r.after(std::chrono::seconds(5), [&] { r.stop(); });
+    ASSERT_TRUE(r.run().ok());
+
+    ASSERT_EQ(results.size(), 1U);
+    EXPECT_FALSE(results[0].ok);
+    EXPECT_FALSE(results[0].error.empty());
 }
