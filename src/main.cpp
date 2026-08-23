@@ -2,6 +2,7 @@
 #include "logger.hpp"
 #include "psx/cli/ca_command.hpp"
 #include "psx/cli/hosts_command.hpp"
+#include "psx/cli/node_command.hpp"
 #include "psx/cli/ping_command.hpp"
 #include "psx/cli/run_command.hpp"
 #include "psx/os/console.hpp"
@@ -62,6 +63,7 @@ Commands:
   ping   [-i FILE] [-g GROUP|-t TAG|-H h1,h2] [--timeout S]   probe reachability
   hosts  [-i FILE]                                     list inventory hosts
   ca     init --cn NAME --dir DIR | issue --san URI --ca DIR --out PFX  (native transport)
+  node   --cert F --key F --ca F --listen HOST:PORT [--allow SANs]      run the node daemon
   shell  [--verbose] [--log-file PATH]                 interactive REPL (default)
 
   --version   print the version and exit
@@ -103,6 +105,17 @@ int main(int argc, char** argv) {
                 std::cerr << "pipeshellx ping: " << ex.what() << "\n";
                 return kExitUsage;
             }
+        }
+
+        if (!args.empty() && args[0] == "node") {
+            std::vector<std::string> rest(args.begin() + 1, args.end());
+#if defined(PIPESHELLX_HAVE_TLS)
+            initLogging(CliOptions{});
+            return psx::cli::nodeSubcommand(rest, std::cout, std::cerr);
+#else
+            std::cerr << "pipeshellx node: this build has no native transport support (OpenSSL)\n";
+            return kExitUsage;
+#endif
         }
 
         if (!args.empty() && args[0] == "ca") {
