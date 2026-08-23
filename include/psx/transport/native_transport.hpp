@@ -11,6 +11,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 
 namespace psx::transport {
 
@@ -21,8 +22,14 @@ namespace psx::transport {
 class NativeTransport {
 public:
     struct Callbacks {
-        std::function<void()> onReady;           // secured; identity available, safe to open streams
-        std::function<void(psx::Error)> onError; // fatal TLS or protocol error; the transport is done
+        // Authorization: after the handshake authenticates the peer (its cert is
+        // CA-signed), this decides whether that IDENTITY is allowed, by its SAN
+        // URI. Return false to reject an authenticated-but-unauthorized peer — the
+        // transport then fails via onError instead of firing onReady. Unset =
+        // accept any authenticated peer (authN only).
+        std::function<bool(std::string_view sanUri)> authorize;
+        std::function<void()> onReady;           // secured + authorized; safe to open streams
+        std::function<void(psx::Error)> onError; // fatal TLS / protocol / authorization error
     };
 
     NativeTransport(psx::runtime::Reactor& reactor,

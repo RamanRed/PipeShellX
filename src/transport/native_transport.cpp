@@ -23,6 +23,10 @@ NativeTransport::NativeTransport(psx::runtime::Reactor& reactor,
         reactor, std::move(socket), std::move(tls),
         TlsStream::Callbacks{.onReady =
                                  [this] {
+                                     if (callbacks_.authorize && !callbacks_.authorize(stream_->tls().peerSanUri())) {
+                                         fail(psx::Error{psx::ErrorClass::Other, 0, "peer SAN-URI not authorized"});
+                                         return;
+                                     }
                                      if (callbacks_.onReady) {
                                          callbacks_.onReady();
                                      }

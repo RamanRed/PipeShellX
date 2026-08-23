@@ -263,3 +263,79 @@ TEST(NodeStageRunnerTest, BackpressureDeliversLargeOutputThroughASmallWindow) {
     EXPECT_EQ(sink.data.size(), expected.size());
     EXPECT_EQ(sink.data, expected);
 }
+
+namespace {
+// Builds a controller+node NativeTransport pair over loopback with the given
+// controller SAN and node authorize predicate, runs the reactor, and reports
+// whether the node authorized (onReady) or rejected (onError) the controller.
+struct AuthzOutcome {
+    bool nodeReady = false;
+    bool nodeErrored = false;
+};
+
+AuthzOutcome runAuthz(const std::string& controllerSan, std::function<bool(std::string_view)> nodeAuthorize) {
+    auto listener = Socket::listen("127.0.0.1", 0);
+    EXPECT_TRUE(listener.ok());
+    auto clientSock = Socket::connect("127.0.0.1", listener.value().localPort().value());
+    EXPECT_TRUE(clientSock.ok());
+    Socket serverSock = acceptWithin(listener.value());
+    EXPECT_TRUE(serverSock.valid());
+
+    const auto ctlId = tls_test::generateSelfSigned(controllerSan);
+    const auto nodeId = tls_test::generateSelfSigned("psx://node/1");
+    auto ctlTls = Tls::create(
+        {.certificatePem = ctlId.certPem, .privateKeyPem = ctlId.keyPem, .caPem = nodeId.certPem, .isServer = false});
+    auto nodeTls = Tls::create({.certificatePem = nodeId.certPem,
+                                .privateKeyPem = nodeId.keyPem,
+                                .caPem = ctlId.certPem, // the node trusts this cert (authN passes)
+                                .isServer = true});
+    EXPECT_TRUE(ctlTls.ok() && nodeTls.ok());
+
+    auto reactor = Reactor::create();
+    EXPECT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+
+    NodeStage nodeStage;
+    ControllerSink sink;
+    sink.reactor = &r;
+    AuthzOutcome outcome;
+
+    NativeTransport node(r, std::move(serverSock), std::move(nodeTls.value()), Role::Node, nodeStage,
+                         {.authorize = std::move(nodeAuthorize),
+                          .onReady =
+                              [&] {
+                                  outcome.nodeReady = true;
+                                  r.stop();
+                              },
+                          .onError =
+                              [&](psx::Error) {
+                                  outcome.nodeErrored = true;
+                                  r.stop();
+                              }});
+    nodeStage.session = &node.session();
+    NativeTransport ctl(r, std::move(clientSock.value()), std::move(ctlTls.value()), Role::Controller, sink,
+                        {.onError = [&](psx::Error) { r.stop(); }});
+
+    EXPECT_TRUE(node.start().ok());
+    EXPECT_TRUE(ctl.start().ok());
+    r.after(std::chrono::seconds(3), [&] { r.stop(); });
+    EXPECT_TRUE(r.run().ok());
+    return outcome;
+}
+} // namespace
+
+TEST(NativeTransportTest, RejectsAnAuthenticatedButUnauthorizedPeer) {
+    // The controller's cert is trusted (CA-signed), but its identity is not on
+    // the node's allow-list, so authorization fails after the handshake.
+    const AuthzOutcome outcome =
+        runAuthz("psx://attacker", [](std::string_view san) { return san == "psx://controller"; });
+    EXPECT_TRUE(outcome.nodeErrored);
+    EXPECT_FALSE(outcome.nodeReady) << "an unauthorized peer must not reach onReady";
+}
+
+TEST(NativeTransportTest, AcceptsAnAuthorizedPeer) {
+    const AuthzOutcome outcome =
+        runAuthz("psx://controller", [](std::string_view san) { return san == "psx://controller"; });
+    EXPECT_TRUE(outcome.nodeReady);
+    EXPECT_FALSE(outcome.nodeErrored);
+}
