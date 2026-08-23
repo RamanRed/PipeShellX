@@ -23,10 +23,12 @@ TEST(PipeCommandTest, ReturnsThePipefailExitCode) {
     EXPECT_TRUE(out.str().empty());
 }
 
-TEST(PipeCommandTest, RejectsMixingLocalAndRemoteStages) {
+TEST(PipeCommandTest, MixedPipelineIsAllowedButNeedsAnInventory) {
     std::ostringstream out, err;
-    EXPECT_EQ(pipeSubcommand({"'ps'@web | wc"}, out, err), 2); // ps remote, wc local
-    EXPECT_NE(err.str().find("mixing local and remote"), std::string::npos);
+    // ps remote, wc local: a mixed pipeline is now spliced, but the remote part
+    // still needs an inventory to resolve @web.
+    EXPECT_EQ(pipeSubcommand({"'ps'@web | wc"}, out, err), 2);
+    EXPECT_NE(err.str().find("inventory"), std::string::npos);
 }
 
 TEST(PipeCommandTest, RemoteStagesNeedAnInventory) {

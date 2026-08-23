@@ -6,6 +6,7 @@
 #include "psx/transport/node_stage_runner.hpp"
 
 #include "psx/pipeline/distributed_runner.hpp"
+#include "psx/pipeline/segmented_pipeline.hpp"
 
 #include "psx/os/socket.hpp"
 #include "psx/os/tls.hpp"
@@ -1150,4 +1151,99 @@ TEST(DistributedRunnerTest, ExternalStdinFlowsThroughARemoteChain) {
     ASSERT_TRUE(result.completed);
     EXPECT_EQ(result.output, "MIXED CASE TEXT\n");
     EXPECT_EQ(result.outcome.exitCode, 0);
+}
+
+namespace {
+struct SegStage {
+    std::vector<std::string> argv;
+    bool local;
+};
+struct SegResult {
+    std::string output;
+    int exitCode = -1;
+    bool completed = false;
+    std::string error;
+};
+
+// Runs a mixed pipeline: remote stages go to one fresh node, local stages run
+// as processes. Returns the final output + outcome.
+SegResult runSegmented(const std::vector<SegStage>& stages, int timeoutSeconds) {
+    using psx::ca::CertificateAuthority;
+    using psx::pipeline::ResolvedStage;
+    using psx::pipeline::SegmentedPipeline;
+
+    SegResult result;
+    auto ca = CertificateAuthority::create("psx-fleet");
+    EXPECT_TRUE(ca.ok());
+    auto nodeId = ca.value().issue("psx://node/1");
+    auto ctlId = ca.value().issue("psx://controller");
+    EXPECT_TRUE(nodeId.ok() && ctlId.ok());
+    const std::string caCert = ca.value().certificatePem();
+
+    auto listener = Socket::listen("127.0.0.1", 0);
+    EXPECT_TRUE(listener.ok());
+    const std::uint16_t port = listener.value().localPort().value();
+
+    auto reactor = Reactor::create();
+    EXPECT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+
+    NodeServer server(r, std::move(listener.value()),
+                      {.certificatePem = nodeId.value().certificatePem,
+                       .privateKeyPem = nodeId.value().privateKeyPem,
+                       .caPem = caCert},
+                      {});
+    EXPECT_TRUE(server.start().ok());
+
+    auto runner = std::make_unique<SegmentedPipeline>(r,
+                                                      psx::os::TlsConfig{.certificatePem = ctlId.value().certificatePem,
+                                                                         .privateKeyPem = ctlId.value().privateKeyPem,
+                                                                         .caPem = caCert},
+                                                      [&](std::string_view chunk) { result.output.append(chunk); });
+
+    std::vector<ResolvedStage> resolved;
+    for (const SegStage& s : stages) {
+        if (s.local) {
+            resolved.push_back({.argv = s.argv, .host = "", .port = 0, .expectedSan = ""});
+        } else {
+            resolved.push_back({.argv = s.argv, .host = "127.0.0.1", .port = port, .expectedSan = ""});
+        }
+    }
+    EXPECT_TRUE(runner
+                    ->run(resolved,
+                          [&](SegmentedPipeline::Outcome outcome) {
+                              result.exitCode = outcome.exitCode;
+                              result.error = outcome.error;
+                              result.completed = true;
+                              r.stop();
+                          })
+                    .ok());
+    r.after(std::chrono::seconds(timeoutSeconds), [&] { r.stop(); });
+    EXPECT_TRUE(r.run().ok());
+    return result;
+}
+} // namespace
+
+// Remote gather -> local process (the common §5 shape).
+TEST(SegmentedPipelineTest, RemoteThenLocal) {
+    auto result = runSegmented({{{"printf", "b\na\nc\n"}, /*local=*/false}, {{"sort"}, /*local=*/true}}, 10);
+    ASSERT_TRUE(result.completed) << result.error;
+    EXPECT_EQ(result.output, "a\nb\nc\n");
+    EXPECT_EQ(result.exitCode, 0);
+}
+
+// Local source -> remote sink.
+TEST(SegmentedPipelineTest, LocalThenRemote) {
+    auto result = runSegmented({{{"printf", "3\n1\n2\n"}, /*local=*/true}, {{"sort"}, /*local=*/false}}, 10);
+    ASSERT_TRUE(result.completed) << result.error;
+    EXPECT_EQ(result.output, "1\n2\n3\n");
+    EXPECT_EQ(result.exitCode, 0);
+}
+
+// local -> remote -> local (three segments).
+TEST(SegmentedPipelineTest, LocalRemoteLocalThreeSegments) {
+    auto result = runSegmented({{{"printf", "b\na\nc\n"}, true}, {{"sort"}, false}, {{"tr", "a-z", "A-Z"}, true}}, 10);
+    ASSERT_TRUE(result.completed) << result.error;
+    EXPECT_EQ(result.output, "A\nB\nC\n");
+    EXPECT_EQ(result.exitCode, 0);
 }

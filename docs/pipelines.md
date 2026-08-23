@@ -128,9 +128,15 @@ pipeshellx pipe -i fleet.ini --cert ctl.crt --key ctl.key --ca ca.crt \
 ```
 
 Every stage's stdin/stdout crosses the connection with flow control; an upstream
-exit closes the downstream's stdin, and the exit code follows `pipefail`.
-Today a pipeline is either all-local or all-remote — mixing the two is rejected
-until stage-boundary splicing lands.
+exit closes the downstream's stdin, and the exit code follows `pipefail`. Stages
+can mix local and remote freely — `@local` (or no placement) runs on the
+controller, and the pipeline is spliced at each local/remote boundary:
+
+```bash
+# remote gather -> local process (the §5.1 shape)
+pipeshellx pipe -i fleet.ini --cert ctl.crt --key ctl.key --ca ca.crt \
+  "'tail -F /var/log/app.log'@web | 'grep 50[0-9]'@local | './alert.sh'@local"
+```
 
 ### Roadmap (Phase 5)
 

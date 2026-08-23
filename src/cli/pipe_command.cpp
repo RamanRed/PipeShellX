@@ -14,7 +14,7 @@
 
 #if defined(PIPESHELLX_HAVE_TLS)
 #include "psx/inventory/inventory.hpp"
-#include "psx/pipeline/distributed_runner.hpp"
+#include "psx/pipeline/segmented_pipeline.hpp"
 
 #include <exception>
 #include <fstream>
@@ -77,6 +77,11 @@ PipeArgs parsePipeArgs(const std::vector<std::string>& args) {
     return out;
 }
 
+// A placement of "" or "local" means the stage runs on the controller.
+bool isLocalPlacement(const std::string& placement) {
+    return placement.empty() || placement == "local";
+}
+
 // Runs an all-local pipeline via LocalRunner; returns the pipefail exit code.
 int runLocal(const std::vector<psx::pipeline::Stage>& stages, std::ostream& out, std::ostream& err) {
     auto reactor = psx::runtime::Reactor::create({.signals = {psx::os::Signal::Interrupt, psx::os::Signal::Terminate}});
@@ -114,12 +119,13 @@ std::optional<std::string> slurp(const std::string& path) {
     return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 }
 
-// Runs an all-remote pipeline via DistributedRunner, resolving each @placement
-// to a node through the inventory.
-int runRemote(const std::vector<psx::pipeline::Stage>& stages,
-              const PipeArgs& args,
-              std::ostream& out,
-              std::ostream& err) {
+// Runs a pipeline with at least one remote stage via SegmentedPipeline,
+// resolving each @placement to a node through the inventory; @local/unplaced
+// stages run on the controller and are spliced in.
+int runSegmented(const std::vector<psx::pipeline::Stage>& stages,
+                 const PipeArgs& args,
+                 std::ostream& out,
+                 std::ostream& err) {
     if (args.inventoryPath.empty()) {
         err << "pipeshellx pipe: remote stages need an inventory (-i FILE)\n";
         return 2;
@@ -148,19 +154,24 @@ int runRemote(const std::vector<psx::pipeline::Stage>& stages,
         return 2;
     }
 
-    std::vector<psx::pipeline::RemoteStage> remote;
-    remote.reserve(stages.size());
+    std::vector<psx::pipeline::ResolvedStage> resolved;
+    resolved.reserve(stages.size());
     for (const auto& stage : stages) {
+        if (isLocalPlacement(stage.placement)) {
+            resolved.push_back({.argv = stage.argv, .host = "", .port = 0, .expectedSan = ""});
+            continue;
+        }
         const auto hosts = inventory.selectHosts({stage.placement});
         if (hosts.size() != 1) {
             err << "pipeshellx pipe: placement '@" << stage.placement << "' must name exactly one inventory host\n";
             return 2;
         }
         const psx::inventory::Host& host = hosts.front();
-        remote.push_back({.argv = stage.argv,
-                          .host = host.host,
-                          .port = static_cast<std::uint16_t>(host.nativePort != 0 ? host.nativePort : args.nativePort),
-                          .expectedSan = host.san});
+        resolved.push_back(
+            {.argv = stage.argv,
+             .host = host.host,
+             .port = static_cast<std::uint16_t>(host.nativePort != 0 ? host.nativePort : args.nativePort),
+             .expectedSan = host.san});
     }
 
     auto reactor = psx::runtime::Reactor::create({.signals = {psx::os::Signal::Interrupt, psx::os::Signal::Terminate}});
@@ -173,11 +184,11 @@ int runRemote(const std::vector<psx::pipeline::Stage>& stages,
     int exitCode = 0;
     bool completed = false;
     std::string failure;
-    psx::pipeline::DistributedRunner runner(
+    psx::pipeline::SegmentedPipeline runner(
         r, {.certificatePem = *cert, .privateKeyPem = *key, .caPem = *ca},
         [&out](std::string_view chunk) { out.write(chunk.data(), static_cast<std::streamsize>(chunk.size())); },
         [&err](std::string_view chunk) { err.write(chunk.data(), static_cast<std::streamsize>(chunk.size())); });
-    auto started = runner.run(remote, [&](psx::pipeline::DistributedRunner::Outcome outcome) {
+    auto started = runner.run(resolved, [&](psx::pipeline::SegmentedPipeline::Outcome outcome) {
         exitCode = outcome.exitCode;
         failure = outcome.error;
         completed = true;
@@ -221,20 +232,16 @@ int pipeSubcommand(const std::vector<std::string>& args, std::ostream& out, std:
     }
 
     bool anyRemote = false;
-    bool anyLocal = false;
     for (const auto& stage : pipeline.value().stages) {
-        (stage.placement.empty() ? anyLocal : anyRemote) = true;
+        if (!isLocalPlacement(stage.placement)) {
+            anyRemote = true;
+        }
     }
-    if (anyRemote && anyLocal) {
-        err << "pipeshellx pipe: mixing local and remote (@placement) stages is not supported yet\n";
-        return 2;
-    }
-
     if (!anyRemote) {
         return runLocal(pipeline.value().stages, out, err);
     }
 #if defined(PIPESHELLX_HAVE_TLS)
-    return runRemote(pipeline.value().stages, parsed, out, err);
+    return runSegmented(pipeline.value().stages, parsed, out, err);
 #else
     err << "pipeshellx pipe: this build has no native transport support (OpenSSL); "
            "remote @placement stages are unavailable\n";
