@@ -20,22 +20,34 @@ TlsStream::~TlsStream() {
 }
 
 psx::Result<void> TlsStream::start() {
-    auto watched =
-        reactor_.watch(socket_.handle(), Interest::Readable, [this](Readiness readiness) { onEvent(readiness); });
+    connectConfirmed_ = !socket_.connecting();
+    // While a connect is in flight, watch Writable to learn when it completes (or
+    // fails, so we can try the next address); an established socket is ready now.
+    const Interest initial = connectConfirmed_ ? Interest::Readable : (Interest::Readable | Interest::Writable);
+    auto watched = reactor_.watch(socket_.handle(), initial, [this](Readiness readiness) { onEvent(readiness); });
     if (!watched.ok()) {
         return watched.error();
     }
     token_ = watched.value();
-    // The client produces the ClientHello here; the server waits for it.
-    driveHandshake();
-    flushOutbound();
-    updateInterest();
+    if (connectConfirmed_) {
+        // The client produces the ClientHello here; the server waits for it.
+        driveHandshake();
+        flushOutbound();
+        updateInterest();
+    }
     return {};
 }
 
 void TlsStream::onEvent(Readiness readiness) {
     if (failed_) {
         return;
+    }
+    if (!connectConfirmed_) {
+        if (psx::os::has(readiness, Readiness::Writable) || psx::os::has(readiness, Readiness::Error) ||
+            psx::os::has(readiness, Readiness::Hangup)) {
+            confirmConnect();
+        }
+        return; // wait for the connect to finish before any handshake I/O
     }
     if (psx::os::has(readiness, Readiness::Writable)) {
         flushOutbound();
@@ -48,6 +60,31 @@ void TlsStream::onEvent(Readiness readiness) {
     }
 }
 
+void TlsStream::confirmConnect() {
+    if (auto result = socket_.connectResult(); result.ok()) {
+        connectConfirmed_ = true;
+        driveHandshake(); // now produce and send the ClientHello
+        flushOutbound();
+        updateInterest();
+        return;
+    }
+    // This address failed; try the next one the host resolved to (e.g. ::1 -> IPv4).
+    if (auto next = socket_.connectNextAddress(); !next.ok()) {
+        fail(next.error()); // no address left
+        return;
+    }
+    if (token_ != 0) {
+        (void)reactor_.unwatch(token_);
+        token_ = 0;
+    }
+    auto watched = reactor_.watch(socket_.handle(), Interest::Readable | Interest::Writable,
+                                  [this](Readiness readiness) { onEvent(readiness); });
+    if (watched.ok()) {
+        token_ = watched.value(); // still unconfirmed; the buffered ClientHello rides the new socket
+    } else {
+        fail(watched.error());
+    }
+}
 void TlsStream::onReadable() {
     std::array<char, 16 * 1024> buffer{};
     while (true) { // edge-triggered: drain to WouldBlock

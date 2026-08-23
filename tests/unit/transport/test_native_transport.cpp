@@ -1247,3 +1247,103 @@ TEST(SegmentedPipelineTest, LocalRemoteLocalThreeSegments) {
     EXPECT_EQ(result.output, "A\nB\nC\n");
     EXPECT_EQ(result.exitCode, 0);
 }
+
+// Dual-stack hostname: `localhost` resolves to ::1 (first) and 127.0.0.1. With
+// an IPv4-only node, the connect must fall back from the failing ::1 to IPv4.
+TEST(NativeTransportTest, ConnectsToADualStackHostnameViaFallback) {
+    using psx::ca::CertificateAuthority;
+    auto ca = CertificateAuthority::create("psx-fleet");
+    ASSERT_TRUE(ca.ok());
+    auto nodeId = ca.value().issue("psx://node/1");
+    auto ctlId = ca.value().issue("psx://controller");
+    ASSERT_TRUE(nodeId.ok() && ctlId.ok());
+    const std::string caCert = ca.value().certificatePem();
+
+    auto listener = Socket::listen("127.0.0.1", 0); // IPv4 only
+    ASSERT_TRUE(listener.ok());
+    const std::uint16_t port = listener.value().localPort().value();
+
+    auto reactor = Reactor::create();
+    ASSERT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+
+    NodeServer server(r, std::move(listener.value()),
+                      {.certificatePem = nodeId.value().certificatePem,
+                       .privateKeyPem = nodeId.value().privateKeyPem,
+                       .caPem = caCert},
+                      {});
+    ASSERT_TRUE(server.start().ok());
+
+    // Connect by hostname: ::1 is tried first and refused; the transport falls
+    // back to 127.0.0.1 while the reactor runs (NodeServer accepts there).
+    auto clientSock = Socket::connect("localhost", port);
+    ASSERT_TRUE(clientSock.ok());
+    auto ctlTls = Tls::create({.certificatePem = ctlId.value().certificatePem,
+                               .privateKeyPem = ctlId.value().privateKeyPem,
+                               .caPem = caCert,
+                               .isServer = false});
+    ASSERT_TRUE(ctlTls.ok());
+
+    ConsumingSink sink;
+    sink.reactor = &r;
+    bool errored = false;
+    NativeTransport* ctlPtr = nullptr;
+    NativeTransport ctl(r, std::move(clientSock.value()), std::move(ctlTls.value()), Role::Controller, sink,
+                        {.onReady = [&] { ctlPtr->session().open({.argv = {"/bin/echo", "fallback-ok"}}); },
+                         .onError =
+                             [&](psx::Error) {
+                                 errored = true;
+                                 r.stop();
+                             }});
+    sink.session = &ctl.session();
+    ctlPtr = &ctl;
+    ASSERT_TRUE(ctl.start().ok());
+    r.after(std::chrono::seconds(5), [&] { r.stop(); });
+    ASSERT_TRUE(r.run().ok());
+
+    EXPECT_FALSE(errored) << "connecting to localhost must fall back to IPv4";
+    ASSERT_TRUE(sink.exited);
+    EXPECT_EQ(sink.data, "fallback-ok\n");
+}
+
+// A connect that exhausts every resolved address fails cleanly via onError.
+TEST(NativeTransportTest, ConnectToAClosedPortFailsCleanly) {
+    auto probe = Socket::listen("127.0.0.1", 0);
+    ASSERT_TRUE(probe.ok());
+    const std::uint16_t closedPort = probe.value().localPort().value();
+    probe = Socket{}; // close the listener: the port is now refused
+
+    const auto ctlId = tls_test::generateSelfSigned("psx://controller");
+    const auto nodeId = tls_test::generateSelfSigned("psx://node/1");
+    auto ctlTls = Tls::create(
+        {.certificatePem = ctlId.certPem, .privateKeyPem = ctlId.keyPem, .caPem = nodeId.certPem, .isServer = false});
+    ASSERT_TRUE(ctlTls.ok());
+    auto clientSock = Socket::connect("127.0.0.1", closedPort);
+    ASSERT_TRUE(clientSock.ok()); // async: the failure surfaces later
+
+    auto reactor = Reactor::create();
+    ASSERT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+
+    bool errored = false;
+    bool ready = false;
+    struct Sink : SessionHandler {
+    } sink;
+    NativeTransport ctl(r, std::move(clientSock.value()), std::move(ctlTls.value()), Role::Controller, sink,
+                        {.onReady =
+                             [&] {
+                                 ready = true;
+                                 r.stop();
+                             },
+                         .onError =
+                             [&](psx::Error) {
+                                 errored = true;
+                                 r.stop();
+                             }});
+    ASSERT_TRUE(ctl.start().ok());
+    r.after(std::chrono::seconds(5), [&] { r.stop(); });
+    ASSERT_TRUE(r.run().ok());
+
+    EXPECT_TRUE(errored) << "a refused connect must surface as onError";
+    EXPECT_FALSE(ready);
+}

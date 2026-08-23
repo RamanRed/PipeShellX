@@ -27,6 +27,13 @@ public:
     // Ok when a non-blocking connect has completed successfully; an error carries
     // the connect failure (SO_ERROR).
     Result<void> connectResult() const;
+    // True while a connect() is still in flight (returned EINPROGRESS): the caller
+    // should wait for the handle to become Writable, then call connectResult().
+    bool connecting() const noexcept { return connecting_; }
+    // After connectResult() reports failure, try the next resolved address of the
+    // original host (dual-stack fallback, e.g. ::1 refused -> 127.0.0.1). Replaces
+    // handle() with a fresh socket; an error means no address is left.
+    Result<void> connectNextAddress();
 
     // A listening socket bound to host:port (SO_REUSEADDR). Port 0 asks the OS
     // for an ephemeral port — read it back with localPort().
@@ -46,8 +53,13 @@ public:
 
 private:
     explicit Socket(Handle handle) noexcept : handle_(std::move(handle)) {}
+    Result<void> connectFrom(std::size_t startIndex); // resolve + connect from a cursor
 
     Handle handle_;
+    std::string connectHost_; // retained so connectNextAddress() can re-resolve
+    std::uint16_t connectPort_ = 0;
+    std::size_t addressCursor_ = 0; // resolved addresses already attempted
+    bool connecting_ = false;
 };
 
 } // namespace psx::os

@@ -48,17 +48,35 @@ Error gaiError(const char* op, int gai) {
 } // namespace
 
 Result<Socket> Socket::connect(const std::string& host, std::uint16_t port) {
+    Socket socket;
+    socket.connectHost_ = host;
+    socket.connectPort_ = port;
+    if (auto connected = socket.connectFrom(0); !connected.ok()) {
+        return connected.error();
+    }
+    return socket;
+}
+
+// Resolves connectHost_:connectPort_ and tries addresses from `startIndex` on,
+// stopping at the first that connects or is in progress. addressCursor_ advances
+// past every address attempted, so connectNextAddress() resumes after it.
+Result<void> Socket::connectFrom(std::size_t startIndex) {
     addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     addrinfo* results = nullptr;
-    const std::string service = std::to_string(port);
-    if (const int gai = ::getaddrinfo(host.c_str(), service.c_str(), &hints, &results); gai != 0) {
+    const std::string service = std::to_string(connectPort_);
+    if (const int gai = ::getaddrinfo(connectHost_.c_str(), service.c_str(), &hints, &results); gai != 0) {
         return gaiError("getaddrinfo", gai);
     }
 
     Error lastError{ErrorClass::Other, 0, "connect"};
-    for (addrinfo* ai = results; ai != nullptr; ai = ai->ai_next) {
+    std::size_t index = 0;
+    for (addrinfo* ai = results; ai != nullptr; ai = ai->ai_next, ++index) {
+        if (index < startIndex) {
+            continue; // already attempted on an earlier call
+        }
+        addressCursor_ = index + 1;
         const int rawFd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (rawFd == -1) {
             lastError = posix::fromErrno("socket", errno);
@@ -69,15 +87,24 @@ Result<Socket> Socket::connect(const std::string& host, std::uint16_t port) {
             lastError = flags.error();
             continue;
         }
-        if (::connect(rawFd, ai->ai_addr, ai->ai_addrlen) == 0 || errno == EINPROGRESS) {
+        const int rc = ::connect(rawFd, ai->ai_addr, ai->ai_addrlen);
+        if (rc == 0 || errno == EINPROGRESS) {
+            connecting_ = errno == EINPROGRESS && rc != 0;
+            handle_ = Backend::adopt(rawFd);
             ::freeaddrinfo(results);
-            return Socket(Backend::adopt(rawFd));
+            return {};
         }
         lastError = posix::fromErrno("connect", errno);
         (void)::close(rawFd);
     }
     ::freeaddrinfo(results);
     return lastError;
+}
+
+Result<void> Socket::connectNextAddress() {
+    handle_.close(); // drop the failed socket
+    connecting_ = false;
+    return connectFrom(addressCursor_);
 }
 
 Result<void> Socket::connectResult() const {

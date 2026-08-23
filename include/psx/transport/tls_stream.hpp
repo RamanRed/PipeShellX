@@ -42,6 +42,7 @@ public:
 
 private:
     void onEvent(psx::os::Readiness readiness);
+    void confirmConnect();
     void onReadable();
     void driveHandshake();
     void deliverAppData();
@@ -55,6 +56,7 @@ private:
     Callbacks callbacks_;
     psx::runtime::Token token_ = 0;
     std::string outbound_; // ciphertext pending a writable socket
+    bool connectConfirmed_ = true; // false while an async connect is still in flight
     bool established_ = false;
     bool failed_ = false;
 };
