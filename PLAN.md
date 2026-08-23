@@ -9,7 +9,7 @@ anonymous pipes on one host, backpressured mTLS streams between hosts — with t
 carried forward in Appendix A). This document is the single source of truth for scope; update it
 in the same PR as any scope change.
 **Baseline date:** 2026-08-22, commit `2e10869`.
-**Phase status:** Phase 0 (`v0.1.0`), Phase 1 (`v0.2.0`), Phase 2 (`v0.3.0`) complete + reviewed. **Phase 3 (Windows) is DEFERRED to future work** — it needs an MSVC/clang-cl Windows toolchain not available in this environment; the design is Windows-ready and `docs/windows.md` captures the tiers/differences, so it can resume on a Windows-capable host. → **active phase: Phase 4 — Native backplane (`v0.5.0`)** (buildable here: OpenSSL 3.x present).
+**Phase status:** Phase 0 (`v0.1.0`), Phase 1 (`v0.2.0`), Phase 2 (`v0.3.0`), **Phase 4 — Native backplane (`v0.5.0`)** complete + reviewed. **Phase 3 (Windows) is DEFERRED to future work** — it needs an MSVC/clang-cl Windows toolchain not available in this environment; the design is Windows-ready and `docs/windows.md` captures the tiers/differences, so it can resume on a Windows-capable host. → **active phase: Phase 5 — Pipelines as DAGs (`v0.6.0`)**.
 
 ---
 
@@ -746,6 +746,19 @@ Extends `docs/distributed_execution.md`, `docs/authentication.md`, `docs/securit
 - [ ] Reconnect-and-resume within the lease window; `Lost` handling in the orchestrator; fuzzers for the frame decoder (`tests/fuzz/`).
 - [~] Loopback transport for protocol tests; fault injection (drop/duplicate/delay frames, kill agent mid-stream, partition). _(Loopback `Session` pair in tests; **fault injection done** — `test_session_faults.cpp`: structured adversarial frames (DATA for unknown/closed stream, duplicate EXIT, unknown frame type, WINDOW_UPDATE for a closed stream, wrong-role OPEN) all yield clean protocol errors, plus two fuzz loops (arbitrary + mutated valid frame streams, 10k iters) that stay memory-safe under ASan/UBSan — a stand-in for the toolchain-blocked libFuzzer. kill-agent-mid-stream/partition are covered by the fencing + lease tests. **Remaining:** in-tree libFuzzer target (needs homebrew clang).)_
 - **Exit criteria:** 1 000 simulated nodes on one TLS connection each; fencing proven (no orphan after controller `kill -9`); §7 targets T7–T10. _(Fencing on disconnect: ✓ proven — `NodeFencingTest` plus a real-binary `kill -9` smoke confirm the node kills the running stage's process group when the controller connection drops, leaving no orphan (~50 ms). `~NodeStageRunner` signals the group explicitly. Silent-partition lease: ✓ done — `NativeTransport` runs a PING/PONG heartbeat (`kDefaultLease` 2 s×3); a peer that goes quiet (no FIN, no PONG) fails via `onError(Timeout)` in ~3–4 intervals. Covered by `LeaseExpiresWhenThePeerGoesSilent` + `LeaseKeepsAnIdleConnectionAlive`, and a real-binary `SIGSTOP`-the-node smoke (controller gave up in ~8 s, not 60). Remaining: node-death fencing (a hard-killed node still orphans its stage — needs a parent-death signal / `PR_SET_PDEATHSIG` / kqueue parent watch), and full 1 000-connection-over-TLS scale (CI/dedicated-host). **Scale ✓ demonstrated** — `test_scale.cpp`: one connection multiplexes 1 000 concurrent streams, and 1 000 simulated nodes each run a stage to completion (loopback, no TLS/RSA cost); `NodeServerTest.HandlesManyConcurrentControllerConnections` runs 100 concurrent mTLS connections through one NodeServer on one reactor, every stage exiting cleanly (~0.9 s). The literal 1 000-over-real-TLS run (≈2 000 RSA handshakes) is left to CI to keep the dev machine unloaded.)_
+- **Status (2026-08-23):** done → `v0.5.0`. The psx/1 native backplane end to end: TLV frame codec + `FrameDecoder`
+  (fuzz-hardened); `Session` mux with HTTP/2-style per-stream credit flow control, real read-side backpressure, and
+  distinct stdout/stderr channels; `os::{Socket(TCP+AF_UNIX),Tls}` (mTLS 1.3, SAN-URI identity, CRL); `NativeTransport`
+  (PING/PONG liveness lease, GOAWAY); the `pipeshellx node` daemon (accept loop, deferred-reap teardown, stage fencing
+  on controller loss, `--control` metrics endpoint, systemd/launchd unit emitters) and `NativeController` driving
+  `run --transport native`; an offline CA (`ca init|issue|revoke|sign`, CRL, CSR enrollment via `node keygen`). Fencing
+  proven (no orphan after controller `kill -9`; lease detects a silent partition); scale demonstrated (1 000-stream mux
+  + 1 000 loopback nodes + 100-way concurrent mTLS fan-out). **Recorded as environment exceptions** (per the `v0.3.0`
+  precedent): the literal 1 000-connection-over-real-TLS run and the §7 T7/T8 throughput targets (need a fleet/CI host);
+  libFuzzer (Apple clang lacks the runtime); the SSH-push automation for enrollment (no `sshd` here). **Deferred to
+  later phases/future work:** reconnect-and-resume within the lease window + orchestrator `Lost` handling (a larger
+  resilience feature that revisits the immediate-fence model); node-death fencing on a hard-killed *node* (needs a
+  kernel parent-death signal — Phase 6 isolation); Windows SCM service (with Phase 3).
 
 ### Phase 5 — Pipelines as DAGs (10–15 days) → `v0.6.0`
 Extends `docs/system_flow.md`, `docs/pipelines.md`, `docs/architecture.md`.
