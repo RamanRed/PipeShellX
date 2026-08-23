@@ -64,7 +64,8 @@ if(PIPESHELLX_NATIVE_TRANSPORT AND OpenSSL_FOUND)
         transport/node_server.cpp
         cli/ca_command.cpp
         cli/node_command.cpp
-        transport/native_controller.cpp)
+        transport/native_controller.cpp
+        pipeline/distributed_runner.cpp)
     message(STATUS "PipeShellX: native transport enabled (OpenSSL ${OPENSSL_VERSION})")
 endif()
 

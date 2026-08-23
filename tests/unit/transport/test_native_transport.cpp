@@ -5,6 +5,8 @@
 #include "psx/transport/node_server.hpp"
 #include "psx/transport/node_stage_runner.hpp"
 
+#include "psx/pipeline/distributed_runner.hpp"
+
 #include "psx/os/socket.hpp"
 #include "psx/os/tls.hpp"
 #include "psx/runtime/reactor.hpp"
@@ -935,4 +937,116 @@ TEST(NodeStageRunnerTest, LargeStdinRoundTripsUnderATinyWindow) {
     ASSERT_TRUE(sink.exited);
     EXPECT_EQ(sink.data.size(), payload.size());
     EXPECT_EQ(sink.data, payload);
+}
+
+// Cross-node pipeline: two remote stages bridged by the controller. Both run on
+// one node (two connections/streams); the controller pipes stage0 stdout into
+// stage1 stdin and closes it on stage0 exit, delivering stage1's stdout.
+TEST(DistributedRunnerTest, BridgesTwoRemoteStages) {
+    using psx::ca::CertificateAuthority;
+    using psx::pipeline::DistributedRunner;
+    using psx::pipeline::RemoteStage;
+
+    auto ca = CertificateAuthority::create("psx-fleet");
+    ASSERT_TRUE(ca.ok());
+    auto nodeId = ca.value().issue("psx://node/1");
+    auto ctlId = ca.value().issue("psx://controller");
+    ASSERT_TRUE(nodeId.ok() && ctlId.ok());
+    const std::string caCert = ca.value().certificatePem();
+
+    auto listener = Socket::listen("127.0.0.1", 0);
+    ASSERT_TRUE(listener.ok());
+    const std::uint16_t port = listener.value().localPort().value();
+
+    auto reactor = Reactor::create();
+    ASSERT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+
+    NodeServer server(r, std::move(listener.value()),
+                      {.certificatePem = nodeId.value().certificatePem,
+                       .privateKeyPem = nodeId.value().privateKeyPem,
+                       .caPem = caCert},
+                      [](std::string_view san) { return san == "psx://controller"; });
+    ASSERT_TRUE(server.start().ok());
+
+    std::string output;
+    DistributedRunner runner(
+        r,
+        {.certificatePem = ctlId.value().certificatePem, .privateKeyPem = ctlId.value().privateKeyPem, .caPem = caCert},
+        [&](std::string_view chunk) { output.append(chunk); });
+
+    const std::vector<RemoteStage> stages = {
+        {.argv = {"printf", "b\na\nc\n"}, .host = "127.0.0.1", .port = port, .expectedSan = "psx://node/1"},
+        {.argv = {"sort"}, .host = "127.0.0.1", .port = port, .expectedSan = "psx://node/1"}};
+
+    DistributedRunner::Outcome outcome;
+    bool completed = false;
+    ASSERT_TRUE(runner
+                    .run(stages,
+                         [&](DistributedRunner::Outcome result) {
+                             outcome = std::move(result);
+                             completed = true;
+                             r.stop();
+                         })
+                    .ok());
+    r.after(std::chrono::seconds(10), [&] { r.stop(); });
+    ASSERT_TRUE(r.run().ok());
+
+    ASSERT_TRUE(completed);
+    EXPECT_TRUE(outcome.error.empty()) << outcome.error;
+    EXPECT_EQ(output, "a\nb\nc\n"); // stage1 (sort) output of stage0 (printf) input
+    EXPECT_EQ(outcome.exitCode, 0);
+    EXPECT_EQ(outcome.stageExitCodes, (std::vector<int>{0, 0}));
+}
+
+// pipefail across the wire: a failing downstream stage sets the pipeline code.
+TEST(DistributedRunnerTest, PipefailAcrossRemoteStages) {
+    using psx::ca::CertificateAuthority;
+    using psx::pipeline::DistributedRunner;
+    using psx::pipeline::RemoteStage;
+
+    auto ca = CertificateAuthority::create("psx-fleet");
+    ASSERT_TRUE(ca.ok());
+    auto nodeId = ca.value().issue("psx://node/1");
+    auto ctlId = ca.value().issue("psx://controller");
+    ASSERT_TRUE(nodeId.ok() && ctlId.ok());
+    const std::string caCert = ca.value().certificatePem();
+
+    auto listener = Socket::listen("127.0.0.1", 0);
+    ASSERT_TRUE(listener.ok());
+    const std::uint16_t port = listener.value().localPort().value();
+
+    auto reactor = Reactor::create();
+    ASSERT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+
+    NodeServer server(r, std::move(listener.value()),
+                      {.certificatePem = nodeId.value().certificatePem,
+                       .privateKeyPem = nodeId.value().privateKeyPem,
+                       .caPem = caCert},
+                      {});
+    ASSERT_TRUE(server.start().ok());
+
+    DistributedRunner runner(r, {.certificatePem = ctlId.value().certificatePem,
+                                 .privateKeyPem = ctlId.value().privateKeyPem,
+                                 .caPem = caCert});
+    const std::vector<RemoteStage> stages = {{.argv = {"echo", "hi"}, .host = "127.0.0.1", .port = port},
+                                             {.argv = {"sh", "-c", "exit 3"}, .host = "127.0.0.1", .port = port}};
+
+    DistributedRunner::Outcome outcome;
+    bool completed = false;
+    ASSERT_TRUE(runner
+                    .run(stages,
+                         [&](DistributedRunner::Outcome result) {
+                             outcome = std::move(result);
+                             completed = true;
+                             r.stop();
+                         })
+                    .ok());
+    r.after(std::chrono::seconds(10), [&] { r.stop(); });
+    ASSERT_TRUE(r.run().ok());
+
+    ASSERT_TRUE(completed);
+    EXPECT_EQ(outcome.stageExitCodes, (std::vector<int>{0, 3}));
+    EXPECT_EQ(outcome.exitCode, 3);
 }
