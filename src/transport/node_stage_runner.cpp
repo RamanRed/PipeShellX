@@ -17,6 +17,11 @@ using psx::os::SpawnSpec;
 NodeStageRunner::NodeStageRunner(psx::runtime::Reactor& reactor) : reactor_(reactor) {}
 
 NodeStageRunner::~NodeStageRunner() {
+    // Fencing: the controller connection dropping (peer close, kill -9, or a
+    // torn-down NodeServer connection) destroys this runner while stages may
+    // still be running. Kill each running stage's process group explicitly so
+    // it is never orphaned -- rather than leaning on ~Process's implicit
+    // teardown, so the guarantee survives changes to how the Process is held.
     for (auto& [id, stage] : stages_) {
         if (stage.stdoutToken != 0) {
             (void)reactor_.unwatch(stage.stdoutToken);
@@ -25,6 +30,7 @@ NodeStageRunner::~NodeStageRunner() {
             (void)reactor_.unwatch(stage.stderrToken);
         }
         if (!stage.exited) {
+            (void)stage.process.signal(psx::os::StopSignal::Kill);
             (void)reactor_.unwatchChild(stage.process.id());
         }
     }

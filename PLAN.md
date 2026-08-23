@@ -745,7 +745,7 @@ Extends `docs/distributed_execution.md`, `docs/authentication.md`, `docs/securit
 - [ ] `pipeshellx ca init|issue|revoke`; `pipeshellx node enroll` over `SshTransport`.
 - [ ] Reconnect-and-resume within the lease window; `Lost` handling in the orchestrator; fuzzers for the frame decoder (`tests/fuzz/`).
 - [ ] Loopback transport for protocol tests; fault injection (drop/duplicate/delay frames, kill agent mid-stream, partition).
-- **Exit criteria:** 1 000 simulated nodes on one TLS connection each; fencing proven (no orphan after controller `kill -9`); §7 targets T7–T10.
+- **Exit criteria:** 1 000 simulated nodes on one TLS connection each; fencing proven (no orphan after controller `kill -9`); §7 targets T7–T10. _(Fencing on disconnect: ✓ proven — `NodeFencingTest` plus a real-binary `kill -9` smoke confirm the node kills the running stage's process group when the controller connection drops, leaving no orphan (~50 ms). `~NodeStageRunner` signals the group explicitly. Remaining: lease-timeout fencing for a *silent* partition (PING/PONG heartbeat, no FIN), and the 1 000-node scale test.)_
 
 ### Phase 5 — Pipelines as DAGs (10–15 days) → `v0.6.0`
 Extends `docs/system_flow.md`, `docs/pipelines.md`, `docs/architecture.md`.
