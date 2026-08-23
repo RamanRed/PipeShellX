@@ -26,6 +26,7 @@ void Session::send(const Frame& frame) {
 
 StreamId Session::open(const OpenRequest& request) {
     const StreamId id = nextStreamId_++;
+    highestStream_ = std::max(highestStream_, id);
     streams_.try_emplace(id, initialWindow_);
     send(Frame{.type = FrameType::Open, .flags = 0, .streamId = id, .payload = encodeOpen(request)});
     return id;
@@ -159,6 +160,7 @@ psx::Result<void> Session::dispatch(Frame&& frame) {
             if (!request.ok()) {
                 return request.error();
             }
+            highestStream_ = std::max(highestStream_, frame.streamId);
             streams_.try_emplace(frame.streamId, initialWindow_);
             handler_.onOpen(frame.streamId, request.value());
             return {};
@@ -166,7 +168,13 @@ psx::Result<void> Session::dispatch(Frame&& frame) {
         case FrameType::Data: {
             auto it = streams_.find(frame.streamId);
             if (it == streams_.end()) {
-                return protocolError("DATA for an unknown stream");
+                // A stream can close (EXIT) while the peer still has DATA in flight
+                // for it -- a benign race. Ignore DATA for an id that was opened
+                // once; an id we never opened is a real protocol violation.
+                if (frame.streamId <= highestStream_) {
+                    return {};
+                }
+                return protocolError("DATA for a stream that was never opened");
             }
             if (!it->second.recvWindow.onData(static_cast<std::uint32_t>(frame.payload.size()))) {
                 return protocolError("DATA exceeds the stream's flow-control window");

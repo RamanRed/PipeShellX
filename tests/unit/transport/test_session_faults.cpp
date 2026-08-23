@@ -33,7 +33,7 @@ TEST(SessionFaultTest, DataForAnUnknownStreamIsRejected) {
     EXPECT_FALSE(node.receive(frame(FrameType::Data, 0, 999, "bytes")).ok());
 }
 
-TEST(SessionFaultTest, DataAfterTheStreamIsClosedIsRejected) {
+TEST(SessionFaultTest, DataAfterTheStreamIsClosedIsIgnored) {
     NullHandler h;
     std::string toPeer;
     Session ctl(Role::Controller, [&](std::string_view s) { toPeer.append(s); }, h);
@@ -41,8 +41,9 @@ TEST(SessionFaultTest, DataAfterTheStreamIsClosedIsRejected) {
     // The node reports EXIT: the controller erases the stream.
     ASSERT_TRUE(
         ctl.receive(frame(FrameType::Exit, kFlagEndStream, id, encodeExit({ExitStatus::Kind::Exited, 0}))).ok());
-    // A straggler DATA for the now-closed stream is a protocol error, not a crash.
-    EXPECT_FALSE(ctl.receive(frame(FrameType::Data, 0, id, "late")).ok());
+    // A straggler DATA for the now-closed stream is a benign close race (the peer
+    // had it in flight when EXIT crossed): ignored, not fatal.
+    EXPECT_TRUE(ctl.receive(frame(FrameType::Data, 0, id, "late")).ok());
 }
 
 TEST(SessionFaultTest, DuplicateExitIsRejected) {

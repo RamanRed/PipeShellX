@@ -116,6 +116,7 @@ private:
     FrameDecoder decoder_;
     std::unordered_map<StreamId, Stream> streams_;
     StreamId nextStreamId_ = 1;
+    StreamId highestStream_ = 0; // highest id ever opened; DATA below it may race a close
     std::uint32_t initialWindow_;
     std::function<void(StreamId)> streamWritable_;
     bool goneAway_ = false;
