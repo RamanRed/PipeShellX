@@ -52,7 +52,8 @@ void NodeServer::acceptOne(psx::os::Socket socket) {
     auto transport = std::make_unique<NativeTransport>(
         reactor_, std::move(socket), std::move(tls.value()), Role::Node, *runner,
         NativeTransport::Callbacks{.authorize = authorize_,
-                                   .onError = [this, id](const psx::Error&) { dropConnection(id); }});
+                                   .onError = [this, id](const psx::Error&) { dropConnection(id); }},
+        kDefaultStreamWindow, kDefaultLease);
     runner->bind(transport->session());
     if (auto started = transport->start(); !started.ok()) {
         return; // drop this connection

@@ -99,7 +99,8 @@ psx::Result<void> NativeController::start(const std::vector<Target>& targets,
             reactor_, std::move(socket.value()), std::move(tls.value()), Role::Controller, *raw,
             NativeTransport::Callbacks{.authorize = std::move(authorize),
                                        .onReady = [this, raw] { raw->session->open({.argv = command_}); },
-                                       .onError = [raw](const psx::Error& e) { raw->fail(e.message()); }});
+                                       .onError = [raw](const psx::Error& e) { raw->fail(e.message()); }},
+            kDefaultStreamWindow, kDefaultLease);
         raw->session = &raw->transport->session();
         if (auto started = raw->transport->start(); !started.ok()) {
             raw->fail("start: " + started.error().message());

@@ -535,3 +535,101 @@ TEST(NativeControllerTest, ReportsAnErrorForAnUnreachableNode) {
     EXPECT_FALSE(results[0].ok);
     EXPECT_FALSE(results[0].error.empty());
 }
+
+// Lease / silent-partition fencing: a peer that completes the handshake and then
+// goes quiet (no FIN, no PONG) must be detected. With a fast lease the controller
+// fires onError(Timeout) after maxMissed silent intervals.
+TEST(NativeTransportTest, LeaseExpiresWhenThePeerGoesSilent) {
+    auto listener = Socket::listen("127.0.0.1", 0);
+    ASSERT_TRUE(listener.ok());
+    const auto port = listener.value().localPort();
+    ASSERT_TRUE(port.ok());
+    auto clientSock = Socket::connect("127.0.0.1", port.value());
+    ASSERT_TRUE(clientSock.ok());
+    Socket serverSock = acceptWithin(listener.value());
+    ASSERT_TRUE(serverSock.valid());
+
+    const auto ctlId = tls_test::generateSelfSigned("psx://controller");
+    const auto nodeId = tls_test::generateSelfSigned("psx://node/1");
+    auto ctlTls = Tls::create(
+        {.certificatePem = ctlId.certPem, .privateKeyPem = ctlId.keyPem, .caPem = nodeId.certPem, .isServer = false});
+    auto nodeTls = Tls::create(
+        {.certificatePem = nodeId.certPem, .privateKeyPem = nodeId.keyPem, .caPem = ctlId.certPem, .isServer = true});
+    ASSERT_TRUE(ctlTls.ok());
+    ASSERT_TRUE(nodeTls.ok());
+
+    auto reactor = Reactor::create();
+    ASSERT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+
+    // A "frozen" node: it finishes the handshake, then never sends another frame
+    // -- in particular it never PONGs. The socket stays open (no FIN), so only the
+    // lease can tell that the peer is gone.
+    TlsStream silentNode(r, std::move(serverSock), std::move(nodeTls.value()),
+                         TlsStream::Callbacks{.onData = [](std::string_view) {}, .onError = [](psx::Error) {}});
+    ASSERT_TRUE(silentNode.start().ok());
+
+    struct Sink : SessionHandler {
+    } sink;
+    bool errored = false;
+    psx::Error captured{psx::ErrorClass::Other, 0, "none"};
+    NativeTransport ctl(r, std::move(clientSock.value()), std::move(ctlTls.value()), Role::Controller, sink,
+                        {.onError =
+                             [&](psx::Error e) {
+                                 errored = true;
+                                 captured = e;
+                                 r.stop();
+                             }},
+                        kDefaultStreamWindow, HeartbeatOptions{std::chrono::milliseconds(5), 3});
+    ASSERT_TRUE(ctl.start().ok());
+
+    r.after(std::chrono::seconds(2), [&] { r.stop(); }); // safety net against a hang
+    ASSERT_TRUE(r.run().ok());
+
+    EXPECT_TRUE(errored) << "the lease never expired on a silent peer";
+    EXPECT_EQ(captured.cls, psx::ErrorClass::Timeout);
+}
+
+// The lease must not fence a healthy-but-idle connection: with both ends running
+// a fast lease and no stage traffic, the automatic PING/PONG keeps each side's
+// lease satisfied, so neither errors across many intervals.
+TEST(NativeTransportTest, LeaseKeepsAnIdleConnectionAlive) {
+    auto listener = Socket::listen("127.0.0.1", 0);
+    ASSERT_TRUE(listener.ok());
+    const auto port = listener.value().localPort();
+    ASSERT_TRUE(port.ok());
+    auto clientSock = Socket::connect("127.0.0.1", port.value());
+    ASSERT_TRUE(clientSock.ok());
+    Socket serverSock = acceptWithin(listener.value());
+    ASSERT_TRUE(serverSock.valid());
+
+    const auto ctlId = tls_test::generateSelfSigned("psx://controller");
+    const auto nodeId = tls_test::generateSelfSigned("psx://node/1");
+    auto ctlTls = Tls::create(
+        {.certificatePem = ctlId.certPem, .privateKeyPem = ctlId.keyPem, .caPem = nodeId.certPem, .isServer = false});
+    auto nodeTls = Tls::create(
+        {.certificatePem = nodeId.certPem, .privateKeyPem = nodeId.keyPem, .caPem = ctlId.certPem, .isServer = true});
+    ASSERT_TRUE(ctlTls.ok());
+    ASSERT_TRUE(nodeTls.ok());
+
+    auto reactor = Reactor::create();
+    ASSERT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+
+    struct Sink : SessionHandler {
+    } nodeSink, ctlSink;
+    bool errored = false;
+    const HeartbeatOptions lease{std::chrono::milliseconds(5), 3};
+    NativeTransport node(r, std::move(serverSock), std::move(nodeTls.value()), Role::Node, nodeSink,
+                         {.onError = [&](psx::Error) { errored = true; }}, kDefaultStreamWindow, lease);
+    NativeTransport ctl(r, std::move(clientSock.value()), std::move(ctlTls.value()), Role::Controller, ctlSink,
+                        {.onError = [&](psx::Error) { errored = true; }}, kDefaultStreamWindow, lease);
+    ASSERT_TRUE(node.start().ok());
+    ASSERT_TRUE(ctl.start().ok());
+
+    // Sit idle for many lease intervals; a broken lease would fire well before this.
+    r.after(std::chrono::milliseconds(80), [&] { r.stop(); });
+    ASSERT_TRUE(r.run().ok());
+
+    EXPECT_FALSE(errored) << "the lease falsely fenced a healthy idle connection";
+}
