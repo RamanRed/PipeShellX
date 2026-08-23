@@ -115,10 +115,26 @@ next stage's stdin, the last stage's stdout is the command's output, stderr is
 inherited, and the exit code follows `pipefail` (the rightmost non-zero stage,
 else 0). Ctrl-C cancels it (exit `130`); a malformed spec or a cycle exits `2`.
 
+### Cross-node placement
+
+`@placement` runs a stage on a node instead of locally. The placement names an
+inventory host (whose `san`/`native_port` fields pin the node), and the
+controller connects to each node over the mTLS backplane, bridging one stage's
+stdout into the next stage's stdin:
+
+```bash
+pipeshellx pipe -i fleet.ini --cert ctl.crt --key ctl.key --ca ca.crt \
+  "'grep ERROR /var/log/app.log'@web-01 | 'sort -u'@db-01"
+```
+
+Every stage's stdin/stdout crosses the connection with flow control; an upstream
+exit closes the downstream's stdin, and the exit code follows `pipefail`.
+Today a pipeline is either all-local or all-remote — mixing the two is rejected
+until stage-boundary splicing lands.
+
 ### Roadmap (Phase 5)
 
-Cross-node placement (`'cmd'@host | 'cmd'@local`) runs the marked stages on
-remote nodes over the native backplane, forwarding stdin/stdout across the
-connection; `pipeline.yaml` will describe general DAGs (fan-in/out, named
-edges). `merge`, `group`, `json`, `consensus`, and `spool` become sink *stages*
-in that model; `run` is `pipe` with a merge sink. See `PLAN.md` §5.
+`pipeline.yaml` will describe general DAGs (fan-in/out, named edges), and mixed
+local/remote pipelines will splice a local segment onto a remote one. `merge`,
+`group`, `json`, `consensus`, and `spool` become sink *stages* in that model;
+`run` is `pipe` with a merge sink. See `PLAN.md` §5.

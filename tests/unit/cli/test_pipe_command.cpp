@@ -23,10 +23,22 @@ TEST(PipeCommandTest, ReturnsThePipefailExitCode) {
     EXPECT_TRUE(out.str().empty());
 }
 
-TEST(PipeCommandTest, RejectsRemotePlacementForNow) {
+TEST(PipeCommandTest, RejectsMixingLocalAndRemoteStages) {
     std::ostringstream out, err;
-    EXPECT_EQ(pipeSubcommand({"'ps'@web | wc"}, out, err), 2);
-    EXPECT_NE(err.str().find("remote placement"), std::string::npos);
+    EXPECT_EQ(pipeSubcommand({"'ps'@web | wc"}, out, err), 2); // ps remote, wc local
+    EXPECT_NE(err.str().find("mixing local and remote"), std::string::npos);
+}
+
+TEST(PipeCommandTest, RemoteStagesNeedAnInventory) {
+    std::ostringstream out, err;
+    EXPECT_EQ(pipeSubcommand({"'ps'@web"}, out, err), 2);
+    EXPECT_NE(err.str().find("inventory"), std::string::npos);
+}
+
+TEST(PipeCommandTest, RemoteStagesNeedControllerCerts) {
+    std::ostringstream out, err;
+    EXPECT_EQ(pipeSubcommand({"-i", "inv.txt", "'ps'@web"}, out, err), 2);
+    EXPECT_NE(err.str().find("--cert"), std::string::npos);
 }
 
 TEST(PipeCommandTest, RejectsUsageAndMalformedSpecs) {
