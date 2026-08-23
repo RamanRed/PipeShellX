@@ -115,6 +115,18 @@ next stage's stdin, the last stage's stdout is the command's output, stderr is
 inherited, and the exit code follows `pipefail` (the rightmost non-zero stage,
 else 0). Ctrl-C cancels it (exit `130`); a malformed spec or a cycle exits `2`.
 
+`--check` validates a spec and prints the resolved plan (each stage's command,
+`@local`/remote placement, and the node it resolves to) without running
+anything — a pre-flight for a fleet-wide pipeline:
+
+```bash
+pipeshellx pipe --check -i fleet.ini "'grep ERROR'@web | 'sort -u'@local"
+# pipeline: 2 stages
+#   s0  grep ERROR  @web -> 10.0.0.5:7433
+#   s1  sort -u  @local
+# valid
+```
+
 ### Cross-node placement
 
 `@placement` runs a stage on a node instead of locally. The placement names an
