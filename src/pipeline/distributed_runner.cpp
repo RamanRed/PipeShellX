@@ -121,6 +121,9 @@ void DistributedRunner::onConnReady(std::size_t index) {
     for (std::size_t j = 0; j < conns_.size(); ++j) {
         conns_[j]->streamId = conns_[j]->session->open({.argv = argvs_[j]});
     }
+    // The first stage has no upstream, so close its stdin immediately -- a stage
+    // that reads stdin (cat, grep) would otherwise block waiting for input.
+    conns_.front()->session->sendData(conns_.front()->streamId, {}, /*endStream=*/true);
 }
 
 void DistributedRunner::forward(std::size_t index, std::string_view data) {
@@ -142,17 +145,18 @@ void DistributedRunner::onStageExit(std::size_t index) {
     if (index + 1 < conns_.size()) {
         Conn& next = *conns_[index + 1];
         next.session->sendData(next.streamId, {}, /*endStream=*/true); // EOF to downstream stdin
-    }
-    ++exitedCount_;
-    if (exitedCount_ != conns_.size()) {
         return;
     }
+    // The final stage finished: its output is complete (EXIT follows all its
+    // DATA). Any upstream still running is now moot -- it is fenced when the
+    // runner tears down -- so we report it as a clean, terminated stage (0).
     Outcome outcome;
     outcome.stageExitCodes.reserve(conns_.size());
     for (const auto& conn : conns_) {
-        outcome.stageExitCodes.push_back(conn->exitCode);
-        if (conn->exitCode != 0) {
-            outcome.exitCode = conn->exitCode; // pipefail: rightmost non-zero
+        const int code = conn->exited ? conn->exitCode : 0;
+        outcome.stageExitCodes.push_back(code);
+        if (code != 0) {
+            outcome.exitCode = code; // pipefail: rightmost non-zero
         }
     }
     finish(std::move(outcome));

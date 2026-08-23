@@ -1050,3 +1050,81 @@ TEST(DistributedRunnerTest, PipefailAcrossRemoteStages) {
     EXPECT_EQ(outcome.stageExitCodes, (std::vector<int>{0, 3}));
     EXPECT_EQ(outcome.exitCode, 3);
 }
+
+namespace {
+struct DistOutcome {
+    std::string output;
+    psx::pipeline::DistributedRunner::Outcome outcome;
+    bool completed = false;
+};
+
+// Runs a remote pipeline (all stages on one fresh node) and returns the result.
+DistOutcome runRemotePipeline(const std::vector<std::vector<std::string>>& commands, int timeoutSeconds) {
+    using psx::ca::CertificateAuthority;
+    using psx::pipeline::DistributedRunner;
+    using psx::pipeline::RemoteStage;
+
+    DistOutcome result;
+    auto ca = CertificateAuthority::create("psx-fleet");
+    EXPECT_TRUE(ca.ok());
+    auto nodeId = ca.value().issue("psx://node/1");
+    auto ctlId = ca.value().issue("psx://controller");
+    EXPECT_TRUE(nodeId.ok() && ctlId.ok());
+    const std::string caCert = ca.value().certificatePem();
+
+    auto listener = Socket::listen("127.0.0.1", 0);
+    EXPECT_TRUE(listener.ok());
+    const std::uint16_t port = listener.value().localPort().value();
+
+    auto reactor = Reactor::create();
+    EXPECT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+
+    NodeServer server(r, std::move(listener.value()),
+                      {.certificatePem = nodeId.value().certificatePem,
+                       .privateKeyPem = nodeId.value().privateKeyPem,
+                       .caPem = caCert},
+                      {});
+    EXPECT_TRUE(server.start().ok());
+
+    auto runner = std::make_unique<DistributedRunner>(r,
+                                                      psx::os::TlsConfig{.certificatePem = ctlId.value().certificatePem,
+                                                                         .privateKeyPem = ctlId.value().privateKeyPem,
+                                                                         .caPem = caCert},
+                                                      [&](std::string_view chunk) { result.output.append(chunk); });
+
+    std::vector<RemoteStage> stages;
+    for (const auto& argv : commands) {
+        stages.push_back({.argv = argv, .host = "127.0.0.1", .port = port, .expectedSan = ""});
+    }
+    EXPECT_TRUE(runner
+                    ->run(stages,
+                          [&](DistributedRunner::Outcome outcome) {
+                              result.outcome = std::move(outcome);
+                              result.completed = true;
+                              r.stop();
+                          })
+                    .ok());
+    r.after(std::chrono::seconds(timeoutSeconds), [&] { r.stop(); });
+    EXPECT_TRUE(r.run().ok());
+    return result;
+}
+} // namespace
+
+// The first stage has no upstream: its stdin must be EOF'd so a reader like `cat`
+// does not block forever.
+TEST(DistributedRunnerTest, FirstStageStdinIsClosedSoAReaderDoesNotHang) {
+    auto result = runRemotePipeline({{"cat"}, {"cat"}}, /*timeoutSeconds=*/5);
+    ASSERT_TRUE(result.completed) << "a stdin-reading first stage hung";
+    EXPECT_TRUE(result.output.empty());
+    EXPECT_EQ(result.outcome.exitCode, 0);
+}
+
+// An infinite upstream must not hang the pipeline: when the downstream exits, the
+// run completes (and the upstream is fenced on teardown).
+TEST(DistributedRunnerTest, InfiniteUpstreamCompletesWhenDownstreamExits) {
+    auto result = runRemotePipeline({{"yes"}, {"head", "-n", "3"}}, /*timeoutSeconds=*/10);
+    ASSERT_TRUE(result.completed) << "an infinite upstream hung the pipeline";
+    EXPECT_EQ(result.output, "y\ny\ny\n");
+    EXPECT_EQ(result.outcome.exitCode, 0);
+}

@@ -66,7 +66,6 @@ private:
     std::vector<std::unique_ptr<Conn>> conns_;
     std::vector<std::vector<std::string>> argvs_;
     std::size_t readyCount_ = 0;
-    std::size_t exitedCount_ = 0;
     bool done_ = false;
 };
 
