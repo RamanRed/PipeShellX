@@ -41,6 +41,21 @@ std::string certToPem(X509* cert) {
     return pem;
 }
 
+std::string reqToPem(X509_REQ* req) {
+    BIO* bio = BIO_new(BIO_s_mem());
+    PEM_write_bio_X509_REQ(bio, req);
+    std::string pem = bioToString(bio);
+    BIO_free(bio);
+    return pem;
+}
+
+X509_REQ* reqFromPem(const std::string& pem) {
+    BIO* bio = BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size()));
+    X509_REQ* req = PEM_read_bio_X509_REQ(bio, nullptr, nullptr, nullptr);
+    BIO_free(bio);
+    return req;
+}
+
 std::string crlToPem(X509_CRL* crl) {
     BIO* bio = BIO_new(BIO_s_mem());
     PEM_write_bio_X509_CRL(bio, crl);
@@ -118,6 +133,41 @@ void setName(X509_NAME* name, const std::string& cn) {
     X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, reinterpret_cast<const unsigned char*>(cn.c_str()), -1, -1, 0);
 }
 
+// Builds a leaf certificate carrying `leafPubKey`, SAN `sanUri`, signed by the
+// CA (caCert/caKey). Returns the cert PEM, or empty on failure. Shared by
+// issue() (fresh key) and signCsr() (a node's key, via its CSR).
+std::string buildAndSignLeaf(X509* caCert, EVP_PKEY* caKey, EVP_PKEY* leafPubKey, const std::string& sanUri) {
+    X509* leaf = X509_new();
+    if (leaf == nullptr) {
+        return {};
+    }
+    std::string pem;
+    do {
+        X509_set_version(leaf, 2); // v3
+        if (!setSerialRandom(leaf)) {
+            break;
+        }
+        X509_gmtime_adj(X509_getm_notBefore(leaf), 0);
+        X509_gmtime_adj(X509_getm_notAfter(leaf), 365L * 24 * 3600); // 1 year
+        X509_set_pubkey(leaf, leafPubKey);
+        setName(X509_get_subject_name(leaf), sanUri);
+        X509_set_issuer_name(leaf, X509_get_subject_name(caCert)); // signed by the CA
+        const std::string san = "URI:" + sanUri;
+        if (!addExtension(leaf, caCert, NID_basic_constraints, "critical,CA:FALSE") ||
+            !addExtension(leaf, caCert, NID_key_usage, "critical,digitalSignature,keyEncipherment") ||
+            !addExtension(leaf, caCert, NID_ext_key_usage, "serverAuth,clientAuth") ||
+            !addExtension(leaf, caCert, NID_subject_alt_name, san.c_str())) {
+            break;
+        }
+        if (X509_sign(leaf, caKey, EVP_sha256()) == 0) {
+            break;
+        }
+        pem = certToPem(leaf);
+    } while (false);
+    X509_free(leaf);
+    return pem;
+}
+
 } // namespace
 
 struct CertificateAuthority::Impl {
@@ -188,38 +238,61 @@ Result<Identity> CertificateAuthority::issue(const std::string& sanUri) const {
     if (leafKey == nullptr) {
         return caError("generate leaf key");
     }
-    X509* leaf = X509_new();
-    if (leaf == nullptr) {
-        EVP_PKEY_free(leafKey);
-        return caError("X509_new");
-    }
-
-    Result<Identity> result = Error{ErrorClass::Other, 0, "issue"};
-    do {
-        X509_set_version(leaf, 2);
-        if (!setSerialRandom(leaf)) {
-            break;
-        }
-        X509_gmtime_adj(X509_getm_notBefore(leaf), 0);
-        X509_gmtime_adj(X509_getm_notAfter(leaf), 365L * 24 * 3600); // 1 year
-        X509_set_pubkey(leaf, leafKey);
-        setName(X509_get_subject_name(leaf), sanUri);
-        X509_set_issuer_name(leaf, X509_get_subject_name(impl_->cert)); // signed by the CA
-        const std::string san = "URI:" + sanUri;
-        if (!addExtension(leaf, impl_->cert, NID_basic_constraints, "critical,CA:FALSE") ||
-            !addExtension(leaf, impl_->cert, NID_key_usage, "critical,digitalSignature,keyEncipherment") ||
-            !addExtension(leaf, impl_->cert, NID_ext_key_usage, "serverAuth,clientAuth") ||
-            !addExtension(leaf, impl_->cert, NID_subject_alt_name, san.c_str())) {
-            break;
-        }
-        if (X509_sign(leaf, impl_->key, EVP_sha256()) == 0) {
-            break;
-        }
-        result = Identity{.privateKeyPem = keyToPem(leafKey), .certificatePem = certToPem(leaf)};
-    } while (false);
-
-    X509_free(leaf);
+    const std::string certPem = buildAndSignLeaf(impl_->cert, impl_->key, leafKey, sanUri);
+    Result<Identity> result =
+        certPem.empty() ? Result<Identity>(Error{ErrorClass::Other, 0, "issue"})
+                        : Result<Identity>(Identity{.privateKeyPem = keyToPem(leafKey), .certificatePem = certPem});
     EVP_PKEY_free(leafKey);
+    return result;
+}
+
+Result<KeyAndCsr> CertificateAuthority::generateCsr(const std::string& sanUri) {
+    EVP_PKEY* key = EVP_RSA_gen(2048);
+    if (key == nullptr) {
+        return caError("generate key");
+    }
+    X509_REQ* req = X509_REQ_new();
+    if (req == nullptr) {
+        EVP_PKEY_free(key);
+        return caError("X509_REQ_new");
+    }
+    Result<KeyAndCsr> result = Error{ErrorClass::Other, 0, "generate CSR"};
+    do {
+        X509_REQ_set_version(req, 0); // v1
+        setName(X509_REQ_get_subject_name(req), sanUri);
+        if (X509_REQ_set_pubkey(req, key) == 0 || X509_REQ_sign(req, key, EVP_sha256()) == 0) {
+            break;
+        }
+        result = KeyAndCsr{.privateKeyPem = keyToPem(key), .csrPem = reqToPem(req)};
+    } while (false);
+    X509_REQ_free(req);
+    EVP_PKEY_free(key);
+    return result;
+}
+
+Result<std::string> CertificateAuthority::signCsr(const std::string& csrPem, const std::string& sanUri) const {
+    X509_REQ* req = reqFromPem(csrPem);
+    if (req == nullptr) {
+        return caError("parse CSR");
+    }
+    EVP_PKEY* pub = X509_REQ_get_pubkey(req);
+    Result<std::string> result = Error{ErrorClass::Other, 0, "sign CSR"};
+    do {
+        if (pub == nullptr) {
+            result = caError("CSR public key");
+            break;
+        }
+        if (X509_REQ_verify(req, pub) != 1) { // proof the requester holds the private key
+            result = caError("CSR signature");
+            break;
+        }
+        const std::string cert = buildAndSignLeaf(impl_->cert, impl_->key, pub, sanUri);
+        if (!cert.empty()) {
+            result = cert;
+        }
+    } while (false);
+    EVP_PKEY_free(pub);
+    X509_REQ_free(req);
     return result;
 }
 

@@ -189,11 +189,52 @@ int caRevoke(const std::vector<std::string>& args, std::ostream& out, std::ostre
     return 0;
 }
 
+// `ca sign`: turn a node's CSR into a certificate. The cert takes the CSR's
+// public key but the operator-supplied SAN (the CSR's requested identity is not
+// trusted). Enrollment step 2; pairs with `node keygen`.
+int caSign(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
+    const auto caDir = flag(args, 1, "--ca");
+    const auto csrPath = flag(args, 1, "--csr");
+    const auto san = flag(args, 1, "--san");
+    const auto outPath = flag(args, 1, "--out");
+    if (!caDir || !csrPath || !san || !outPath) {
+        err << "pipeshellx ca sign: --ca DIR, --csr FILE, --san URI and --out FILE are required\n";
+        return 2;
+    }
+    const std::filesystem::path caBase(*caDir);
+    const auto caKey = slurp(caBase / "ca.key");
+    const auto caCert = slurp(caBase / "ca.crt");
+    if (!caKey || !caCert) {
+        err << "pipeshellx ca sign: cannot read the CA in " << *caDir << "\n";
+        return 2;
+    }
+    auto ca = psx::ca::CertificateAuthority::load(*caKey, *caCert);
+    if (!ca.ok()) {
+        err << "pipeshellx ca sign: " << ca.error().message() << "\n";
+        return 2;
+    }
+    const auto csr = slurp(*csrPath);
+    if (!csr) {
+        err << "pipeshellx ca sign: cannot read --csr " << *csrPath << "\n";
+        return 2;
+    }
+    auto cert = ca.value().signCsr(*csr, *san);
+    if (!cert.ok()) {
+        err << "pipeshellx ca sign: " << cert.error().message() << "\n";
+        return 2;
+    }
+    if (!writeFile(*outPath, cert.value(), /*secret=*/false, err)) {
+        return 2;
+    }
+    out << "signed " << *san << ": " << *outPath << "\n";
+    return 0;
+}
+
 } // namespace
 
 int caSubcommand(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
     if (args.empty()) {
-        err << "Usage: pipeshellx ca <init|issue|revoke> ...\n";
+        err << "Usage: pipeshellx ca <init|issue|revoke|sign> ...\n";
         return 2;
     }
     if (args[0] == "init") {
@@ -205,7 +246,10 @@ int caSubcommand(const std::vector<std::string>& args, std::ostream& out, std::o
     if (args[0] == "revoke") {
         return caRevoke(args, out, err);
     }
-    err << "pipeshellx ca: unknown action '" << args[0] << "' (expected init|issue|revoke)\n";
+    if (args[0] == "sign") {
+        return caSign(args, out, err);
+    }
+    err << "pipeshellx ca: unknown action '" << args[0] << "' (expected init|issue|revoke|sign)\n";
     return 2;
 }
 

@@ -64,7 +64,9 @@ Commands:
   ping   [-i FILE] [-g GROUP|-t TAG|-H h1,h2] [--timeout S]   probe reachability
   hosts  [-i FILE]                                     list inventory hosts
   ca     init --cn NAME --dir DIR | issue --san URI --ca DIR --out PFX  (native transport)
+         | revoke --ca DIR (--cert F|--serial HEX) | sign --ca DIR --csr F --san URI --out F
   node   --cert F --key F --ca F --listen HOST:PORT [--allow SANs] [--crl F]   run the node daemon
+  node   keygen --san URI --out PFX                    generate a node key + CSR (enroll)
   shell  [--verbose] [--log-file PATH]                 interactive REPL (default)
 
   --version   print the version and exit

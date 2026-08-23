@@ -215,3 +215,23 @@ pipeshellx run  --transport native --cert c.crt --key c.key --ca ca.crt --crl ca
 
 With `--crl` set, a peer whose certificate the CRL lists fails the handshake and
 the connection is refused; certificates absent from the CRL are unaffected.
+
+### Enrollment (CSR)
+
+A node need not have its private key minted on the CA machine. It generates the
+key locally and sends only a CSR — the private key never leaves the host:
+
+```bash
+# on the node: key stays here, CSR is safe to send anywhere
+pipeshellx node keygen --san spiffe://psx/node/n1 --out /etc/pipeshellx/tls
+
+# on the CA machine: the operator authorises the SAN (the CSR's request is not
+# trusted) and signs
+pipeshellx ca sign --ca ca --csr tls.csr --san spiffe://psx/node/n1 --out tls.crt
+```
+
+`ca sign` verifies the CSR self-signature (proof the requester holds the key),
+then issues a certificate carrying the CSR's public key and the operator's SAN.
+Copy `tls.crt` and `ca.crt` back to the node; the private key was never
+transmitted and never appeared on a command line. Any channel moves the CSR and
+cert (they are not secret) — SSH, configuration management, or a shared file.

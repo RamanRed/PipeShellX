@@ -1,11 +1,13 @@
 #include "psx/cli/node_command.hpp"
 
+#include "psx/ca/certificate_authority.hpp"
 #include "psx/os/socket.hpp"
 #include "psx/os/tls.hpp"
 #include "psx/runtime/reactor.hpp"
 #include "psx/transport/node_server.hpp"
 
 #include <charconv>
+#include <filesystem>
 #include <fstream>
 #include <optional>
 #include <sstream>
@@ -53,9 +55,49 @@ bool parseListen(const std::string& value, std::string& host, std::uint16_t& por
     return true;
 }
 
+bool writeFile(const std::string& path, const std::string& content, bool secret, std::ostream& err) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out || !(out << content) || (out.close(), !out)) {
+        err << "pipeshellx node keygen: cannot write " << path << "\n";
+        return false;
+    }
+    if (secret) {
+        std::error_code ec;
+        std::filesystem::permissions(path, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+                                     std::filesystem::perm_options::replace, ec);
+    }
+    return true;
+}
+
+// `node keygen`: generate the node's private key + a CSR to send to the CA. The
+// key never leaves the node; only the CSR travels (see `ca sign`).
+int nodeKeygen(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
+    const auto san = flag(args, 1, "--san");
+    const auto outPfx = flag(args, 1, "--out");
+    if (!san || !outPfx) {
+        err << "Usage: pipeshellx node keygen --san URI --out PREFIX\n";
+        return 2;
+    }
+    auto kc = psx::ca::CertificateAuthority::generateCsr(*san);
+    if (!kc.ok()) {
+        err << "pipeshellx node keygen: " << kc.error().message() << "\n";
+        return 2;
+    }
+    if (!writeFile(*outPfx + ".key", kc.value().privateKeyPem, /*secret=*/true, err) ||
+        !writeFile(*outPfx + ".csr", kc.value().csrPem, /*secret=*/false, err)) {
+        return 2;
+    }
+    out << "wrote " << (*outPfx + ".key") << " (keep secret) and " << (*outPfx + ".csr")
+        << " (send to the CA for `ca sign`)\n";
+    return 0;
+}
+
 } // namespace
 
 int nodeSubcommand(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
+    if (!args.empty() && args[0] == "keygen") {
+        return nodeKeygen(args, out, err);
+    }
     const std::size_t from = (!args.empty() && args[0] == "run") ? 1 : 0;
 
     const auto certPath = flag(args, from, "--cert");

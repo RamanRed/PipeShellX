@@ -14,6 +14,13 @@ struct Identity {
     std::string certificatePem;
 };
 
+// A node's freshly generated private key and the CSR to send to the CA. The key
+// never leaves the node; only the (non-secret) CSR travels for signing.
+struct KeyAndCsr {
+    std::string privateKeyPem;
+    std::string csrPem;
+};
+
 // An offline fleet Certificate Authority: a self-signed root that issues leaf
 // identities (node/controller certs) carrying a SAN-URI. The transport trusts
 // the CA certificate and authorises peers by SAN URI (see NativeTransport). The
@@ -34,6 +41,16 @@ public:
     // Issue a leaf identity (fresh key + a certificate signed by this CA) whose
     // sole SAN URI is `sanUri` — the identity the peer authorises against.
     Result<Identity> issue(const std::string& sanUri) const;
+
+    // Node-side enrollment step 1 (no CA involved): generate a private key and a
+    // matching CSR requesting `sanUri`. The key stays on the node.
+    static Result<KeyAndCsr> generateCsr(const std::string& sanUri);
+
+    // CA-side enrollment step 2: sign a node's CSR into a certificate. The cert
+    // takes the CSR's public key but the *operator-supplied* `sanUri` (the CSR's
+    // requested identity is not trusted). The CSR self-signature is verified
+    // first (proof the requester holds the private key). Returns the cert PEM.
+    Result<std::string> signCsr(const std::string& csrPem, const std::string& sanUri) const;
 
     // The uppercase-hex serial number of a leaf certificate (the value a CRL
     // revokes it by). Static: reads the certificate, no CA state needed.

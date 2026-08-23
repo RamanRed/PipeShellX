@@ -162,3 +162,58 @@ TEST(CertificateAuthorityTest, NonRevokedLeafStillPassesWithTheCrlEnforced) {
     ASSERT_TRUE(server.ok() && client.ok());
     EXPECT_TRUE(handshakes(client.value(), server.value())) << "a cert absent from the CRL must still verify";
 }
+
+TEST(CertificateAuthorityTest, SignsACsrIntoAUsableIdentity) {
+    auto ca = CertificateAuthority::create("psx-fleet");
+    ASSERT_TRUE(ca.ok());
+    auto kc = CertificateAuthority::generateCsr("psx://node/enrolled");
+    ASSERT_TRUE(kc.ok()) << (kc.ok() ? "" : kc.error().message());
+    auto cert = ca.value().signCsr(kc.value().csrPem, "psx://node/enrolled");
+    ASSERT_TRUE(cert.ok()) << (cert.ok() ? "" : cert.error().message());
+
+    // The node's own (never-transmitted) key + the CA-signed cert authenticate.
+    const std::string caCert = ca.value().certificatePem();
+    auto server = Tls::create(
+        {.certificatePem = cert.value(), .privateKeyPem = kc.value().privateKeyPem, .caPem = caCert, .isServer = true});
+    auto client = Tls::create({.certificatePem = cert.value(),
+                               .privateKeyPem = kc.value().privateKeyPem,
+                               .caPem = caCert,
+                               .isServer = false});
+    ASSERT_TRUE(server.ok() && client.ok());
+    EXPECT_TRUE(handshakes(client.value(), server.value()));
+    EXPECT_EQ(client.value().peerSanUri(), "psx://node/enrolled");
+}
+
+TEST(CertificateAuthorityTest, SignCsrUsesTheOperatorSanNotTheRequestedOne) {
+    auto ca = CertificateAuthority::create("psx-fleet");
+    ASSERT_TRUE(ca.ok());
+    // The CSR requests one identity; the operator authorises a different one.
+    auto kc = CertificateAuthority::generateCsr("psx://node/attacker-requested");
+    ASSERT_TRUE(kc.ok());
+    auto cert = ca.value().signCsr(kc.value().csrPem, "psx://node/authorized");
+    ASSERT_TRUE(cert.ok());
+
+    const std::string caCert = ca.value().certificatePem();
+    auto server = Tls::create(
+        {.certificatePem = cert.value(), .privateKeyPem = kc.value().privateKeyPem, .caPem = caCert, .isServer = true});
+    auto client = Tls::create({.certificatePem = cert.value(),
+                               .privateKeyPem = kc.value().privateKeyPem,
+                               .caPem = caCert,
+                               .isServer = false});
+    ASSERT_TRUE(server.ok() && client.ok());
+    EXPECT_TRUE(handshakes(client.value(), server.value()));
+    EXPECT_EQ(client.value().peerSanUri(), "psx://node/authorized") << "the CA must stamp its own SAN, not the CSR's";
+}
+
+TEST(CertificateAuthorityTest, SignCsrRejectsATamperedCsr) {
+    auto ca = CertificateAuthority::create("psx-fleet");
+    ASSERT_TRUE(ca.ok());
+    auto kc = CertificateAuthority::generateCsr("psx://node/x");
+    ASSERT_TRUE(kc.ok());
+
+    // Corrupt a byte inside the base64 body: parsing or signature verification fails.
+    std::string csr = kc.value().csrPem;
+    const std::size_t mid = csr.size() / 2;
+    csr[mid] = (csr[mid] == 'A') ? 'B' : 'A';
+    EXPECT_FALSE(ca.value().signCsr(csr, "psx://node/x").ok()) << "a tampered CSR must be refused";
+}
