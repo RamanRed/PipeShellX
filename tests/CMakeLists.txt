@@ -43,6 +43,7 @@ add_executable(pipeshellx_tests
     unit/stream/test_stream.cpp
     unit/sink/test_sinks.cpp
     unit/inventory/test_inventory.cpp
+    unit/pipeline/test_planner.cpp
     unit/policy/test_policy.cpp
     unit/cli/test_run_command.cpp
     unit/cli/test_ping_command.cpp

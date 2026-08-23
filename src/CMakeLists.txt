@@ -13,6 +13,9 @@ else()
     set(PIPESHELLX_INVENTORY_SOURCES
         inventory/inventory.cpp
     )
+    set(PIPESHELLX_PIPELINE_SOURCES
+        pipeline/planner.cpp
+    )
     set(PIPESHELLX_POLICY_SOURCES
         policy/policy.cpp
     )
@@ -68,6 +71,7 @@ add_library(pipeshellx_lib
     ${PIPESHELLX_STREAM_SOURCES}
     ${PIPESHELLX_SINK_SOURCES}
     ${PIPESHELLX_INVENTORY_SOURCES}
+    ${PIPESHELLX_PIPELINE_SOURCES}
     ${PIPESHELLX_POLICY_SOURCES}
     runtime/reactor.cpp
     transport/frame_codec.cpp
