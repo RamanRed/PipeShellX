@@ -1,0 +1,174 @@
+#include "psx/pipeline/local_runner.hpp"
+
+#include "psx/os/io.hpp"
+#include "psx/os/pipe.hpp"
+
+#include <array>
+#include <span>
+#include <utility>
+
+namespace psx::pipeline {
+
+using psx::os::ExitStatus;
+using psx::os::Handle;
+using psx::os::Interest;
+using psx::os::Pipe;
+using psx::os::Process;
+using psx::os::Readiness;
+using psx::os::SpawnSpec;
+
+namespace {
+// Conventional shell exit code: the exit code for a normal exit, else 128+signal.
+int toExitCode(const ExitStatus& status) {
+    return status.kind == ExitStatus::Kind::Exited ? status.code : 128 + status.code;
+}
+} // namespace
+
+LocalRunner::LocalRunner(psx::runtime::Reactor& reactor, OnOutput onOutput)
+    : reactor_(reactor), onOutput_(std::move(onOutput)) {}
+
+LocalRunner::~LocalRunner() {
+    if (finalToken_ != 0) {
+        (void)reactor_.unwatch(finalToken_);
+    }
+    for (Child& child : children_) {
+        if (!child.exited) {
+            (void)reactor_.unwatchChild(child.process.id());
+        }
+    }
+}
+
+psx::Result<void> LocalRunner::run(const std::vector<Stage>& stages, std::function<void(Outcome)> onComplete) {
+    if (stages.empty()) {
+        return psx::Error{psx::ErrorClass::InvalidArgument, 0, "empty pipeline"};
+    }
+    onComplete_ = std::move(onComplete);
+    const std::size_t n = stages.size();
+
+    // A pipe between each consecutive pair of stages, plus the final stdout pipe.
+    std::vector<Pipe> links;
+    links.reserve(n - 1);
+    for (std::size_t i = 0; i + 1 < n; ++i) {
+        auto pipe = Pipe::create();
+        if (!pipe.ok()) {
+            return pipe.error();
+        }
+        links.push_back(std::move(pipe.value()));
+    }
+    auto finalPipe = Pipe::create();
+    if (!finalPipe.ok()) {
+        return finalPipe.error();
+    }
+
+    // Spawn each stage with its stdio wired to the neighbouring pipes.
+    children_.reserve(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        SpawnSpec spec;
+        spec.program = stages[i].argv.front();
+        spec.argv = stages[i].argv;
+        spec.in = (i == 0) ? SpawnSpec::Stdio::null() : SpawnSpec::Stdio::from(links[i - 1].reader);
+        spec.out =
+            (i + 1 == n) ? SpawnSpec::Stdio::from(finalPipe.value().writer) : SpawnSpec::Stdio::from(links[i].writer);
+        // spec.err stays Inherit: stage diagnostics go to the terminal.
+        auto process = Process::spawn(spec);
+        if (!process.ok()) {
+            return process.error(); // ~LocalRunner kills any stages already spawned
+        }
+        children_.push_back(Child{.process = std::move(process.value())});
+    }
+
+    // Keep only the final read end; every other pipe end closes as `links` and
+    // `finalPipe`'s writer go out of scope, so EOF propagates down the chain.
+    finalReader_ = std::move(finalPipe.value().reader);
+
+    if (auto watched = reactor_.watch(finalReader_, Interest::Readable, [this](Readiness) { onFinalReadable(); });
+        watched.ok()) {
+        finalToken_ = watched.value();
+    } else {
+        return watched.error();
+    }
+
+    for (std::size_t i = 0; i < n; ++i) {
+        const psx::os::ProcessId pid = children_[i].process.id();
+        if (auto watched = reactor_.watchChild(pid, [this, i](psx::os::ProcessId) { onChildExit(i); }); !watched.ok()) {
+            // Already exited before we watched it (a fast stage): reap it now.
+            if (watched.error().cls == psx::ErrorClass::NoSuchProcess) {
+                onChildExit(i);
+            } else {
+                return watched.error();
+            }
+        }
+    }
+    return {};
+}
+
+void LocalRunner::onFinalReadable() {
+    std::array<char, 16 * 1024> buffer{};
+    while (true) { // edge-triggered: drain to WouldBlock or EOF
+        auto got = psx::os::read(finalReader_, std::span<char>(buffer.data(), buffer.size()));
+        if (got.ok()) {
+            if (got.value() == 0) { // EOF: the last stage closed its stdout
+                finalClosed_ = true;
+                if (finalToken_ != 0) {
+                    (void)reactor_.unwatch(finalToken_);
+                    finalToken_ = 0;
+                }
+                finishIfDone();
+                return;
+            }
+            if (onOutput_) {
+                onOutput_(std::string_view(buffer.data(), got.value()));
+            }
+            continue;
+        }
+        if (got.error().cls == psx::ErrorClass::WouldBlock) {
+            return; // nothing more for now
+        }
+        // A read error also ends the stream.
+        finalClosed_ = true;
+        if (finalToken_ != 0) {
+            (void)reactor_.unwatch(finalToken_);
+            finalToken_ = 0;
+        }
+        finishIfDone();
+        return;
+    }
+}
+
+void LocalRunner::onChildExit(std::size_t index) {
+    Child& child = children_[index];
+    if (child.exited) {
+        return;
+    }
+    ExitStatus status{ExitStatus::Kind::Exited, 0};
+    if (auto reaped = child.process.tryWait(); reaped.ok() && reaped.value().has_value()) {
+        status = *reaped.value();
+    } else if (auto blocking = child.process.wait(); blocking.ok()) {
+        status = blocking.value();
+    }
+    child.exitCode = toExitCode(status);
+    child.exited = true;
+    ++exitedCount_;
+    finishIfDone();
+}
+
+void LocalRunner::finishIfDone() {
+    if (done_ || !finalClosed_ || exitedCount_ != children_.size()) {
+        return;
+    }
+    done_ = true;
+    Outcome outcome;
+    outcome.stageExitCodes.reserve(children_.size());
+    for (const Child& child : children_) {
+        outcome.stageExitCodes.push_back(child.exitCode);
+        if (child.exitCode != 0) {
+            outcome.exitCode = child.exitCode; // pipefail: rightmost non-zero wins
+        }
+    }
+    if (onComplete_) {
+        auto callback = std::move(onComplete_);
+        callback(std::move(outcome)); // may destroy `this`; touch nothing after
+    }
+}
+
+} // namespace psx::pipeline
