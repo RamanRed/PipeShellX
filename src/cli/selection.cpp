@@ -14,6 +14,8 @@ ClientEntry toClientEntry(const psx::inventory::Host& host, const std::string& k
     entry.host = host.host;
     entry.port = host.port;
     entry.identityFile = host.identity;
+    entry.expectedSan = host.san;
+    entry.nativePort = host.nativePort;
     entry.knownHostsFile = knownHosts;
     entry.raw = entry.serialize();
     return entry;

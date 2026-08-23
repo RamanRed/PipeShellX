@@ -128,3 +128,25 @@ TEST(ClientManagerTest, AddClientAttachesKnownHostsAndReportsOffline) {
     ASSERT_TRUE(std::getline(persisted, line));
     EXPECT_EQ(line, specification);
 }
+
+TEST(ClientConfigTest, ParsesNativeSanAndPort) {
+    const auto entry = ClientConfig::parseEntry("ssh://admin@node-1?san=spiffe://psx/node/n1&native_port=7433");
+    EXPECT_EQ(entry.host, "node-1");
+    EXPECT_EQ(entry.expectedSan, "spiffe://psx/node/n1");
+    EXPECT_EQ(entry.nativePort, 7433);
+}
+
+TEST(ClientConfigTest, SerializesNativeSanAndPortRoundTrip) {
+    const auto entry = ClientConfig::parseEntry("ssh://admin@node-1?san=spiffe://psx/node/n1&native_port=9001");
+    const auto again = ClientConfig::parseEntry(entry.serialize());
+    EXPECT_EQ(again.expectedSan, "spiffe://psx/node/n1");
+    EXPECT_EQ(again.nativePort, 9001);
+}
+
+TEST(ClientConfigTest, RejectsInvalidNativeFields) {
+    EXPECT_THROW(static_cast<void>(ClientConfig::parseEntry("ssh://a@h?san=bad san")), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(ClientConfig::parseEntry("ssh://a@h?san=")), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(ClientConfig::parseEntry("ssh://a@h?native_port=0")), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(ClientConfig::parseEntry("ssh://a@h?native_port=99999")), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(ClientConfig::parseEntry("ssh://a@h?native_port=abc")), std::runtime_error);
+}

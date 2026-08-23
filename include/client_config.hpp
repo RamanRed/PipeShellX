@@ -14,6 +14,9 @@ struct ClientEntry {
     // Absolute path of the per-inventory known_hosts file (derived from the
     // inventory path by ClientConfig::knownHostsPathFor; never serialized).
     std::string knownHostsFile;
+    // Native backplane (psx/1) per-host options; ignored by the SSH transport.
+    std::string expectedSan;     // pin the node's SAN-URI identity (empty = trust the CA only)
+    std::uint16_t nativePort{0}; // node port (0 = use the run's --native-port)
 
     std::string clientId() const;
     std::string sshTarget() const;

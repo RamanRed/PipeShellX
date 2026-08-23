@@ -20,6 +20,8 @@ struct Host {
     std::string host; // the address to connect to (defaults to name)
     std::uint16_t port = 22;
     std::string identity;            // identity file, if any
+    std::string san;                 // native transport: pinned SAN-URI identity (empty = trust the CA only)
+    std::uint16_t nativePort = 0;    // native transport: node port (0 = use the run's --native-port)
     std::vector<std::string> groups; // groups this host belongs to, in file order
     std::vector<std::string> tags;   // tags, in first-seen order
 };

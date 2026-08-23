@@ -37,6 +37,13 @@ bool isValidPathChar(char c) {
     return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '/' || c == '_' || c == '-' || c == '.' || c == '~';
 }
 
+// SAN-URI identities are compared verbatim to the peer certificate, so allow the
+// URI-safe set (scheme + path) and reject anything that could break the query.
+bool isValidSanChar(char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == ':' || c == '/' || c == '.' || c == '-' ||
+           c == '_' || c == '~';
+}
+
 std::pair<std::string, std::string> splitOnce(const std::string& value, char separator) {
     const std::size_t position = value.find(separator);
     if (position == std::string::npos) {
@@ -121,6 +128,31 @@ ClientEntry parseUrlEntry(const std::string& trimmed) {
                 continue;
             }
 
+            if (key == "san") {
+                if (value.empty()) {
+                    throw std::runtime_error("san is empty");
+                }
+                if (!std::all_of(value.begin(), value.end(), isValidSanChar)) {
+                    throw std::runtime_error("san contains invalid characters");
+                }
+                entry.expectedSan = value;
+                continue;
+            }
+
+            if (key == "native_port") {
+                try {
+                    std::size_t consumed = 0;
+                    const unsigned long nativePort = std::stoul(value, &consumed);
+                    if (consumed != value.size() || nativePort == 0 || nativePort > 65535) {
+                        throw std::runtime_error("out of range");
+                    }
+                    entry.nativePort = static_cast<std::uint16_t>(nativePort);
+                } catch (const std::exception&) {
+                    throw std::runtime_error("invalid native_port");
+                }
+                continue;
+            }
+
             if (key == "password") {
                 throw std::runtime_error("passwords are not allowed in client configuration; use interactive prompt");
             }
@@ -162,7 +194,7 @@ std::string ClientEntry::sshTarget() const {
 }
 
 std::string ClientEntry::serialize() const {
-    if (port == 22 && identityFile.empty()) {
+    if (port == 22 && identityFile.empty() && expectedSan.empty() && nativePort == 0) {
         return user + "@" + host;
     }
 
@@ -174,6 +206,12 @@ std::string ClientEntry::serialize() const {
     std::vector<std::string> queryParameters;
     if (!identityFile.empty()) {
         queryParameters.push_back("identity=" + identityFile);
+    }
+    if (!expectedSan.empty()) {
+        queryParameters.push_back("san=" + expectedSan);
+    }
+    if (nativePort != 0) {
+        queryParameters.push_back("native_port=" + std::to_string(nativePort));
     }
     if (!queryParameters.empty()) {
         serialized += "?";

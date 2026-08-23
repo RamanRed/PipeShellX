@@ -188,6 +188,10 @@ Inventory Inventory::parse(std::string_view iniText, const std::string& sourcePa
                 entry.port = parsePort(value, lineNumber);
             } else if (key == "identity") {
                 entry.identity = std::string(value);
+            } else if (key == "san") {
+                entry.san = std::string(value);
+            } else if (key == "native_port") {
+                entry.nativePort = parsePort(value, lineNumber);
             } else if (key == "tag") {
                 std::size_t start = 0;
                 while (start <= value.size()) {

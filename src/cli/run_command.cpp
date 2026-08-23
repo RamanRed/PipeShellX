@@ -301,7 +301,10 @@ int runNative(const RunInvocation& invocation,
     std::vector<psx::transport::NativeController::Target> targets;
     targets.reserve(clients.size());
     for (const auto& client : clients) {
-        targets.push_back({.host = client.host, .port = static_cast<std::uint16_t>(invocation.nativePort)});
+        targets.push_back(
+            {.host = client.host,
+             .port = static_cast<std::uint16_t>(client.nativePort != 0 ? client.nativePort : invocation.nativePort),
+             .expectedSan = client.expectedSan});
         if (sink != nullptr) {
             sink->stageStarted(client.host);
         }

@@ -184,3 +184,17 @@ ssh://bob@w2.example.com:2222
 TEST(InventoryTest, DefaultsSectionRejectsUnknownKeys) {
     EXPECT_THROW(static_cast<void>(Inventory::parse("[defaults]\nbogus = x\n")), std::runtime_error);
 }
+
+TEST(InventoryTest, ParsesNativeSanAndPortPerHost) {
+    const auto inv = Inventory::parse(R"(
+[fleet]
+node-1 san=spiffe://psx/node/n1 native_port=7433
+node-2
+)");
+    const Host& pinned = find(inv, "node-1");
+    EXPECT_EQ(pinned.san, "spiffe://psx/node/n1");
+    EXPECT_EQ(pinned.nativePort, 7433);
+    const Host& plain = find(inv, "node-2");
+    EXPECT_TRUE(plain.san.empty());
+    EXPECT_EQ(plain.nativePort, 0); // falls back to the run's --native-port
+}

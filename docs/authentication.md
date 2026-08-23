@@ -166,3 +166,32 @@ Remaining limitations:
   `<inventory>.known_hosts` is pre-seeded
 - in-memory passwords live in ordinary `std::string` storage; `SecureString`
   (`mlock`, zeroisation) arrives in Phase 6
+
+## Native backplane identity (`--transport native`)
+
+The psx/1 backplane authenticates with mutual TLS 1.3, not SSH host keys. Each
+peer presents an X.509 certificate issued by the fleet CA (`pipeshellx ca`); the
+identity is the certificate's SAN URI (e.g. `spiffe://psx/node/n1`). Both ends
+require and verify a peer certificate against the CA (`SSL_VERIFY_PEER |
+SSL_VERIFY_FAIL_IF_NO_PEER_CERT`), so an unsigned or self-signed peer never
+completes the handshake.
+
+CA trust alone proves a peer is *some* node the CA vouched for, not that it is
+*this* host. Pin the expected identity per host in the inventory so a
+mis-issued or swapped certificate is rejected:
+
+```ini
+[fleet]
+node-1 san=spiffe://psx/node/n1 native_port=7433
+node-2 san=spiffe://psx/node/n2
+```
+
+- `san=<uri>` — the controller admits the connection only if the node's
+  certificate SAN URI matches exactly; a mismatch fails with
+  `peer SAN-URI not authorized`. Omit it to trust any CA-signed peer.
+- `native_port=<port>` — the node's backplane port for this host; falls back to
+  the run's `--native-port` (default 7433) when unset.
+
+On the node side, `pipeshellx node --allow <SANs>` restricts which controller
+identities may connect; with no `--allow` list the node admits any CA-signed
+peer (and logs a warning).
