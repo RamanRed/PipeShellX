@@ -59,11 +59,12 @@ DistributedRunner::DistributedRunner(psx::runtime::Reactor& reactor,
 DistributedRunner::~DistributedRunner() = default;
 
 psx::Result<void> DistributedRunner::run(const std::vector<RemoteStage>& stages,
-                                         std::function<void(Outcome)> onComplete) {
+                                         std::function<void(Outcome)> onComplete, bool externalStdin) {
     if (stages.empty()) {
         return psx::Error{psx::ErrorClass::InvalidArgument, 0, "empty pipeline"};
     }
     onComplete_ = std::move(onComplete);
+    externalStdin_ = externalStdin;
     conns_.reserve(stages.size());
     argvs_.reserve(stages.size());
     for (const RemoteStage& stage : stages) {
@@ -121,11 +122,45 @@ void DistributedRunner::onConnReady(std::size_t index) {
     for (std::size_t j = 0; j < conns_.size(); ++j) {
         conns_[j]->streamId = conns_[j]->session->open({.argv = argvs_[j]});
     }
-    // The first stage has no upstream, so close its stdin immediately -- a stage
-    // that reads stdin (cat, grep) would otherwise block waiting for input.
-    conns_.front()->session->sendData(conns_.front()->streamId, {}, /*endStream=*/true);
+    streamsOpen_ = true;
+    Conn& first = *conns_.front();
+    if (!externalStdin_) {
+        // No upstream, so close the first stage's stdin immediately -- a stage
+        // that reads stdin (cat, grep) would otherwise block waiting for input.
+        first.session->sendData(first.streamId, {}, /*endStream=*/true);
+    } else {
+        // Flush stdin fed before the streams were open.
+        if (!stdinBuffer_.empty()) {
+            first.session->sendData(first.streamId, stdinBuffer_, /*endStream=*/false);
+            stdinBuffer_.clear();
+        }
+        if (stdinEndPending_) {
+            first.session->sendData(first.streamId, {}, /*endStream=*/true);
+        }
+    }
 }
 
+void DistributedRunner::writeStdin(std::string_view bytes) {
+    if (!externalStdin_ || done_) {
+        return;
+    }
+    if (streamsOpen_) {
+        Conn& first = *conns_.front();
+        first.session->sendData(first.streamId, bytes, /*endStream=*/false);
+    } else {
+        stdinBuffer_.append(bytes); // buffered until the streams open
+    }
+}
+void DistributedRunner::closeStdin() {
+    if (!externalStdin_ || done_) {
+        return;
+    }
+    stdinEndPending_ = true;
+    if (streamsOpen_) {
+        Conn& first = *conns_.front();
+        first.session->sendData(first.streamId, {}, /*endStream=*/true);
+    }
+}
 void DistributedRunner::forward(std::size_t index, std::string_view data) {
     if (done_) {
         return;

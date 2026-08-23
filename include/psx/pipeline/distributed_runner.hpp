@@ -48,7 +48,13 @@ public:
     // Connect the stages and run. Returns an error only for a synchronous setup
     // failure; a stage's non-zero exit or a per-connection failure completes via
     // onComplete. `stages` must be non-empty.
-    psx::Result<void> run(const std::vector<RemoteStage>& stages, std::function<void(Outcome)> onComplete);
+    psx::Result<void>
+    run(const std::vector<RemoteStage>& stages, std::function<void(Outcome)> onComplete, bool externalStdin = false);
+
+    // Feed the first remote stage's stdin (only when run(..., externalStdin=true)).
+    // Buffered until the streams open; closeStdin() sends EOF.
+    void writeStdin(std::string_view bytes);
+    void closeStdin();
 
 private:
     struct Conn;
@@ -66,6 +72,10 @@ private:
     std::vector<std::unique_ptr<Conn>> conns_;
     std::vector<std::vector<std::string>> argvs_;
     std::size_t readyCount_ = 0;
+    bool externalStdin_ = false;
+    bool streamsOpen_ = false;
+    std::string stdinBuffer_;      // stdin buffered before the streams open
+    bool stdinEndPending_ = false; // closeStdin() before the streams open
     bool done_ = false;
 };
 

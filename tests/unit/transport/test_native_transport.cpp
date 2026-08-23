@@ -1059,7 +1059,10 @@ struct DistOutcome {
 };
 
 // Runs a remote pipeline (all stages on one fresh node) and returns the result.
-DistOutcome runRemotePipeline(const std::vector<std::vector<std::string>>& commands, int timeoutSeconds) {
+DistOutcome runRemotePipeline(const std::vector<std::vector<std::string>>& commands,
+                              int timeoutSeconds,
+                              bool externalStdin = false,
+                              const std::string& stdinInput = "") {
     using psx::ca::CertificateAuthority;
     using psx::pipeline::DistributedRunner;
     using psx::pipeline::RemoteStage;
@@ -1098,13 +1101,19 @@ DistOutcome runRemotePipeline(const std::vector<std::vector<std::string>>& comma
         stages.push_back({.argv = argv, .host = "127.0.0.1", .port = port, .expectedSan = ""});
     }
     EXPECT_TRUE(runner
-                    ->run(stages,
-                          [&](DistributedRunner::Outcome outcome) {
-                              result.outcome = std::move(outcome);
-                              result.completed = true;
-                              r.stop();
-                          })
+                    ->run(
+                        stages,
+                        [&](DistributedRunner::Outcome outcome) {
+                            result.outcome = std::move(outcome);
+                            result.completed = true;
+                            r.stop();
+                        },
+                        externalStdin)
                     .ok());
+    if (externalStdin) {
+        runner->writeStdin(stdinInput); // buffered until the streams open
+        runner->closeStdin();
+    }
     r.after(std::chrono::seconds(timeoutSeconds), [&] { r.stop(); });
     EXPECT_TRUE(r.run().ok());
     return result;
@@ -1126,5 +1135,19 @@ TEST(DistributedRunnerTest, InfiniteUpstreamCompletesWhenDownstreamExits) {
     auto result = runRemotePipeline({{"yes"}, {"head", "-n", "3"}}, /*timeoutSeconds=*/10);
     ASSERT_TRUE(result.completed) << "an infinite upstream hung the pipeline";
     EXPECT_EQ(result.output, "y\ny\ny\n");
+    EXPECT_EQ(result.outcome.exitCode, 0);
+}
+
+TEST(DistributedRunnerTest, FeedsExternalStdinToTheFirstRemoteStage) {
+    auto result = runRemotePipeline({{"cat"}}, /*timeoutSeconds=*/5, /*externalStdin=*/true, "remote stdin here\n");
+    ASSERT_TRUE(result.completed);
+    EXPECT_EQ(result.output, "remote stdin here\n");
+    EXPECT_EQ(result.outcome.exitCode, 0);
+}
+
+TEST(DistributedRunnerTest, ExternalStdinFlowsThroughARemoteChain) {
+    auto result = runRemotePipeline({{"cat"}, {"tr", "a-z", "A-Z"}}, 5, /*externalStdin=*/true, "mixed CASE text\n");
+    ASSERT_TRUE(result.completed);
+    EXPECT_EQ(result.output, "MIXED CASE TEXT\n");
     EXPECT_EQ(result.outcome.exitCode, 0);
 }
