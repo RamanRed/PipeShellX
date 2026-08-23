@@ -751,3 +751,61 @@ TEST(NativeTransportTest, CrlRejectsARevokedPeerOverTheReactor) {
 
     EXPECT_FALSE(nodeReady) << "the node accepted a peer whose certificate is revoked";
 }
+
+// Concurrent fan-out over the real transport: one reactor, one NodeServer, and a
+// controller opening many mTLS connections at once, each running a stage. A
+// scaled-down stand-in for the 1000-node target (the full count is a CI /
+// dedicated-host concern — 2*N RSA handshakes); this proves the reactor + TLS +
+// NodeServer path handles a large concurrent fan-out correctly.
+TEST(NodeServerTest, HandlesManyConcurrentControllerConnections) {
+    using psx::ca::CertificateAuthority;
+    auto ca = CertificateAuthority::create("psx-fleet");
+    ASSERT_TRUE(ca.ok());
+    auto nodeId = ca.value().issue("psx://node/1");
+    auto ctlId = ca.value().issue("psx://controller");
+    ASSERT_TRUE(nodeId.ok() && ctlId.ok());
+    const std::string caCert = ca.value().certificatePem();
+
+    auto listener = Socket::listen("127.0.0.1", 0);
+    ASSERT_TRUE(listener.ok());
+    const std::uint16_t port = listener.value().localPort().value();
+
+    auto reactor = Reactor::create();
+    ASSERT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+
+    NodeServer server(r, std::move(listener.value()),
+                      {.certificatePem = nodeId.value().certificatePem,
+                       .privateKeyPem = nodeId.value().privateKeyPem,
+                       .caPem = caCert},
+                      [](std::string_view san) { return san == "psx://controller"; });
+    ASSERT_TRUE(server.start().ok());
+
+    NativeController controller(r, {.certificatePem = ctlId.value().certificatePem,
+                                    .privateKeyPem = ctlId.value().privateKeyPem,
+                                    .caPem = caCert});
+    constexpr int kNodes = 100;
+    std::vector<NativeController::Target> targets(
+        kNodes, NativeController::Target{.host = "127.0.0.1", .port = port, .expectedSan = "psx://node/1"});
+
+    std::vector<NativeController::HostResult> results;
+    ASSERT_TRUE(controller
+                    .start(targets, {"/bin/echo", "hi"},
+                           [&](std::vector<NativeController::HostResult> res) {
+                               results = std::move(res);
+                               r.stop();
+                           })
+                    .ok());
+    r.after(std::chrono::seconds(30), [&] { r.stop(); });
+    ASSERT_TRUE(r.run().ok());
+
+    ASSERT_EQ(results.size(), static_cast<std::size_t>(kNodes));
+    int succeeded = 0;
+    for (const auto& res : results) {
+        if (res.ok && res.exitCode == 0 && res.output == "hi\n") {
+            ++succeeded;
+        }
+    }
+    EXPECT_EQ(succeeded, kNodes) << "every concurrent connection should run its stage to a clean exit";
+    EXPECT_EQ(server.metrics().acceptedTotal, static_cast<std::uint64_t>(kNodes));
+}
