@@ -7,11 +7,7 @@
 #include <string>
 #include <vector>
 
-enum class ClientStatus {
-    UNKNOWN,
-    ONLINE,
-    OFFLINE
-};
+enum class ClientStatus { UNKNOWN, ONLINE, OFFLINE };
 
 struct Client {
     int id;

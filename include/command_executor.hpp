@@ -1,8 +1,8 @@
 #pragma once
 
+#include <functional>
 #include <string>
 #include <vector>
-#include <functional>
 
 #include "client_config.hpp"
 #include "logger.hpp"
