@@ -55,7 +55,8 @@ endif()
 set(PIPESHELLX_TLS_SOURCES "")
 if(PIPESHELLX_NATIVE_TRANSPORT AND OpenSSL_FOUND)
     set(PIPESHELLX_TLS_SOURCES os/tls.cpp transport/tls_stream.cpp transport/native_transport.cpp
-        ca/certificate_authority.cpp)
+        ca/certificate_authority.cpp
+        transport/node_server.cpp)
     message(STATUS "PipeShellX: native transport enabled (OpenSSL ${OPENSSL_VERSION})")
 endif()
 

@@ -1,5 +1,7 @@
 #include "psx/transport/native_transport.hpp"
 
+#include "psx/ca/certificate_authority.hpp"
+#include "psx/transport/node_server.hpp"
 #include "psx/transport/node_stage_runner.hpp"
 
 #include "psx/os/socket.hpp"
@@ -338,4 +340,109 @@ TEST(NativeTransportTest, AcceptsAnAuthorizedPeer) {
         runAuthz("psx://controller", [](std::string_view san) { return san == "psx://controller"; });
     EXPECT_TRUE(outcome.nodeReady);
     EXPECT_FALSE(outcome.nodeErrored);
+}
+
+TEST(NodeServerTest, AcceptsAControllerAndRunsAStageWithCaIssuedCerts) {
+    using psx::ca::CertificateAuthority;
+
+    auto ca = CertificateAuthority::create("psx-fleet");
+    ASSERT_TRUE(ca.ok());
+    auto nodeId = ca.value().issue("psx://node/1");
+    auto ctlId = ca.value().issue("psx://controller");
+    ASSERT_TRUE(nodeId.ok() && ctlId.ok());
+    const std::string caCert = ca.value().certificatePem();
+
+    auto listener = Socket::listen("127.0.0.1", 0);
+    ASSERT_TRUE(listener.ok());
+    const std::uint16_t port = listener.value().localPort().value();
+
+    auto reactor = Reactor::create();
+    ASSERT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+
+    // The node daemon: trusts the CA, only admits the controller identity.
+    psx::transport::NodeServer server(r, std::move(listener.value()),
+                                      {.certificatePem = nodeId.value().certificatePem,
+                                       .privateKeyPem = nodeId.value().privateKeyPem,
+                                       .caPem = caCert},
+                                      [](std::string_view san) { return san == "psx://controller"; });
+    ASSERT_TRUE(server.start().ok());
+
+    // A controller connects and runs a stage.
+    auto clientSock = Socket::connect("127.0.0.1", port);
+    ASSERT_TRUE(clientSock.ok());
+    auto ctlTls = Tls::create({.certificatePem = ctlId.value().certificatePem,
+                               .privateKeyPem = ctlId.value().privateKeyPem,
+                               .caPem = caCert,
+                               .isServer = false});
+    ASSERT_TRUE(ctlTls.ok());
+
+    ControllerSink sink;
+    sink.reactor = &r;
+    bool errored = false;
+    NativeTransport* ctlPtr = nullptr;
+    NativeTransport ctl(r, std::move(clientSock.value()), std::move(ctlTls.value()), Role::Controller, sink,
+                        {.onReady = [&] { ctlPtr->session().open({.argv = {"/bin/echo", "via-node-server"}}); },
+                         .onError =
+                             [&](psx::Error) {
+                                 errored = true;
+                                 r.stop();
+                             }});
+    ctlPtr = &ctl;
+    ASSERT_TRUE(ctl.start().ok());
+
+    r.after(std::chrono::seconds(5), [&] { r.stop(); });
+    ASSERT_TRUE(r.run().ok());
+
+    EXPECT_FALSE(errored);
+    EXPECT_TRUE(sink.exited);
+    EXPECT_EQ(sink.data, "via-node-server\n"); // the stage ran on the accepted connection
+    EXPECT_EQ(sink.status.code, 0);
+    EXPECT_EQ(server.connectionCount(), 1U); // the controller's connection was accepted and kept
+}
+
+TEST(NodeServerTest, DropsAnUnauthorizedConnectionAndReapsIt) {
+    using psx::ca::CertificateAuthority;
+    auto ca = CertificateAuthority::create("psx-fleet");
+    ASSERT_TRUE(ca.ok());
+    auto nodeId = ca.value().issue("psx://node/1");
+    auto attackerId = ca.value().issue("psx://attacker"); // CA-signed, but not authorized
+    ASSERT_TRUE(nodeId.ok() && attackerId.ok());
+    const std::string caCert = ca.value().certificatePem();
+
+    auto listener = Socket::listen("127.0.0.1", 0);
+    ASSERT_TRUE(listener.ok());
+    const std::uint16_t port = listener.value().localPort().value();
+
+    auto reactor = Reactor::create();
+    ASSERT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+
+    psx::transport::NodeServer server(
+        r, std::move(listener.value()),
+        {.certificatePem = nodeId.value().certificatePem,
+         .privateKeyPem = nodeId.value().privateKeyPem,
+         .caPem = caCert},
+        [](std::string_view san) { return san == "psx://controller"; }); // attacker not allowed
+    ASSERT_TRUE(server.start().ok());
+
+    auto clientSock = Socket::connect("127.0.0.1", port);
+    ASSERT_TRUE(clientSock.ok());
+    auto ctlTls = Tls::create({.certificatePem = attackerId.value().certificatePem,
+                               .privateKeyPem = attackerId.value().privateKeyPem,
+                               .caPem = caCert,
+                               .isServer = false});
+    ASSERT_TRUE(ctlTls.ok());
+
+    ControllerSink sink;
+    sink.reactor = &r;
+    NativeTransport ctl(r, std::move(clientSock.value()), std::move(ctlTls.value()), Role::Controller, sink,
+                        {.onError = [&](psx::Error) { /* connection dropped by the node */ }});
+    ASSERT_TRUE(ctl.start().ok());
+
+    // Let the accept + reject + deferred reap run, then stop.
+    r.after(std::chrono::milliseconds(800), [&] { r.stop(); });
+    ASSERT_TRUE(r.run().ok());
+
+    EXPECT_EQ(server.connectionCount(), 0U) << "the unauthorized connection must be reaped";
 }
