@@ -55,6 +55,7 @@ add_executable(pipeshellx_tests
     unit/transport/test_open_request.cpp
     unit/transport/test_control_payloads.cpp
     unit/transport/test_session.cpp
+    unit/transport/test_session_faults.cpp
     unit/transport/test_node_fencing.cpp
     test_cli_options.cpp
     test_client_config.cpp
