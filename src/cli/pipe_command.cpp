@@ -7,16 +7,17 @@
 #include "psx/pipeline/planner.hpp"
 #include "psx/runtime/reactor.hpp"
 
+#include "psx/inventory/inventory.hpp"
+
+#include <exception>
 #include <ostream>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #if defined(PIPESHELLX_HAVE_TLS)
-#include "psx/inventory/inventory.hpp"
 #include "psx/pipeline/segmented_pipeline.hpp"
 
-#include <exception>
 #include <fstream>
 #include <optional>
 #include <sstream>
@@ -33,6 +34,7 @@ struct PipeArgs {
     std::string keyPath;       // --key
     std::string caPath;        // --ca
     int nativePort = 7433;     // --native-port
+    bool check = false;        // --check: validate + print the plan, do not run
 };
 
 // Splits recognised flags from the pipeline spec (everything else, rejoined).
@@ -54,6 +56,8 @@ PipeArgs parsePipeArgs(const std::vector<std::string>& args) {
             takeValue(out.keyPath);
         } else if (arg == "--ca") {
             takeValue(out.caPath);
+        } else if (arg == "--check") {
+            out.check = true;
         } else if (arg == "--native-port") {
             std::string value;
             takeValue(value);
@@ -161,9 +165,11 @@ int runSegmented(const std::vector<psx::pipeline::Stage>& stages,
             resolved.push_back({.argv = stage.argv, .host = "", .port = 0, .expectedSan = ""});
             continue;
         }
-        const auto hosts = inventory.selectHosts({stage.placement});
-        if (hosts.size() != 1) {
-            err << "pipeshellx pipe: placement '@" << stage.placement << "' must name exactly one inventory host\n";
+        std::vector<psx::inventory::Host> hosts;
+        try {
+            hosts = inventory.selectHosts({stage.placement});
+        } catch (const std::exception& e) {
+            err << "pipeshellx pipe: " << e.what() << "\n";
             return 2;
         }
         const psx::inventory::Host& host = hosts.front();
@@ -211,6 +217,59 @@ int runSegmented(const std::vector<psx::pipeline::Stage>& stages,
 }
 #endif // PIPESHELLX_HAVE_TLS
 
+// `--check`: validate the pipeline and print the resolved plan without running.
+// Remote @placements are resolved through the inventory (no connection is made).
+int runCheck(const std::vector<psx::pipeline::Stage>& stages,
+             const PipeArgs& args,
+             std::ostream& out,
+             std::ostream& err) {
+    bool anyRemote = false;
+    for (const auto& stage : stages) {
+        if (!isLocalPlacement(stage.placement)) {
+            anyRemote = true;
+        }
+    }
+    psx::inventory::Inventory inventory;
+    if (anyRemote) {
+        if (args.inventoryPath.empty()) {
+            err << "pipeshellx pipe --check: remote stages need an inventory (-i FILE)\n";
+            return 2;
+        }
+        try {
+            inventory = psx::inventory::Inventory::loadFromFile(args.inventoryPath);
+        } catch (const std::exception& e) {
+            err << "pipeshellx pipe --check: " << e.what() << "\n";
+            return 2;
+        }
+    }
+
+    out << "pipeline: " << stages.size() << (stages.size() == 1 ? " stage\n" : " stages\n");
+    for (const auto& stage : stages) {
+        std::string command;
+        for (std::size_t i = 0; i < stage.argv.size(); ++i) {
+            command += (i == 0 ? "" : " ") + stage.argv[i];
+        }
+        out << "  " << stage.id << "  " << command;
+        if (isLocalPlacement(stage.placement)) {
+            out << "  @local\n";
+            continue;
+        }
+        std::vector<psx::inventory::Host> hosts;
+        try {
+            hosts = inventory.selectHosts({stage.placement});
+        } catch (const std::exception& e) {
+            out << "\n";
+            err << "pipeshellx pipe --check: " << e.what() << "\n";
+            return 2;
+        }
+        const psx::inventory::Host& host = hosts.front();
+        const int port = host.nativePort != 0 ? host.nativePort : args.nativePort;
+        out << "  @" << stage.placement << " -> " << host.host << ":" << port << "\n";
+    }
+    out << "valid\n";
+    return 0;
+}
+
 } // namespace
 
 int pipeSubcommand(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
@@ -237,6 +296,10 @@ int pipeSubcommand(const std::vector<std::string>& args, std::ostream& out, std:
             anyRemote = true;
         }
     }
+    if (parsed.check) {
+        return runCheck(pipeline.value().stages, parsed, out, err);
+    }
+
     if (!anyRemote) {
         return runLocal(pipeline.value().stages, out, err);
     }

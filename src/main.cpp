@@ -65,7 +65,7 @@ Commands:
          -- <command...>                              run a command on hosts
   ping   [-i FILE] [-g GROUP|-t TAG|-H h1,h2] [--timeout S]   probe reachability
   diff   -i F -g GROUP --cert F --key F --ca F -- CMD   consensus across hosts (drift)
-  pipe   [-i F --cert F --key F --ca F] "'cmd'@place | 'cmd2'@place2"   run a pipeline
+  pipe   [--check] [-i F --cert F --key F --ca F] "'cmd'@place | ..."   run/validate a pipeline
   hosts  [-i FILE]                                     list inventory hosts
   ca     init --cn NAME --dir DIR | issue --san URI --ca DIR --out PFX  (native transport)
          | revoke --ca DIR (--cert F|--serial HEX) | sign --ca DIR --csr F --san URI --out F
