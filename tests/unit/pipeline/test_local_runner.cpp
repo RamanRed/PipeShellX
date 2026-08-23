@@ -88,3 +88,56 @@ TEST(LocalRunnerTest, AllStagesSucceedGivesZero) {
     EXPECT_EQ(result.output, "a\n");
     EXPECT_EQ(result.outcome.exitCode, 0);
 }
+
+namespace {
+RunResult runWithStdin(const std::vector<Stage>& stages, const std::string& input) {
+    auto reactor = Reactor::create();
+    EXPECT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+
+    RunResult result;
+    LocalRunner runner(r, [&](std::string_view chunk) { result.output.append(chunk); });
+    auto started = runner.run(
+        stages,
+        [&](LocalRunner::Outcome outcome) {
+            result.outcome = std::move(outcome);
+            result.completed = true;
+            r.stop();
+        },
+        /*externalStdin=*/true);
+    result.started = started.ok();
+    if (!started.ok()) {
+        return result;
+    }
+    runner.writeStdin(input);
+    runner.closeStdin();
+    (void)r.after(std::chrono::seconds(5), [&] { r.stop(); });
+    EXPECT_TRUE(r.run().ok());
+    return result;
+}
+} // namespace
+
+TEST(LocalRunnerTest, FeedsExternalStdinToTheFirstStage) {
+    auto result = runWithStdin({stage({"/bin/cat"})}, "hello from upstream\n");
+    ASSERT_TRUE(result.completed);
+    EXPECT_EQ(result.output, "hello from upstream\n");
+    EXPECT_EQ(result.outcome.exitCode, 0);
+}
+
+TEST(LocalRunnerTest, ExternalStdinFlowsThroughAChain) {
+    auto result = runWithStdin({stage({"/bin/cat"}), stage({"/usr/bin/tr", "a-z", "A-Z"})}, "hi there\n");
+    ASSERT_TRUE(result.completed);
+    EXPECT_EQ(result.output, "HI THERE\n");
+    EXPECT_EQ(result.outcome.exitCode, 0);
+}
+
+TEST(LocalRunnerTest, LargeExternalStdinRoundTrips) {
+    std::string input;
+    for (int i = 0; i < 5000; ++i) {
+        input += "row " + std::to_string(i) + "\n";
+    }
+    auto result = runWithStdin({stage({"/bin/cat"})}, input);
+    ASSERT_TRUE(result.completed);
+    EXPECT_EQ(result.output.size(), input.size());
+    EXPECT_EQ(result.output, input);
+}

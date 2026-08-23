@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <functional>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -34,8 +35,17 @@ public:
 
     // Spawn the chain (`stages` non-empty, in execution order). Returns an error
     // only for a pipe/spawn failure; a non-zero stage exit is a normal Outcome.
-    // onComplete runs on the reactor thread when the pipeline finishes.
-    psx::Result<void> run(const std::vector<Stage>& stages, std::function<void(Outcome)> onComplete);
+    // onComplete runs on the reactor thread when the pipeline finishes. With
+    // externalStdin, the first stage's stdin is fed by writeStdin()/closeStdin()
+    // instead of being empty -- so a local segment can be spliced after an
+    // upstream (remote) segment.
+    psx::Result<void>
+    run(const std::vector<Stage>& stages, std::function<void(Outcome)> onComplete, bool externalStdin = false);
+
+    // Feed the first stage's stdin (only when run(..., externalStdin=true)).
+    // Non-blocking and buffered; closeStdin() sends EOF.
+    void writeStdin(std::string_view bytes);
+    void closeStdin();
 
 private:
     struct Child {
@@ -45,6 +55,8 @@ private:
     };
     void onFinalReadable();
     void onChildExit(std::size_t index);
+    void drainStdin();
+    void onStdinWritable();
     void finishIfDone();
 
     psx::runtime::Reactor& reactor_;
@@ -53,6 +65,11 @@ private:
     std::vector<Child> children_;
     psx::os::Handle finalReader_;
     psx::runtime::Token finalToken_ = 0;
+    psx::os::Handle stdinWriter_; // first stage stdin, when externalStdin
+    std::string stdinBuffer_;
+    psx::runtime::Token stdinToken_ = 0;
+    bool stdinOpen_ = false;
+    bool stdinEndPending_ = false;
     bool finalClosed_ = false;
     std::size_t exitedCount_ = 0;
     bool done_ = false;

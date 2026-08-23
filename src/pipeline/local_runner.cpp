@@ -31,6 +31,9 @@ LocalRunner::~LocalRunner() {
     if (finalToken_ != 0) {
         (void)reactor_.unwatch(finalToken_);
     }
+    if (stdinToken_ != 0) {
+        (void)reactor_.unwatch(stdinToken_);
+    }
     for (Child& child : children_) {
         if (!child.exited) {
             (void)reactor_.unwatchChild(child.process.id());
@@ -38,7 +41,8 @@ LocalRunner::~LocalRunner() {
     }
 }
 
-psx::Result<void> LocalRunner::run(const std::vector<Stage>& stages, std::function<void(Outcome)> onComplete) {
+psx::Result<void> LocalRunner::run(const std::vector<Stage>& stages, std::function<void(Outcome)> onComplete,
+                                   bool externalStdin) {
     if (stages.empty()) {
         return psx::Error{psx::ErrorClass::InvalidArgument, 0, "empty pipeline"};
     }
@@ -59,6 +63,15 @@ psx::Result<void> LocalRunner::run(const std::vector<Stage>& stages, std::functi
     if (!finalPipe.ok()) {
         return finalPipe.error();
     }
+    Pipe stdinPipe;
+    if (externalStdin) {
+        auto created = Pipe::create();
+        if (!created.ok()) {
+            return created.error();
+        }
+        stdinPipe = std::move(created.value());
+        (void)stdinPipe.writer.setNonBlocking(true); // written without a watch until it backs up
+    }
 
     // Spawn each stage with its stdio wired to the neighbouring pipes.
     children_.reserve(n);
@@ -66,7 +79,8 @@ psx::Result<void> LocalRunner::run(const std::vector<Stage>& stages, std::functi
         SpawnSpec spec;
         spec.program = stages[i].argv.front();
         spec.argv = stages[i].argv;
-        spec.in = (i == 0) ? SpawnSpec::Stdio::null() : SpawnSpec::Stdio::from(links[i - 1].reader);
+        spec.in = (i != 0) ? SpawnSpec::Stdio::from(links[i - 1].reader)
+                           : (externalStdin ? SpawnSpec::Stdio::from(stdinPipe.reader) : SpawnSpec::Stdio::null());
         spec.out =
             (i + 1 == n) ? SpawnSpec::Stdio::from(finalPipe.value().writer) : SpawnSpec::Stdio::from(links[i].writer);
         // spec.err stays Inherit: stage diagnostics go to the terminal.
@@ -80,6 +94,14 @@ psx::Result<void> LocalRunner::run(const std::vector<Stage>& stages, std::functi
     // Keep only the final read end; every other pipe end closes as `links` and
     // `finalPipe`'s writer go out of scope, so EOF propagates down the chain.
     finalReader_ = std::move(finalPipe.value().reader);
+    if (externalStdin) {
+        stdinWriter_ = std::move(stdinPipe.writer); // stdinPipe.reader closes here (child holds it)
+        stdinOpen_ = true;
+        if (auto watched = reactor_.watch(stdinWriter_, Interest::None, [this](Readiness) { onStdinWritable(); });
+            watched.ok()) {
+            stdinToken_ = watched.value();
+        }
+    }
 
     if (auto watched = reactor_.watch(finalReader_, Interest::Readable, [this](Readiness) { onFinalReadable(); });
         watched.ok()) {
@@ -152,6 +174,56 @@ void LocalRunner::onChildExit(std::size_t index) {
     finishIfDone();
 }
 
+void LocalRunner::writeStdin(std::string_view bytes) {
+    if (!stdinOpen_) {
+        return;
+    }
+    if (!bytes.empty()) {
+        stdinBuffer_.append(bytes);
+    }
+    drainStdin();
+}
+void LocalRunner::closeStdin() {
+    if (!stdinOpen_) {
+        return;
+    }
+    stdinEndPending_ = true;
+    drainStdin();
+}
+void LocalRunner::drainStdin() {
+    while (stdinOpen_ && !stdinBuffer_.empty()) {
+        auto wrote =
+            psx::os::write(stdinWriter_, std::span<const char>(stdinBuffer_.data(), stdinBuffer_.size()));
+        if (wrote.ok() && wrote.value() > 0) {
+            stdinBuffer_.erase(0, wrote.value());
+        } else if (wrote.ok() || wrote.error().cls == psx::ErrorClass::WouldBlock) {
+            break; // pipe full: resume on Writable
+        } else {
+            stdinBuffer_.clear(); // the stage closed its stdin (EPIPE)
+            break;
+        }
+    }
+    if (!stdinOpen_) {
+        return;
+    }
+    if (stdinBuffer_.empty()) {
+        if (stdinEndPending_) {
+            if (stdinToken_ != 0) {
+                (void)reactor_.unwatch(stdinToken_);
+                stdinToken_ = 0;
+            }
+            stdinWriter_.close(); // EOF to the first stage
+            stdinOpen_ = false;
+        } else if (stdinToken_ != 0) {
+            (void)reactor_.modify(stdinToken_, Interest::None);
+        }
+    } else if (stdinToken_ != 0) {
+        (void)reactor_.modify(stdinToken_, Interest::Writable);
+    }
+}
+void LocalRunner::onStdinWritable() {
+    drainStdin();
+}
 void LocalRunner::finishIfDone() {
     if (done_ || !finalClosed_ || exitedCount_ != children_.size()) {
         return;
