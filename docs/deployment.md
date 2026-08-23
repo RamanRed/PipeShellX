@@ -164,6 +164,28 @@ For service-style operation, use a supervisor such as:
 - container runtime
 - process monitor
 
+The `pipeshellx node` agent emits ready-to-install service definitions,
+parameterised by the same flags the daemon takes:
+
+```bash
+# systemd (Linux)
+pipeshellx node systemd-unit --exec /usr/bin/pipeshellx \
+  --cert /etc/pipeshellx/tls.crt --key /etc/pipeshellx/tls.key \
+  --ca /etc/pipeshellx/ca.crt --listen 0.0.0.0:7433 \
+  --allow spiffe://psx/controller/c1 > /etc/systemd/system/pipeshellx-node.service
+
+# launchd (macOS)
+pipeshellx node launchd-plist --exec /usr/local/bin/pipeshellx \
+  --cert ... --key ... --ca ... --listen 127.0.0.1:7433 \
+  > ~/Library/LaunchAgents/com.pipeshellx.node.plist
+```
+
+The systemd unit restarts on failure and ships hardening directives
+(`NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`, a restricted address
+family, …) appropriate for a daemon that runs remote commands; run it under a
+dedicated unprivileged `User=` (default `pipeshellx`). Review the emitted file
+before installing.
+
 ### Resource Controls
 
 The application already applies hardcoded child CPU and memory limits. For real deployment:

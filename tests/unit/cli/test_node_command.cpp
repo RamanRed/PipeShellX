@@ -113,3 +113,40 @@ TEST(NodeCommandTest, EnrollmentViaKeygenThenCaSignProducesAWorkingIdentity) {
     EXPECT_TRUE(handshakes(client.value(), server.value()));
     EXPECT_EQ(client.value().peerSanUri(), san);
 }
+
+TEST(NodeCommandTest, SystemdUnitHasExecStartAndHardening) {
+    std::ostringstream out, err;
+    ASSERT_EQ(nodeSubcommand({"systemd-unit", "--cert", "/c", "--key", "/k", "--ca", "/a", "--listen", "0.0.0.0:7433",
+                              "--allow", "spiffe://x", "--exec", "/usr/bin/pipeshellx"},
+                             out, err),
+              0)
+        << err.str();
+    const std::string u = out.str();
+    EXPECT_NE(u.find("ExecStart=/usr/bin/pipeshellx node --cert /c --key /k --ca /a --listen 0.0.0.0:7433 "
+                     "--allow spiffe://x"),
+              std::string::npos);
+    EXPECT_NE(u.find("Restart=on-failure"), std::string::npos);
+    EXPECT_NE(u.find("NoNewPrivileges=yes"), std::string::npos);
+    EXPECT_NE(u.find("WantedBy=multi-user.target"), std::string::npos);
+}
+
+TEST(NodeCommandTest, LaunchdPlistListsProgramArguments) {
+    std::ostringstream out, err;
+    ASSERT_EQ(nodeSubcommand({"launchd-plist", "--cert", "/c", "--key", "/k", "--ca", "/a", "--listen",
+                              "127.0.0.1:7433", "--exec", "/opt/psx"},
+                             out, err),
+              0)
+        << err.str();
+    const std::string p = out.str();
+    EXPECT_NE(p.find("<key>Label</key>"), std::string::npos);
+    EXPECT_NE(p.find("<string>/opt/psx</string>"), std::string::npos);
+    EXPECT_NE(p.find("<string>--listen</string>"), std::string::npos);
+    EXPECT_NE(p.find("<string>127.0.0.1:7433</string>"), std::string::npos);
+    EXPECT_NE(p.find("<key>RunAtLoad</key>"), std::string::npos);
+}
+
+TEST(NodeCommandTest, UnitGeneratorsRejectMissingFlags) {
+    std::ostringstream out, err;
+    EXPECT_EQ(nodeSubcommand({"systemd-unit", "--cert", "x"}, out, err), 2);
+    EXPECT_EQ(nodeSubcommand({"launchd-plist"}, out, err), 2);
+}

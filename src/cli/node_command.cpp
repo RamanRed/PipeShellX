@@ -13,6 +13,7 @@
 #include <sstream>
 #include <string_view>
 #include <unordered_set>
+#include <vector>
 
 namespace psx::cli {
 
@@ -92,11 +93,106 @@ int nodeKeygen(const std::vector<std::string>& args, std::ostream& out, std::ost
     return 0;
 }
 
+// The `pipeshellx node ...` argv a service manager should launch, built from the
+// same flags the daemon takes. nullopt on a missing required flag.
+std::optional<std::vector<std::string>> nodeExecArgv(const std::vector<std::string>& args, std::ostream& err) {
+    const auto exec = flag(args, 1, "--exec");
+    const auto cert = flag(args, 1, "--cert");
+    const auto key = flag(args, 1, "--key");
+    const auto ca = flag(args, 1, "--ca");
+    const auto listen = flag(args, 1, "--listen");
+    if (!cert || !key || !ca || !listen) {
+        err << "pipeshellx node <systemd-unit|launchd-plist>: --cert F --key F --ca F --listen HOST:PORT are required "
+               "(optional --allow SANs, --crl F, --exec PATH)\n";
+        return std::nullopt;
+    }
+    std::vector<std::string> argv{
+        exec.value_or("pipeshellx"), "node", "--cert", *cert, "--key", *key, "--ca", *ca, "--listen", *listen};
+    if (const auto allow = flag(args, 1, "--allow")) {
+        argv.emplace_back("--allow");
+        argv.push_back(*allow);
+    }
+    if (const auto crl = flag(args, 1, "--crl")) {
+        argv.emplace_back("--crl");
+        argv.push_back(*crl);
+    }
+    return argv;
+}
+
+int nodeSystemdUnit(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
+    const auto argv = nodeExecArgv(args, err);
+    if (!argv) {
+        return 2;
+    }
+    std::string execStart;
+    for (std::size_t i = 0; i < argv->size(); ++i) {
+        execStart += (i == 0 ? "" : " ") + (*argv)[i];
+    }
+    const std::string user = flag(args, 1, "--user").value_or("pipeshellx");
+    out << "[Unit]\n"
+        << "Description=PipeShellX node agent (psx/1 mTLS backplane)\n"
+        << "After=network-online.target\n"
+        << "Wants=network-online.target\n\n"
+        << "[Service]\n"
+        << "Type=simple\n"
+        << "ExecStart=" << execStart << "\n"
+        << "Restart=on-failure\n"
+        << "RestartSec=5\n"
+        << "User=" << user << "\n"
+        << "Group=" << user
+        << "\n"
+        // Hardening: this daemon runs untrusted remote commands, so confine it.
+        << "NoNewPrivileges=yes\n"
+        << "ProtectSystem=strict\n"
+        << "ProtectHome=yes\n"
+        << "PrivateTmp=yes\n"
+        << "PrivateDevices=yes\n"
+        << "ProtectControlGroups=yes\n"
+        << "ProtectKernelModules=yes\n"
+        << "ProtectKernelTunables=yes\n"
+        << "RestrictAddressFamilies=AF_INET AF_INET6\n"
+        << "RestrictNamespaces=yes\n"
+        << "LockPersonality=yes\n\n"
+        << "[Install]\n"
+        << "WantedBy=multi-user.target\n";
+    return 0;
+}
+
+int nodeLaunchdPlist(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
+    const auto argv = nodeExecArgv(args, err);
+    if (!argv) {
+        return 2;
+    }
+    const std::string label = flag(args, 1, "--label").value_or("com.pipeshellx.node");
+    out << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        << "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+           "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+        << "<plist version=\"1.0\">\n"
+        << "<dict>\n"
+        << "  <key>Label</key>\n  <string>" << label << "</string>\n"
+        << "  <key>ProgramArguments</key>\n  <array>\n";
+    for (const std::string& arg : *argv) {
+        out << "    <string>" << arg << "</string>\n";
+    }
+    out << "  </array>\n"
+        << "  <key>RunAtLoad</key>\n  <true/>\n"
+        << "  <key>KeepAlive</key>\n  <true/>\n"
+        << "</dict>\n"
+        << "</plist>\n";
+    return 0;
+}
+
 } // namespace
 
 int nodeSubcommand(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
     if (!args.empty() && args[0] == "keygen") {
         return nodeKeygen(args, out, err);
+    }
+    if (!args.empty() && args[0] == "systemd-unit") {
+        return nodeSystemdUnit(args, out, err);
+    }
+    if (!args.empty() && args[0] == "launchd-plist") {
+        return nodeLaunchdPlist(args, out, err);
     }
     const std::size_t from = (!args.empty() && args[0] == "run") ? 1 : 0;
 
