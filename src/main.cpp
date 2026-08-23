@@ -64,7 +64,7 @@ Commands:
          [--transport native --cert F --key F --ca F [--native-port P] [--crl F]]
          -- <command...>                              run a command on hosts
   ping   [-i FILE] [-g GROUP|-t TAG|-H h1,h2] [--timeout S]   probe reachability
-  diff   -i F -g GROUP --cert F --key F --ca F -- CMD   consensus across hosts (drift)
+  diff   [--json] -i F -g GROUP --cert F --key F --ca F -- CMD   consensus across hosts (drift)
   pipe   [--check] [-i F --cert F --key F --ca F] "'cmd'@place | ..."   run/validate a pipeline
   hosts  [-i FILE]                                     list inventory hosts
   ca     init --cn NAME --dir DIR | issue --san URI --ca DIR --out PFX  (native transport)

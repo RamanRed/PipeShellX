@@ -30,4 +30,8 @@ ConsensusReport consensus(const std::vector<std::pair<std::string, std::string>>
 // output. Writes nothing surprising for the empty/unanimous cases.
 void renderConsensus(const ConsensusReport& report, std::ostream& out);
 
+// Render the report as one JSON object: {unanimous, hosts, buckets:[{hosts,output}]}.
+// The largest bucket is first (the consensus); the rest are drift.
+void renderConsensusJson(const ConsensusReport& report, std::ostream& out);
+
 } // namespace psx::sink

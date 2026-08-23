@@ -1,5 +1,7 @@
 #include "psx/sink/consensus.hpp"
 
+#include "psx/json/json.hpp"
+
 #include <algorithm>
 #include <map>
 #include <ostream>
@@ -62,6 +64,20 @@ void renderConsensus(const ConsensusReport& report, std::ostream& out) {
             out << "\n";
         }
     }
+}
+
+void renderConsensusJson(const ConsensusReport& report, std::ostream& out) {
+    out << "{\"unanimous\":" << psx::json::boolean(report.unanimous()) << ",\"hosts\":" << report.hostCount()
+        << ",\"buckets\":[";
+    for (std::size_t i = 0; i < report.buckets.size(); ++i) {
+        const ConsensusReport::Bucket& bucket = report.buckets[i];
+        out << (i == 0 ? "" : ",") << "{\"hosts\":[";
+        for (std::size_t j = 0; j < bucket.hosts.size(); ++j) {
+            out << (j == 0 ? "" : ",") << psx::json::quote(bucket.hosts[j]);
+        }
+        out << "],\"output\":" << psx::json::quote(bucket.output) << "}";
+    }
+    out << "]}\n";
 }
 
 } // namespace psx::sink

@@ -10,6 +10,7 @@
 using psx::sink::consensus;
 using psx::sink::ConsensusReport;
 using psx::sink::renderConsensus;
+using psx::sink::renderConsensusJson;
 
 namespace {
 using HostOut = std::pair<std::string, std::string>;
@@ -79,4 +80,26 @@ TEST(ConsensusTest, EmptyInputRendersNoHosts) {
     std::ostringstream out;
     renderConsensus(report, out);
     EXPECT_NE(out.str().find("no hosts"), std::string::npos);
+}
+
+TEST(ConsensusTest, JsonReportListsBucketsMajorityFirst) {
+    auto report = consensus({{"web1", "v1\n"}, {"web2", "v1\n"}, {"db1", "v2\n"}});
+    std::ostringstream out;
+    renderConsensusJson(report, out);
+    const std::string json = out.str();
+    EXPECT_NE(json.find("\"unanimous\":false"), std::string::npos);
+    EXPECT_NE(json.find("\"hosts\":3"), std::string::npos);
+    EXPECT_NE(json.find("\"web1\""), std::string::npos);
+    EXPECT_NE(json.find("\"db1\""), std::string::npos);
+    EXPECT_NE(json.find("v1\\n"), std::string::npos); // newline escaped
+    // The majority bucket precedes the outlier.
+    EXPECT_LT(json.find("web1"), json.find("db1"));
+}
+
+TEST(ConsensusTest, JsonEscapesSpecialCharactersInOutput) {
+    auto report = consensus({{"a", "q\"t\tn\n"}});
+    std::ostringstream out;
+    renderConsensusJson(report, out);
+    EXPECT_NE(out.str().find("q\\\"t\\tn\\n"), std::string::npos); // quote/tab/newline escaped
+    EXPECT_NE(out.str().find("\"unanimous\":true"), std::string::npos);
 }

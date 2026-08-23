@@ -37,6 +37,7 @@ int diffSubcommand(const std::vector<std::string>& args, std::ostream& out, std:
     std::string keyPath;
     std::string caPath;
     int nativePort = 7433;
+    bool json = false;
     Selector selector;
     std::vector<std::string> command;
 
@@ -66,6 +67,8 @@ int diffSubcommand(const std::vector<std::string>& args, std::ostream& out, std:
             std::string v;
             value(v);
             selector = {.kind = SelectorKind::Group, .value = v, .hosts = {}};
+        } else if (arg == "--json") {
+            json = true;
         } else if (arg == "-t") {
             std::string v;
             value(v);
@@ -136,7 +139,11 @@ int diffSubcommand(const std::vector<std::string>& args, std::ostream& out, std:
     }
 
     const psx::sink::ConsensusReport report = psx::sink::consensus(hostOutputs);
-    psx::sink::renderConsensus(report, out);
+    if (json) {
+        psx::sink::renderConsensusJson(report, out);
+    } else {
+        psx::sink::renderConsensus(report, out);
+    }
     for (const std::string& host : failed) {
         err << "pipeshellx diff: host failed: " << host << "\n";
     }
