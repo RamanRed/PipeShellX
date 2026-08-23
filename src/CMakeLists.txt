@@ -24,6 +24,7 @@ else()
     set(PIPESHELLX_SINK_SOURCES
         sink/group_sink.cpp
         sink/json_sink.cpp
+        sink/consensus.cpp
         sink/stream_sink.cpp
         audit/audit_log.cpp
     )
@@ -87,6 +88,7 @@ add_library(pipeshellx_lib
     cli/hosts_command.cpp
     cli/ping_command.cpp
     cli/selection.cpp
+    cli/diff_command.cpp
     cli/pipe_command.cpp
     cli/run_command.cpp
     cli_options.cpp

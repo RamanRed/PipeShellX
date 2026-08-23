@@ -25,6 +25,7 @@ if(PIPESHELLX_NATIVE_TRANSPORT AND OpenSSL_FOUND)
     set(PIPESHELLX_TLS_TEST_SOURCES unit/os/test_tls.cpp unit/transport/test_tls_stream.cpp
         unit/transport/test_native_transport.cpp unit/ca/test_certificate_authority.cpp
         unit/cli/test_ca_command.cpp
+    unit/cli/test_diff_command.cpp
     unit/cli/test_pipe_command.cpp unit/cli/test_node_command.cpp)
 endif()
 
@@ -44,6 +45,7 @@ add_executable(pipeshellx_tests
     unit/stream/test_stream.cpp
     unit/sink/test_sinks.cpp
     unit/inventory/test_inventory.cpp
+    unit/sink/test_consensus.cpp
     unit/pipeline/test_planner.cpp
     unit/pipeline/test_parser.cpp
     unit/pipeline/test_local_runner.cpp

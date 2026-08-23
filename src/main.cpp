@@ -1,6 +1,7 @@
 #include "cli_options.hpp"
 #include "logger.hpp"
 #include "psx/cli/ca_command.hpp"
+#include "psx/cli/diff_command.hpp"
 #include "psx/cli/hosts_command.hpp"
 #include "psx/cli/node_command.hpp"
 #include "psx/cli/ping_command.hpp"
@@ -63,6 +64,7 @@ Commands:
          [--transport native --cert F --key F --ca F [--native-port P] [--crl F]]
          -- <command...>                              run a command on hosts
   ping   [-i FILE] [-g GROUP|-t TAG|-H h1,h2] [--timeout S]   probe reachability
+  diff   -i F -g GROUP --cert F --key F --ca F -- CMD   consensus across hosts (drift)
   pipe   [-i F --cert F --key F --ca F] "'cmd'@place | 'cmd2'@place2"   run a pipeline
   hosts  [-i FILE]                                     list inventory hosts
   ca     init --cn NAME --dir DIR | issue --san URI --ca DIR --out PFX  (native transport)
@@ -133,6 +135,14 @@ int main(int argc, char** argv) {
             std::cerr << "pipeshellx ca: this build has no native transport support (OpenSSL)\n";
             return kExitUsage;
 #endif
+        }
+
+        if (!args.empty() && args[0] == "diff") {
+            std::vector<std::string> rest(args.begin() + 1, args.end());
+#if defined(PIPESHELLX_HAVE_TLS)
+            initLogging(CliOptions{});
+#endif
+            return psx::cli::diffSubcommand(rest, std::cout, std::cerr);
         }
 
         if (!args.empty() && args[0] == "pipe") {
