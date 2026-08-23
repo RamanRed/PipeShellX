@@ -95,8 +95,12 @@ Result<Tls> Tls::create(const TlsConfig& config) {
     if (impl.ctx == nullptr) {
         return sslError("SSL_CTX_new");
     }
-    SSL_CTX_set_min_proto_version(impl.ctx, TLS1_3_VERSION);
-    SSL_CTX_set_max_proto_version(impl.ctx, TLS1_3_VERSION);
+    // Pin to TLS 1.3 and fail loudly if the build cannot honour it, rather than
+    // silently negotiating a weaker version.
+    if (SSL_CTX_set_min_proto_version(impl.ctx, TLS1_3_VERSION) != 1 ||
+        SSL_CTX_set_max_proto_version(impl.ctx, TLS1_3_VERSION) != 1) {
+        return sslError("pin TLS 1.3");
+    }
 
     if (!useCertificatePem(impl.ctx, config.certificatePem)) {
         return sslError("load certificate");
@@ -117,9 +121,12 @@ Result<Tls> Tls::create(const TlsConfig& config) {
     impl.rbio = BIO_new(BIO_s_mem());
     impl.wbio = BIO_new(BIO_s_mem());
     if (impl.rbio == nullptr || impl.wbio == nullptr) {
+        BIO_free(impl.rbio); // no-op on nullptr; frees the one that did succeed
+        BIO_free(impl.wbio);
+        impl.rbio = impl.wbio = nullptr;
         return sslError("BIO_new");
     }
-    SSL_set_bio(impl.ssl, impl.rbio, impl.wbio);
+    SSL_set_bio(impl.ssl, impl.rbio, impl.wbio); // SSL now owns both BIOs
     if (config.isServer) {
         SSL_set_accept_state(impl.ssl);
     } else {
