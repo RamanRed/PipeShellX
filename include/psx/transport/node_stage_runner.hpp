@@ -5,6 +5,7 @@
 #include "psx/runtime/reactor.hpp"
 #include "psx/transport/session.hpp"
 
+#include <string>
 #include <unordered_map>
 
 namespace psx::transport {
@@ -32,6 +33,9 @@ public:
     NodeStageRunner& operator=(const NodeStageRunner&) = delete;
 
     void onOpen(StreamId id, const OpenRequest& request) override;
+    // Controller-sent stdin for a stage: written to the process, with credit
+    // granted only as it drains (backpressure). endStream closes the stage stdin.
+    void onData(StreamId id, std::string_view bytes, bool endStream, Channel channel) override;
 
     std::size_t runningStages() const noexcept { return stages_.size(); }
 
@@ -40,10 +44,15 @@ private:
         psx::os::Process process;
         psx::os::Handle stdoutReader;
         psx::os::Handle stderrReader;
+        psx::os::Handle stdinWriter; // controller -> stage stdin (non-blocking)
+        std::string stdinBuffer;     // stdin awaiting the stage (pipe full)
         psx::runtime::Token stdoutToken = 0;
         psx::runtime::Token stderrToken = 0;
+        psx::runtime::Token stdinToken = 0;
         bool stdoutOpen = true;
         bool stderrOpen = true;
+        bool stdinOpen = true;
+        bool stdinEndPending = false; // endStream seen: close stdin once drained
         bool exited = false;
         bool paused = false; // reads suspended for backpressure (send window full)
         psx::os::ExitStatus status{};
@@ -53,6 +62,9 @@ private:
     void onReadable(StreamId id, bool isStdout);
     void onStageExit(StreamId id);
     void closeReader(bool isStdout, Stage& stage);
+    void drainStdin(StreamId id, Stage& stage);
+    void onStdinWritable(StreamId id);
+    void closeStdin(Stage& stage);
     void setReadInterest(Stage& stage, bool enabled);
     void resumeReads(StreamId id);
     void finishIfDone(StreamId id);

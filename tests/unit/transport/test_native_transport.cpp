@@ -809,3 +809,130 @@ TEST(NodeServerTest, HandlesManyConcurrentControllerConnections) {
     EXPECT_EQ(succeeded, kNodes) << "every concurrent connection should run its stage to a clean exit";
     EXPECT_EQ(server.metrics().acceptedTotal, static_cast<std::uint64_t>(kNodes));
 }
+
+// Cross-node stdin: the controller sends bytes to a remote stage's stdin over
+// the backplane; the node feeds them to the process and closes stdin on
+// endStream. `cat` echoes stdin to stdout, so the controller gets its bytes back.
+TEST(NodeStageRunnerTest, ForwardsControllerStdinToTheStage) {
+    auto listener = Socket::listen("127.0.0.1", 0);
+    ASSERT_TRUE(listener.ok());
+    auto clientSock = Socket::connect("127.0.0.1", listener.value().localPort().value());
+    ASSERT_TRUE(clientSock.ok());
+    Socket serverSock = acceptWithin(listener.value());
+    ASSERT_TRUE(serverSock.valid());
+
+    const auto ctlId = tls_test::generateSelfSigned("psx://controller");
+    const auto nodeId = tls_test::generateSelfSigned("psx://node/1");
+    auto ctlTls = Tls::create(
+        {.certificatePem = ctlId.certPem, .privateKeyPem = ctlId.keyPem, .caPem = nodeId.certPem, .isServer = false});
+    auto nodeTls = Tls::create(
+        {.certificatePem = nodeId.certPem, .privateKeyPem = nodeId.keyPem, .caPem = ctlId.certPem, .isServer = true});
+    ASSERT_TRUE(ctlTls.ok() && nodeTls.ok());
+
+    auto reactor = Reactor::create();
+    ASSERT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+
+    NodeStageRunner runner(r);
+    ConsumingSink sink;
+    sink.reactor = &r;
+    bool errored = false;
+    NativeTransport* ctlPtr = nullptr;
+
+    NativeTransport node(r, std::move(serverSock), std::move(nodeTls.value()), Role::Node, runner,
+                         {.onError = [&](psx::Error) {
+                             errored = true;
+                             r.stop();
+                         }});
+    runner.bind(node.session());
+    NativeTransport ctl(r, std::move(clientSock.value()), std::move(ctlTls.value()), Role::Controller, sink,
+                        {.onReady =
+                             [&] {
+                                 const StreamId id = ctlPtr->session().open({.argv = {"cat"}});
+                                 ctlPtr->session().sendData(id, "hello from stdin\n", /*endStream=*/true);
+                             },
+                         .onError =
+                             [&](psx::Error) {
+                                 errored = true;
+                                 r.stop();
+                             }});
+    sink.session = &ctl.session();
+    ctlPtr = &ctl;
+
+    ASSERT_TRUE(node.start().ok());
+    ASSERT_TRUE(ctl.start().ok());
+    r.after(std::chrono::seconds(5), [&] { r.stop(); });
+    ASSERT_TRUE(r.run().ok());
+
+    EXPECT_FALSE(errored);
+    ASSERT_TRUE(sink.exited);
+    EXPECT_EQ(sink.data, "hello from stdin\n"); // cat echoed the forwarded stdin
+}
+
+// Bidirectional backpressure: a large stdin streamed through `cat` under a tiny
+// window. cat's throttled stdout stalls its stdin reads, so the node buffers
+// stdin and withholds credit; every byte must still round-trip intact.
+TEST(NodeStageRunnerTest, LargeStdinRoundTripsUnderATinyWindow) {
+    auto listener = Socket::listen("127.0.0.1", 0);
+    ASSERT_TRUE(listener.ok());
+    auto clientSock = Socket::connect("127.0.0.1", listener.value().localPort().value());
+    ASSERT_TRUE(clientSock.ok());
+    Socket serverSock = acceptWithin(listener.value());
+    ASSERT_TRUE(serverSock.valid());
+
+    const auto ctlId = tls_test::generateSelfSigned("psx://controller");
+    const auto nodeId = tls_test::generateSelfSigned("psx://node/1");
+    auto ctlTls = Tls::create(
+        {.certificatePem = ctlId.certPem, .privateKeyPem = ctlId.keyPem, .caPem = nodeId.certPem, .isServer = false});
+    auto nodeTls = Tls::create(
+        {.certificatePem = nodeId.certPem, .privateKeyPem = nodeId.keyPem, .caPem = ctlId.certPem, .isServer = true});
+    ASSERT_TRUE(ctlTls.ok() && nodeTls.ok());
+
+    auto reactor = Reactor::create();
+    ASSERT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+
+    std::string payload;
+    for (int i = 0; i < 4000; ++i) {
+        payload += "line " + std::to_string(i) + "\n";
+    }
+
+    NodeStageRunner runner(r);
+    ConsumingSink sink;
+    sink.reactor = &r;
+    bool errored = false;
+    NativeTransport* ctlPtr = nullptr;
+
+    NativeTransport node(r, std::move(serverSock), std::move(nodeTls.value()), Role::Node, runner,
+                         {.onError =
+                              [&](psx::Error) {
+                                  errored = true;
+                                  r.stop();
+                              }},
+                         /*initialWindow=*/512);
+    runner.bind(node.session());
+    NativeTransport ctl(r, std::move(clientSock.value()), std::move(ctlTls.value()), Role::Controller, sink,
+                        {.onReady =
+                             [&] {
+                                 const StreamId id = ctlPtr->session().open({.argv = {"cat"}});
+                                 ctlPtr->session().sendData(id, payload, /*endStream=*/true);
+                             },
+                         .onError =
+                             [&](psx::Error) {
+                                 errored = true;
+                                 r.stop();
+                             }},
+                        /*initialWindow=*/512);
+    sink.session = &ctl.session();
+    ctlPtr = &ctl;
+
+    ASSERT_TRUE(node.start().ok());
+    ASSERT_TRUE(ctl.start().ok());
+    r.after(std::chrono::seconds(10), [&] { r.stop(); });
+    ASSERT_TRUE(r.run().ok());
+
+    EXPECT_FALSE(errored);
+    ASSERT_TRUE(sink.exited);
+    EXPECT_EQ(sink.data.size(), payload.size());
+    EXPECT_EQ(sink.data, payload);
+}

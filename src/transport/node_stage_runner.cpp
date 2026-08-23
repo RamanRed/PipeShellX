@@ -4,6 +4,7 @@
 #include "psx/os/pipe.hpp"
 
 #include <array>
+#include <span>
 #include <utility>
 
 namespace psx::transport {
@@ -29,6 +30,9 @@ NodeStageRunner::~NodeStageRunner() {
         if (stage.stderrToken != 0) {
             (void)reactor_.unwatch(stage.stderrToken);
         }
+        if (stage.stdinToken != 0) {
+            (void)reactor_.unwatch(stage.stdinToken);
+        }
         if (!stage.exited) {
             (void)stage.process.signal(psx::os::StopSignal::Kill);
             (void)reactor_.unwatchChild(stage.process.id());
@@ -44,16 +48,20 @@ void NodeStageRunner::onOpen(StreamId id, const OpenRequest& request) {
 
     auto stdoutPipe = Pipe::create();
     auto stderrPipe = Pipe::create();
-    if (!stdoutPipe.ok() || !stderrPipe.ok()) {
+    auto stdinPipe = Pipe::create();
+    if (!stdoutPipe.ok() || !stderrPipe.ok() || !stdinPipe.ok()) {
         session_->sendExit(id, {ExitStatus::Kind::Exited, 127});
         return;
     }
+    // We write stdin without watching until the pipe backs up, so it must be
+    // non-blocking or a full pipe would stall the reactor thread.
+    (void)stdinPipe.value().writer.setNonBlocking(true);
 
     SpawnSpec spec;
     spec.program = request.argv.front(); // PATH lookup when it has no '/'
     spec.argv = request.argv;
     spec.cwd = request.cwd;
-    spec.in = SpawnSpec::Stdio::null();
+    spec.in = SpawnSpec::Stdio::from(stdinPipe.value().reader);
     spec.out = SpawnSpec::Stdio::from(stdoutPipe.value().writer);
     spec.err = SpawnSpec::Stdio::from(stderrPipe.value().writer);
 
@@ -67,6 +75,7 @@ void NodeStageRunner::onOpen(StreamId id, const OpenRequest& request) {
     stage.process = std::move(process.value());
     stage.stdoutReader = std::move(stdoutPipe.value().reader);
     stage.stderrReader = std::move(stderrPipe.value().reader);
+    stage.stdinWriter = std::move(stdinPipe.value().writer);
     auto [it, inserted] = stages_.emplace(id, std::move(stage));
     // The pipe write ends close here (only the child holds them now).
     arm(id, it->second);
@@ -82,6 +91,10 @@ void NodeStageRunner::arm(StreamId id, Stage& stage) {
                                    [this, id](Readiness) { onReadable(id, /*isStdout=*/false); });
     if (watchErr.ok()) {
         stage.stderrToken = watchErr.value();
+    }
+    auto watchStdin = reactor_.watch(stage.stdinWriter, Interest::None, [this, id](Readiness) { onStdinWritable(id); });
+    if (watchStdin.ok()) {
+        stage.stdinToken = watchStdin.value();
     }
     if (auto watched = reactor_.watchChild(stage.process.id(), [this, id](psx::os::ProcessId) { onStageExit(id); });
         !watched.ok()) {
@@ -142,6 +155,64 @@ void NodeStageRunner::closeReader(bool isStdout, Stage& stage) {
     }
     (isStdout ? stage.stdoutReader : stage.stderrReader).close();
     open = false;
+}
+void NodeStageRunner::onData(StreamId id, std::string_view bytes, bool endStream, Channel /*channel*/) {
+    auto it = stages_.find(id);
+    if (it == stages_.end()) {
+        return;
+    }
+    Stage& stage = it->second;
+    if (!bytes.empty()) {
+        stage.stdinBuffer.append(bytes);
+    }
+    if (endStream) {
+        stage.stdinEndPending = true;
+    }
+    drainStdin(id, stage);
+}
+void NodeStageRunner::drainStdin(StreamId id, Stage& stage) {
+    while (stage.stdinOpen && !stage.stdinBuffer.empty()) {
+        auto wrote = psx::os::write(stage.stdinWriter,
+                                    std::span<const char>(stage.stdinBuffer.data(), stage.stdinBuffer.size()));
+        if (wrote.ok() && wrote.value() > 0) {
+            session_->consume(id, static_cast<std::uint32_t>(wrote.value())); // credit as it drains
+            stage.stdinBuffer.erase(0, wrote.value());
+        } else if (wrote.ok() || wrote.error().cls == psx::ErrorClass::WouldBlock) {
+            break; // pipe full: wait for it to drain
+        } else {
+            // The stage closed its stdin (exited/EPIPE): drop the rest, free credit.
+            session_->consume(id, static_cast<std::uint32_t>(stage.stdinBuffer.size()));
+            stage.stdinBuffer.clear();
+            closeStdin(stage);
+            return;
+        }
+    }
+    if (stage.stdinBuffer.empty()) {
+        if (stage.stdinEndPending) {
+            closeStdin(stage); // EOF to the stage
+        } else if (stage.stdinToken != 0) {
+            (void)reactor_.modify(stage.stdinToken, Interest::None);
+        }
+    } else if (stage.stdinToken != 0) {
+        (void)reactor_.modify(stage.stdinToken, Interest::Writable); // resume when there is space
+    }
+}
+void NodeStageRunner::onStdinWritable(StreamId id) {
+    auto it = stages_.find(id);
+    if (it != stages_.end()) {
+        drainStdin(id, it->second);
+    }
+}
+void NodeStageRunner::closeStdin(Stage& stage) {
+    if (!stage.stdinOpen) {
+        return;
+    }
+    if (stage.stdinToken != 0) {
+        (void)reactor_.unwatch(stage.stdinToken);
+        stage.stdinToken = 0;
+    }
+    stage.stdinWriter.close();
+    stage.stdinOpen = false;
 }
 
 void NodeStageRunner::onStageExit(StreamId id) {
