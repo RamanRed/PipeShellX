@@ -63,7 +63,7 @@ int nodeSubcommand(const std::vector<std::string>& args, std::ostream& out, std:
     const auto caPath = flag(args, from, "--ca");
     const auto listen = flag(args, from, "--listen");
     if (!certPath || !keyPath || !caPath || !listen) {
-        err << "Usage: pipeshellx node --cert F --key F --ca F --listen HOST:PORT [--allow SAN[,SAN...]]\n";
+        err << "Usage: pipeshellx node --cert F --key F --ca F --listen HOST:PORT [--allow SAN[,SAN...]] [--crl F]\n";
         return 2;
     }
 
@@ -73,6 +73,16 @@ int nodeSubcommand(const std::vector<std::string>& args, std::ostream& out, std:
     if (!certPem || !keyPem || !caPem) {
         err << "pipeshellx node: cannot read cert/key/ca file\n";
         return 2;
+    }
+    // Optional CRL: reject peers whose certificate it revokes.
+    std::string crlPem;
+    if (const auto crlPath = flag(args, from, "--crl")) {
+        const auto pem = readFile(*crlPath);
+        if (!pem) {
+            err << "pipeshellx node: cannot read --crl " << *crlPath << "\n";
+            return 2;
+        }
+        crlPem = *pem;
     }
 
     std::string host;
@@ -113,9 +123,10 @@ int nodeSubcommand(const std::vector<std::string>& args, std::ostream& out, std:
     if (!allow.empty()) {
         authorize = [allow = std::move(allow)](std::string_view san) { return allow.count(std::string(san)) != 0; };
     }
-    psx::transport::NodeServer server(*reactor.value(), std::move(listener.value()),
-                                      {.certificatePem = *certPem, .privateKeyPem = *keyPem, .caPem = *caPem},
-                                      std::move(authorize));
+    psx::transport::NodeServer server(
+        *reactor.value(), std::move(listener.value()),
+        {.certificatePem = *certPem, .privateKeyPem = *keyPem, .caPem = *caPem, .crlPem = crlPem},
+        std::move(authorize));
     if (auto started = server.start(); !started.ok()) {
         err << "pipeshellx node: " << started.error().message() << "\n";
         return 2;

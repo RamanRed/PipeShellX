@@ -209,6 +209,8 @@ RunInvocation parseRun(const std::vector<std::string>& args) {
             invocation.keyPath = valueFor(i, arg);
         } else if (arg == "--ca") {
             invocation.caPath = valueFor(i, arg);
+        } else if (arg == "--crl") {
+            invocation.crlPath = valueFor(i, arg);
         } else if (arg == "--native-port") {
             invocation.nativePort = parseIntArg(valueFor(i, arg), "--native-port");
         } else if (arg == "--no-color" || arg == "--no-colour") {
@@ -276,6 +278,15 @@ int runNative(const RunInvocation& invocation,
         err << "pipeshellx run: cannot read --cert/--key/--ca\n";
         return 2;
     }
+    std::string crl;
+    if (!invocation.crlPath.empty()) {
+        const auto pem = slurpFile(invocation.crlPath);
+        if (!pem) {
+            err << "pipeshellx run: cannot read --crl " << invocation.crlPath << "\n";
+            return 2;
+        }
+        crl = *pem;
+    }
 
     auto reactor = psx::runtime::Reactor::create();
     if (!reactor.ok()) {
@@ -297,7 +308,7 @@ int runNative(const RunInvocation& invocation,
         }
     };
     psx::transport::NativeController controller(
-        r, {.certificatePem = *cert, .privateKeyPem = *key, .caPem = *ca},
+        r, {.certificatePem = *cert, .privateKeyPem = *key, .caPem = *ca, .crlPem = crl},
         [framers, emit](const std::string& host, std::string_view bytes, psx::transport::Channel channel) {
             const bool err = channel == psx::transport::Channel::Stderr;
             HostFramers& hf = (*framers)[host];

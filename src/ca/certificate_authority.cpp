@@ -41,6 +41,40 @@ std::string certToPem(X509* cert) {
     return pem;
 }
 
+std::string crlToPem(X509_CRL* crl) {
+    BIO* bio = BIO_new(BIO_s_mem());
+    PEM_write_bio_X509_CRL(bio, crl);
+    std::string pem = bioToString(bio);
+    BIO_free(bio);
+    return pem;
+}
+
+// Uppercase-hex serial of a certificate; empty on failure.
+std::string serialHexOf(X509* cert) {
+    const ASN1_INTEGER* serial = X509_get0_serialNumber(cert);
+    BIGNUM* bn = ASN1_INTEGER_to_BN(serial, nullptr);
+    if (bn == nullptr) {
+        return {};
+    }
+    char* hex = BN_bn2hex(bn); // OpenSSL returns uppercase hex
+    std::string out = hex != nullptr ? std::string(hex) : std::string();
+    OPENSSL_free(hex);
+    BN_free(bn);
+    return out;
+}
+
+// Builds an ASN1_INTEGER from an uppercase/lowercase-hex serial; null on failure.
+ASN1_INTEGER* serialFromHex(const std::string& hex) {
+    BIGNUM* bn = nullptr;
+    if (BN_hex2bn(&bn, hex.c_str()) == 0) {
+        BN_free(bn);
+        return nullptr;
+    }
+    ASN1_INTEGER* out = BN_to_ASN1_INTEGER(bn, nullptr);
+    BN_free(bn);
+    return out;
+}
+
 EVP_PKEY* keyFromPem(const std::string& pem) {
     BIO* bio = BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size()));
     EVP_PKEY* key = PEM_read_bio_PrivateKey(bio, nullptr, nullptr, nullptr);
@@ -186,6 +220,68 @@ Result<Identity> CertificateAuthority::issue(const std::string& sanUri) const {
 
     X509_free(leaf);
     EVP_PKEY_free(leafKey);
+    return result;
+}
+
+Result<std::string> CertificateAuthority::serialHex(const std::string& certificatePem) {
+    X509* cert = certFromPem(certificatePem);
+    if (cert == nullptr) {
+        return caError("parse certificate");
+    }
+    std::string hex = serialHexOf(cert);
+    X509_free(cert);
+    if (hex.empty()) {
+        return caError("read serial");
+    }
+    return hex;
+}
+
+Result<std::string> CertificateAuthority::issueCrl(const std::vector<std::string>& revokedSerialsHex) const {
+    X509_CRL* crl = X509_CRL_new();
+    if (crl == nullptr) {
+        return caError("X509_CRL_new");
+    }
+
+    Result<std::string> result = Error{ErrorClass::Other, 0, "issue CRL"};
+    ASN1_TIME* now = ASN1_TIME_new();
+    ASN1_TIME* next = ASN1_TIME_new();
+    do {
+        if (now == nullptr || next == nullptr) {
+            break;
+        }
+        X509_CRL_set_version(crl, 1); // v2
+        X509_CRL_set_issuer_name(crl, X509_get_subject_name(impl_->cert));
+        X509_gmtime_adj(now, 0);
+        X509_gmtime_adj(next, 30L * 24 * 3600); // valid for 30 days
+        if (X509_CRL_set1_lastUpdate(crl, now) == 0 || X509_CRL_set1_nextUpdate(crl, next) == 0) {
+            break;
+        }
+        bool entriesOk = true;
+        for (const std::string& hex : revokedSerialsHex) {
+            X509_REVOKED* revoked = X509_REVOKED_new();
+            ASN1_INTEGER* serial = serialFromHex(hex);
+            if (revoked == nullptr || serial == nullptr || X509_REVOKED_set_serialNumber(revoked, serial) == 0 ||
+                X509_REVOKED_set_revocationDate(revoked, now) == 0 || X509_CRL_add0_revoked(crl, revoked) == 0) {
+                ASN1_INTEGER_free(serial);
+                X509_REVOKED_free(revoked);
+                entriesOk = false;
+                break;
+            }
+            ASN1_INTEGER_free(serial); // set_serialNumber copies
+        }
+        if (!entriesOk) {
+            break;
+        }
+        X509_CRL_sort(crl);
+        if (X509_CRL_sign(crl, impl_->key, EVP_sha256()) == 0) {
+            break;
+        }
+        result = crlToPem(crl);
+    } while (false);
+
+    ASN1_TIME_free(now);
+    ASN1_TIME_free(next);
+    X509_CRL_free(crl);
     return result;
 }
 

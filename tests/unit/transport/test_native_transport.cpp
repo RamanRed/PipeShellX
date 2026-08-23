@@ -693,3 +693,54 @@ TEST(NodeStageRunnerTest, SplitsStdoutAndStderrOnTheWire) {
     EXPECT_EQ(sink.data, "OUT");       // stdout channel
     EXPECT_EQ(sink.stderrData, "ERR"); // stderr channel, kept distinct
 }
+
+// A revoked peer must be rejected over the live reactor path too (not only in the
+// synchronous Tls handshake). Reproduces the `node --crl` scenario in-process.
+TEST(NativeTransportTest, CrlRejectsARevokedPeerOverTheReactor) {
+    auto ca = psx::ca::CertificateAuthority::create("psx-fleet");
+    ASSERT_TRUE(ca.ok());
+    auto nodeId = ca.value().issue("psx://node/1");
+    auto ctlId = ca.value().issue("psx://controller");
+    ASSERT_TRUE(nodeId.ok() && ctlId.ok());
+    auto serial = psx::ca::CertificateAuthority::serialHex(ctlId.value().certificatePem);
+    ASSERT_TRUE(serial.ok());
+    auto crl = ca.value().issueCrl({serial.value()});
+    ASSERT_TRUE(crl.ok());
+    const std::string caCert = ca.value().certificatePem();
+
+    auto listener = Socket::listen("127.0.0.1", 0);
+    ASSERT_TRUE(listener.ok());
+    auto clientSock = Socket::connect("127.0.0.1", listener.value().localPort().value());
+    ASSERT_TRUE(clientSock.ok());
+    Socket serverSock = acceptWithin(listener.value());
+    ASSERT_TRUE(serverSock.valid());
+
+    auto nodeTls = Tls::create({.certificatePem = nodeId.value().certificatePem,
+                                .privateKeyPem = nodeId.value().privateKeyPem,
+                                .caPem = caCert,
+                                .crlPem = crl.value(), // the node enforces the CRL
+                                .isServer = true});
+    auto ctlTls = Tls::create({.certificatePem = ctlId.value().certificatePem,
+                               .privateKeyPem = ctlId.value().privateKeyPem,
+                               .caPem = caCert,
+                               .isServer = false});
+    ASSERT_TRUE(nodeTls.ok() && ctlTls.ok());
+
+    auto reactor = Reactor::create();
+    ASSERT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+
+    struct Sink : SessionHandler {
+    } nodeSink, ctlSink;
+    bool nodeReady = false;
+    NativeTransport node(r, std::move(serverSock), std::move(nodeTls.value()), Role::Node, nodeSink,
+                         {.onReady = [&] { nodeReady = true; }, .onError = [&](psx::Error) { r.stop(); }});
+    NativeTransport ctl(r, std::move(clientSock.value()), std::move(ctlTls.value()), Role::Controller, ctlSink,
+                        {.onError = [&](psx::Error) { r.stop(); }});
+    ASSERT_TRUE(node.start().ok());
+    ASSERT_TRUE(ctl.start().ok());
+    r.after(std::chrono::seconds(2), [&] { r.stop(); });
+    ASSERT_TRUE(r.run().ok());
+
+    EXPECT_FALSE(nodeReady) << "the node accepted a peer whose certificate is revoked";
+}

@@ -81,4 +81,61 @@ TEST(CaCommandTest, ReportsUsageErrors) {
     EXPECT_EQ(caSubcommand({"bogus"}, out, err), 2);               // unknown action
     EXPECT_EQ(caSubcommand({"init", "--cn", "x"}, out, err), 2);   // missing --dir
     EXPECT_EQ(caSubcommand({"issue", "--san", "u"}, out, err), 2); // missing --ca/--out
+    EXPECT_EQ(caSubcommand({"revoke", "--ca", "x"}, out, err), 2); // missing --cert/--serial
+}
+
+TEST(CaCommandTest, RevokeProducesACrlThatRejectsTheRevokedLeaf) {
+    test_support::ScopedTempCwd cwd("ca-revoke");
+    const std::filesystem::path caDir = cwd.path() / "ca";
+    const std::filesystem::path node = cwd.path() / "node1";
+    const std::filesystem::path ctl = cwd.path() / "ctl";
+    std::ostringstream out, err;
+
+    ASSERT_EQ(caSubcommand({"init", "--cn", "psx-fleet", "--dir", caDir.string()}, out, err), 0) << err.str();
+    ASSERT_EQ(
+        caSubcommand({"issue", "--san", "psx://node/1", "--ca", caDir.string(), "--out", node.string()}, out, err), 0)
+        << err.str();
+    ASSERT_EQ(
+        caSubcommand({"issue", "--san", "psx://controller", "--ca", caDir.string(), "--out", ctl.string()}, out, err),
+        0)
+        << err.str();
+
+    // Revoke the controller by its certificate; a CRL and index appear.
+    ASSERT_EQ(caSubcommand({"revoke", "--ca", caDir.string(), "--cert", ctl.string() + ".crt"}, out, err), 0)
+        << err.str();
+    ASSERT_TRUE(std::filesystem::exists(caDir / "crl.pem"));
+    ASSERT_TRUE(std::filesystem::exists(caDir / "revoked.txt"));
+
+    const std::string caCert = readFile(caDir / "ca.crt");
+    const std::string crl = readFile(caDir / "crl.pem");
+    const std::string nodeCert = readFile(node.string() + ".crt");
+    const std::string nodeKey = readFile(node.string() + ".key");
+
+    // The node enforces the CRL: the revoked controller is rejected.
+    {
+        auto server = Tls::create(
+            {.certificatePem = nodeCert, .privateKeyPem = nodeKey, .caPem = caCert, .crlPem = crl, .isServer = true});
+        auto client = Tls::create({.certificatePem = readFile(ctl.string() + ".crt"),
+                                   .privateKeyPem = readFile(ctl.string() + ".key"),
+                                   .caPem = caCert,
+                                   .isServer = false});
+        ASSERT_TRUE(server.ok() && client.ok());
+        EXPECT_FALSE(handshakes(client.value(), server.value())) << "the revoked controller must be rejected";
+    }
+
+    // A freshly issued, non-revoked controller still connects under the same CRL.
+    const std::filesystem::path ctl2 = cwd.path() / "ctl2";
+    ASSERT_EQ(caSubcommand({"issue", "--san", "psx://controller/2", "--ca", caDir.string(), "--out", ctl2.string()},
+                           out, err),
+              0);
+    {
+        auto server = Tls::create(
+            {.certificatePem = nodeCert, .privateKeyPem = nodeKey, .caPem = caCert, .crlPem = crl, .isServer = true});
+        auto client = Tls::create({.certificatePem = readFile(ctl2.string() + ".crt"),
+                                   .privateKeyPem = readFile(ctl2.string() + ".key"),
+                                   .caPem = caCert,
+                                   .isServer = false});
+        ASSERT_TRUE(server.ok() && client.ok());
+        EXPECT_TRUE(handshakes(client.value(), server.value())) << "a non-revoked controller must still connect";
+    }
 }

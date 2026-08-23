@@ -110,3 +110,55 @@ TEST(CertificateAuthorityTest, ALeafFromAnotherCaIsRejected) {
     ASSERT_TRUE(server.ok() && client.ok());
     EXPECT_FALSE(handshakes(client.value(), server.value())) << "a cert from another CA must not verify";
 }
+
+TEST(CertificateAuthorityTest, RevokedLeafFailsWhenTheCrlIsEnforced) {
+    auto ca = CertificateAuthority::create("psx-fleet");
+    ASSERT_TRUE(ca.ok());
+    auto serverId = ca.value().issue("psx://node/1");
+    auto clientId = ca.value().issue("psx://controller");
+    ASSERT_TRUE(serverId.ok() && clientId.ok());
+
+    // Revoke the client by its serial and publish a CRL.
+    auto serial = CertificateAuthority::serialHex(clientId.value().certificatePem);
+    ASSERT_TRUE(serial.ok()) << (serial.ok() ? "" : serial.error().message());
+    auto crl = ca.value().issueCrl({serial.value()});
+    ASSERT_TRUE(crl.ok()) << (crl.ok() ? "" : crl.error().message());
+
+    const std::string caCert = ca.value().certificatePem();
+    auto server = Tls::create({.certificatePem = serverId.value().certificatePem,
+                               .privateKeyPem = serverId.value().privateKeyPem,
+                               .caPem = caCert,
+                               .crlPem = crl.value(), // the server enforces the CRL
+                               .isServer = true});
+    auto client = Tls::create({.certificatePem = clientId.value().certificatePem,
+                               .privateKeyPem = clientId.value().privateKeyPem,
+                               .caPem = caCert,
+                               .isServer = false});
+    ASSERT_TRUE(server.ok() && client.ok());
+    EXPECT_FALSE(handshakes(client.value(), server.value())) << "a revoked client cert must be rejected";
+}
+
+TEST(CertificateAuthorityTest, NonRevokedLeafStillPassesWithTheCrlEnforced) {
+    auto ca = CertificateAuthority::create("psx-fleet");
+    ASSERT_TRUE(ca.ok());
+    auto serverId = ca.value().issue("psx://node/1");
+    auto clientId = ca.value().issue("psx://controller");
+    ASSERT_TRUE(serverId.ok() && clientId.ok());
+
+    // A CRL that revokes some other serial: the client is not on it.
+    auto crl = ca.value().issueCrl({"0123456789ABCDEF"});
+    ASSERT_TRUE(crl.ok());
+
+    const std::string caCert = ca.value().certificatePem();
+    auto server = Tls::create({.certificatePem = serverId.value().certificatePem,
+                               .privateKeyPem = serverId.value().privateKeyPem,
+                               .caPem = caCert,
+                               .crlPem = crl.value(),
+                               .isServer = true});
+    auto client = Tls::create({.certificatePem = clientId.value().certificatePem,
+                               .privateKeyPem = clientId.value().privateKeyPem,
+                               .caPem = caCert,
+                               .isServer = false});
+    ASSERT_TRUE(server.ok() && client.ok());
+    EXPECT_TRUE(handshakes(client.value(), server.value())) << "a cert absent from the CRL must still verify";
+}

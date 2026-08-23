@@ -2,9 +2,13 @@
 
 #include "psx/ca/certificate_authority.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <sstream>
+#include <vector>
 
 namespace psx::cli {
 
@@ -98,11 +102,98 @@ int caIssue(const std::vector<std::string>& args, std::ostream& out, std::ostrea
     return 0;
 }
 
+// Reads a whole file into a string; nullopt if it cannot be opened.
+std::optional<std::string> slurp(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        return std::nullopt;
+    }
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+int caRevoke(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
+    const auto caDir = flag(args, 1, "--ca");
+    const auto certPath = flag(args, 1, "--cert");
+    const auto serialArg = flag(args, 1, "--serial");
+    if (!caDir || (!certPath && !serialArg)) {
+        err << "pipeshellx ca revoke: --ca DIR and one of --cert FILE / --serial HEX are required\n";
+        return 2;
+    }
+    const std::filesystem::path caBase(*caDir);
+    const auto caKey = slurp(caBase / "ca.key");
+    const auto caCert = slurp(caBase / "ca.crt");
+    if (!caKey || !caCert) {
+        err << "pipeshellx ca revoke: cannot read the CA in " << *caDir << "\n";
+        return 2;
+    }
+    auto ca = psx::ca::CertificateAuthority::load(*caKey, *caCert);
+    if (!ca.ok()) {
+        err << "pipeshellx ca revoke: " << ca.error().message() << "\n";
+        return 2;
+    }
+
+    // The serial to revoke: given directly, or read from the leaf certificate.
+    std::string serial;
+    if (serialArg) {
+        serial = *serialArg;
+    } else {
+        const auto certPem = slurp(*certPath);
+        if (!certPem) {
+            err << "pipeshellx ca revoke: cannot read --cert " << *certPath << "\n";
+            return 2;
+        }
+        auto s = psx::ca::CertificateAuthority::serialHex(*certPem);
+        if (!s.ok()) {
+            err << "pipeshellx ca revoke: " << s.error().message() << "\n";
+            return 2;
+        }
+        serial = s.value();
+    }
+    for (char& c : serial) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c))); // match serialHex's casing
+    }
+
+    // Maintain the CA's revocation list, then regenerate the CRL from all of it.
+    const std::filesystem::path revPath = caBase / "revoked.txt";
+    std::vector<std::string> serials;
+    if (const auto existing = slurp(revPath)) {
+        std::istringstream lines(*existing);
+        for (std::string line; std::getline(lines, line);) {
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) {
+                line.pop_back();
+            }
+            if (!line.empty()) {
+                serials.push_back(line);
+            }
+        }
+    }
+    if (std::find(serials.begin(), serials.end(), serial) == serials.end()) {
+        serials.push_back(serial);
+    }
+
+    auto crl = ca.value().issueCrl(serials);
+    if (!crl.ok()) {
+        err << "pipeshellx ca revoke: " << crl.error().message() << "\n";
+        return 2;
+    }
+    std::string revText;
+    for (const std::string& s : serials) {
+        revText += s + "\n";
+    }
+    if (!writeFile(revPath, revText, /*secret=*/false, err) ||
+        !writeFile(caBase / "crl.pem", crl.value(), /*secret=*/false, err)) {
+        return 2;
+    }
+    out << "revoked " << serial << "; CRL now lists " << serials.size() << ": " << (caBase / "crl.pem").string()
+        << "\n";
+    return 0;
+}
+
 } // namespace
 
 int caSubcommand(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
     if (args.empty()) {
-        err << "Usage: pipeshellx ca <init|issue> ...\n";
+        err << "Usage: pipeshellx ca <init|issue|revoke> ...\n";
         return 2;
     }
     if (args[0] == "init") {
@@ -111,7 +202,10 @@ int caSubcommand(const std::vector<std::string>& args, std::ostream& out, std::o
     if (args[0] == "issue") {
         return caIssue(args, out, err);
     }
-    err << "pipeshellx ca: unknown action '" << args[0] << "' (expected init|issue)\n";
+    if (args[0] == "revoke") {
+        return caRevoke(args, out, err);
+    }
+    err << "pipeshellx ca: unknown action '" << args[0] << "' (expected init|issue|revoke)\n";
     return 2;
 }
 

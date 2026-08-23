@@ -47,6 +47,7 @@ struct RunInvocation {
     std::string certPath;                   // --cert: controller certificate (native)
     std::string keyPath;                    // --key: controller private key (native)
     std::string caPath;                     // --ca: trusted CA (native)
+    std::string crlPath;                    // --crl: optional CRL to reject revoked node certs (native)
     int nativePort = 7433;                  // --native-port: the node listener port (native)
     bool colour = true;                     // --no-color turns it off
     std::vector<std::string> command;       // the argv after `--`

@@ -195,3 +195,23 @@ node-2 san=spiffe://psx/node/n2
 On the node side, `pipeshellx node --allow <SANs>` restricts which controller
 identities may connect; with no `--allow` list the node admits any CA-signed
 peer (and logs a warning).
+
+### Revocation (CRL)
+
+Compromised or retired identities are revoked with a CRL:
+
+```bash
+pipeshellx ca revoke --ca ca --cert node-7.crt   # or: --serial <HEX>
+```
+
+`ca revoke` records the serial in `ca/revoked.txt` and regenerates `ca/crl.pem`
+(signed by the CA, which carries `cRLSign`; valid 30 days — re-run to refresh).
+Distribute the CRL and enforce it on either end:
+
+```bash
+pipeshellx node --cert n.crt --key n.key --ca ca.crt --listen H:P --crl ca/crl.pem
+pipeshellx run  --transport native --cert c.crt --key c.key --ca ca.crt --crl ca/crl.pem ...
+```
+
+With `--crl` set, a peer whose certificate the CRL lists fails the handshake and
+the connection is refused; certificates absent from the CRL are unaffected.

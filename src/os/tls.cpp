@@ -64,6 +64,26 @@ bool trustCaPem(SSL_CTX* ctx, const std::string& pem) {
     return any;
 }
 
+// Loads a PEM CRL and turns on leaf revocation checking. A peer certificate the
+// CRL lists then fails verification during the handshake.
+bool useCrlPem(SSL_CTX* ctx, const std::string& pem) {
+    BIO* bio = BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size()));
+    if (bio == nullptr) {
+        return false;
+    }
+    X509_STORE* store = SSL_CTX_get_cert_store(ctx);
+    bool any = false;
+    while (X509_CRL* crl = PEM_read_bio_X509_CRL(bio, nullptr, nullptr, nullptr)) {
+        any = X509_STORE_add_crl(store, crl) == 1 || any;
+        X509_CRL_free(crl);
+    }
+    BIO_free(bio);
+    if (any) {
+        X509_STORE_set_flags(store, X509_V_FLAG_CRL_CHECK);
+    }
+    return any;
+}
+
 } // namespace
 
 struct Tls::Impl {
@@ -110,6 +130,9 @@ Result<Tls> Tls::create(const TlsConfig& config) {
     }
     if (!trustCaPem(impl.ctx, config.caPem)) {
         return sslError("load CA");
+    }
+    if (!config.crlPem.empty() && !useCrlPem(impl.ctx, config.crlPem)) {
+        return sslError("load CRL");
     }
     // Mutual auth: both ends require and verify a peer certificate against the CA.
     SSL_CTX_set_verify(impl.ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, nullptr);

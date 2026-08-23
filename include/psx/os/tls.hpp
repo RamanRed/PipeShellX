@@ -14,6 +14,7 @@ struct TlsConfig {
     std::string certificatePem; // this endpoint's certificate chain
     std::string privateKeyPem;  // its private key
     std::string caPem;          // the CA the peer's certificate must chain to
+    std::string crlPem;         // optional CRL: reject a peer cert it revokes (empty = no CRL check)
     bool isServer = false;
 };
 

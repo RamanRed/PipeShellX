@@ -59,12 +59,12 @@ Commands:
   run    [-i FILE] [-g GROUP|-t TAG|-H h1,h2] [--stream|--group|--json]
          [-c N] [--timeout S] [--overflow P] [--ring SIZE] [--policy FILE] [--reuse]
          [--retries N] [--fail-fast] [--shell S] [--audit-log FILE] [--no-color]
-         [--transport native --cert F --key F --ca F [--native-port P]]
+         [--transport native --cert F --key F --ca F [--native-port P] [--crl F]]
          -- <command...>                              run a command on hosts
   ping   [-i FILE] [-g GROUP|-t TAG|-H h1,h2] [--timeout S]   probe reachability
   hosts  [-i FILE]                                     list inventory hosts
   ca     init --cn NAME --dir DIR | issue --san URI --ca DIR --out PFX  (native transport)
-  node   --cert F --key F --ca F --listen HOST:PORT [--allow SANs]      run the node daemon
+  node   --cert F --key F --ca F --listen HOST:PORT [--allow SANs] [--crl F]   run the node daemon
   shell  [--verbose] [--log-file PATH]                 interactive REPL (default)
 
   --version   print the version and exit
