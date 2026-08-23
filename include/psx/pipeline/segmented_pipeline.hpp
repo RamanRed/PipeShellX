@@ -49,7 +49,13 @@ public:
     SegmentedPipeline(const SegmentedPipeline&) = delete;
     SegmentedPipeline& operator=(const SegmentedPipeline&) = delete;
 
-    psx::Result<void> run(const std::vector<ResolvedStage>& stages, std::function<void(Outcome)> onComplete);
+    psx::Result<void>
+    run(const std::vector<ResolvedStage>& stages, std::function<void(Outcome)> onComplete, bool externalStdin = false);
+
+    // Feed the pipeline's first stage stdin (only when run(..., externalStdin=true))
+    // -- used to splice a fan-in source ahead of the pipeline.
+    void writeStdin(std::string_view bytes);
+    void closeStdin();
 
 private:
     struct Segment {
@@ -73,6 +79,7 @@ private:
     OnOutput onStderr_;
     std::function<void(Outcome)> onComplete_;
     std::vector<Segment> segments_;
+    bool externalStdin_ = false;
     bool done_ = false;
 };
 

@@ -139,6 +139,15 @@ pipeshellx pipe -i fleet.ini --cert ctl.crt --key ctl.key --ca ca.crt \
   "'grep ERROR /var/log/app.log'@web-01 | 'sort -u'@db-01"
 ```
 
+When a placement names an inventory **group**, the first stage fans in: it runs
+on every host of the group and their merged stdout feeds the rest of the
+pipeline (the §5.2 sharded shape):
+
+```bash
+pipeshellx pipe -i fleet.ini --cert c --key k --ca a \
+  "'grep -h order=42 /data/*.log'@shards | 'sort -m -k1'@local"
+```
+
 Every stage's stdin/stdout crosses the connection with flow control; an upstream
 exit closes the downstream's stdin, and the exit code follows `pipefail`. Stages
 can mix local and remote freely — `@local` (or no placement) runs on the

@@ -16,6 +16,7 @@
 #include <vector>
 
 #if defined(PIPESHELLX_HAVE_TLS)
+#include "psx/pipeline/fanin_pipeline.hpp"
 #include "psx/pipeline/segmented_pipeline.hpp"
 
 #include <fstream>
@@ -123,6 +124,88 @@ std::optional<std::string> slurp(const std::string& path) {
     return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 }
 
+// Fan-in: the first stage runs on every host of a group and the merged output
+// feeds the rest of the pipeline (§5.2 `grep@shards | sort@local`).
+int runFanIn(const std::vector<psx::pipeline::Stage>& stages,
+             const PipeArgs& args,
+             const psx::inventory::Inventory& inventory,
+             const std::string& cert,
+             const std::string& key,
+             const std::string& ca,
+             std::ostream& out,
+             std::ostream& err) {
+    std::vector<psx::transport::NativeController::Target> sourceTargets;
+    for (const psx::inventory::Host& host : inventory.selectGroup(stages.front().placement)) {
+        sourceTargets.push_back(
+            {.host = host.host,
+             .port = static_cast<std::uint16_t>(host.nativePort != 0 ? host.nativePort : args.nativePort),
+             .expectedSan = host.san});
+    }
+
+    std::vector<psx::pipeline::ResolvedStage> downstream;
+    for (std::size_t i = 1; i < stages.size(); ++i) {
+        const auto& stage = stages[i];
+        if (isLocalPlacement(stage.placement)) {
+            downstream.push_back({.argv = stage.argv, .host = "", .port = 0, .expectedSan = ""});
+            continue;
+        }
+        if (!inventory.selectGroup(stage.placement).empty()) {
+            err << "pipeshellx pipe: a group placement '@" << stage.placement
+                << "' is only supported on the first stage\n";
+            return 2;
+        }
+        std::vector<psx::inventory::Host> hosts;
+        try {
+            hosts = inventory.selectHosts({stage.placement});
+        } catch (const std::exception& e) {
+            err << "pipeshellx pipe: " << e.what() << "\n";
+            return 2;
+        }
+        const psx::inventory::Host& host = hosts.front();
+        downstream.push_back(
+            {.argv = stage.argv,
+             .host = host.host,
+             .port = static_cast<std::uint16_t>(host.nativePort != 0 ? host.nativePort : args.nativePort),
+             .expectedSan = host.san});
+    }
+
+    auto reactor = psx::runtime::Reactor::create({.signals = {psx::os::Signal::Interrupt, psx::os::Signal::Terminate}});
+    if (!reactor.ok()) {
+        err << "pipeshellx pipe: " << reactor.error().message() << "\n";
+        return 2;
+    }
+    psx::runtime::Reactor& r = *reactor.value();
+
+    int exitCode = 0;
+    bool completed = false;
+    std::string failure;
+    psx::pipeline::FanInPipeline runner(
+        r, {.certificatePem = cert, .privateKeyPem = key, .caPem = ca},
+        [&out](std::string_view chunk) { out.write(chunk.data(), static_cast<std::streamsize>(chunk.size())); },
+        [&err](std::string_view chunk) { err.write(chunk.data(), static_cast<std::streamsize>(chunk.size())); });
+    auto started =
+        runner.run(stages.front().argv, sourceTargets, downstream, [&](psx::pipeline::FanInPipeline::Outcome outcome) {
+            exitCode = outcome.exitCode;
+            failure = outcome.error;
+            completed = true;
+            r.stop();
+        });
+    if (!started.ok()) {
+        err << "pipeshellx pipe: " << started.error().message() << "\n";
+        return 2;
+    }
+    (void)r.onSignal([&r](psx::os::Signal) { r.stop(); });
+    (void)r.run();
+    out.flush();
+    if (!completed) {
+        return 130;
+    }
+    if (!failure.empty()) {
+        err << "pipeshellx pipe: " << failure << "\n";
+    }
+    return exitCode;
+}
+
 // Runs a pipeline with at least one remote stage via SegmentedPipeline,
 // resolving each @placement to a node through the inventory; @local/unplaced
 // stages run on the controller and are spliced in.
@@ -156,6 +239,11 @@ int runSegmented(const std::vector<psx::pipeline::Stage>& stages,
     } catch (const std::exception& e) {
         err << "pipeshellx pipe: " << e.what() << "\n";
         return 2;
+    }
+
+    // Fan-in: the first stage names a group of >1 hosts -> run it on all of them.
+    if (!isLocalPlacement(stages.front().placement) && inventory.selectGroup(stages.front().placement).size() > 1) {
+        return runFanIn(stages, args, inventory, *cert, *key, *ca, out, err);
     }
 
     std::vector<psx::pipeline::ResolvedStage> resolved;
@@ -252,6 +340,15 @@ int runCheck(const std::vector<psx::pipeline::Stage>& stages,
         out << "  " << stage.id << "  " << command;
         if (isLocalPlacement(stage.placement)) {
             out << "  @local\n";
+            continue;
+        }
+        const auto group = inventory.selectGroup(stage.placement);
+        if (group.size() > 1) {
+            out << "  @" << stage.placement << " (fan-in) ->";
+            for (const psx::inventory::Host& host : group) {
+                out << " " << host.host << ":" << (host.nativePort != 0 ? host.nativePort : args.nativePort);
+            }
+            out << "\n";
             continue;
         }
         std::vector<psx::inventory::Host> hosts;

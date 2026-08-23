@@ -30,11 +30,12 @@ SegmentedPipeline::SegmentedPipeline(psx::runtime::Reactor& reactor,
 SegmentedPipeline::~SegmentedPipeline() = default;
 
 psx::Result<void> SegmentedPipeline::run(const std::vector<ResolvedStage>& stages,
-                                         std::function<void(Outcome)> onComplete) {
+                                         std::function<void(Outcome)> onComplete, bool externalStdin) {
     if (stages.empty()) {
         return psx::Error{psx::ErrorClass::InvalidArgument, 0, "empty pipeline"};
     }
     onComplete_ = std::move(onComplete);
+    externalStdin_ = externalStdin;
 
     // Split into maximal same-locality segments, keeping the resolved stages so
     // each segment's runner can be built after the whole chain is grouped.
@@ -64,7 +65,7 @@ psx::Result<void> SegmentedPipeline::run(const std::vector<ResolvedStage>& stage
     // any output flows.
     for (std::size_t i = 0; i < grouped.size(); ++i) {
         Segment& segment = segments_[i];
-        const bool externalStdin = i > 0;
+        const bool externalStdin = i > 0 || externalStdin_; // segment 0 is fed when the pipeline itself is
         auto onDone = [this, i](std::vector<int> codes, std::string error) {
             onSegmentDone(i, std::move(codes), error);
         };
@@ -148,6 +149,16 @@ void SegmentedPipeline::onSegmentDone(std::size_t index, std::vector<int> exitCo
     finish(std::move(outcome));
 }
 
+void SegmentedPipeline::writeStdin(std::string_view bytes) {
+    if (!done_ && !segments_.empty()) {
+        segments_.front().writeStdin(bytes);
+    }
+}
+void SegmentedPipeline::closeStdin() {
+    if (!done_ && !segments_.empty()) {
+        segments_.front().closeStdin();
+    }
+}
 void SegmentedPipeline::finish(Outcome outcome) {
     if (done_) {
         return;

@@ -6,6 +6,7 @@
 #include "psx/transport/node_stage_runner.hpp"
 
 #include "psx/pipeline/distributed_runner.hpp"
+#include "psx/pipeline/fanin_pipeline.hpp"
 #include "psx/pipeline/segmented_pipeline.hpp"
 
 #include "psx/os/socket.hpp"
@@ -1346,4 +1347,87 @@ TEST(NativeTransportTest, ConnectToAClosedPortFailsCleanly) {
 
     EXPECT_TRUE(errored) << "a refused connect must surface as onError";
     EXPECT_FALSE(ready);
+}
+
+namespace {
+// Runs a fan-in pipeline: `sourceArgv` on `fanHosts` copies of one node, merged
+// into `downstream`. Returns the final output + outcome.
+struct FanResult {
+    std::string output;
+    int exitCode = -1;
+    bool completed = false;
+    std::string error;
+};
+FanResult runFanIn(const std::vector<std::string>& sourceArgv,
+                   int fanHosts,
+                   const std::vector<psx::pipeline::ResolvedStage>& downstream,
+                   int timeoutSeconds) {
+    using psx::ca::CertificateAuthority;
+    using psx::pipeline::FanInPipeline;
+
+    FanResult result;
+    auto ca = CertificateAuthority::create("psx-fleet");
+    EXPECT_TRUE(ca.ok());
+    auto nodeId = ca.value().issue("psx://node/1");
+    auto ctlId = ca.value().issue("psx://controller");
+    EXPECT_TRUE(nodeId.ok() && ctlId.ok());
+    const std::string caCert = ca.value().certificatePem();
+
+    auto listener = Socket::listen("127.0.0.1", 0);
+    EXPECT_TRUE(listener.ok());
+    const std::uint16_t port = listener.value().localPort().value();
+
+    auto reactor = Reactor::create();
+    EXPECT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+
+    NodeServer server(r, std::move(listener.value()),
+                      {.certificatePem = nodeId.value().certificatePem,
+                       .privateKeyPem = nodeId.value().privateKeyPem,
+                       .caPem = caCert},
+                      {});
+    EXPECT_TRUE(server.start().ok());
+
+    auto runner = std::make_unique<FanInPipeline>(r,
+                                                  psx::os::TlsConfig{.certificatePem = ctlId.value().certificatePem,
+                                                                     .privateKeyPem = ctlId.value().privateKeyPem,
+                                                                     .caPem = caCert},
+                                                  [&](std::string_view chunk) { result.output.append(chunk); });
+
+    std::vector<psx::transport::NativeController::Target> targets(
+        static_cast<std::size_t>(fanHosts),
+        psx::transport::NativeController::Target{.host = "127.0.0.1", .port = port, .expectedSan = ""});
+
+    EXPECT_TRUE(runner
+                    ->run(sourceArgv, targets, downstream,
+                          [&](FanInPipeline::Outcome outcome) {
+                              result.exitCode = outcome.exitCode;
+                              result.error = outcome.error;
+                              result.completed = true;
+                              r.stop();
+                          })
+                    .ok());
+    r.after(std::chrono::seconds(timeoutSeconds), [&] { r.stop(); });
+    EXPECT_TRUE(r.run().ok());
+    return result;
+}
+} // namespace
+
+// Fan-in with no downstream: the sources' merged output is the result.
+TEST(FanInPipelineTest, MergesSourcesWithNoDownstream) {
+    auto result = runFanIn({"echo", "shard"}, /*fanHosts=*/2, /*downstream=*/{}, 10);
+    ASSERT_TRUE(result.completed) << result.error;
+    EXPECT_EQ(result.output, "shard\nshard\n"); // both hosts printed "shard\n"
+    EXPECT_EQ(result.exitCode, 0);
+}
+
+// Fan-in feeding a local downstream (the §5.2 `grep@shards | sort@local` shape).
+TEST(FanInPipelineTest, MergesSourcesIntoALocalDownstream) {
+    // 3 hosts each emit "line\n"; the local sort receives all 3 lines.
+    std::vector<psx::pipeline::ResolvedStage> downstream = {
+        {.argv = {"wc", "-l"}, .host = "", .port = 0, .expectedSan = ""}};
+    auto result = runFanIn({"echo", "line"}, /*fanHosts=*/3, downstream, 10);
+    ASSERT_TRUE(result.completed) << result.error;
+    EXPECT_NE(result.output.find("3"), std::string::npos) << "wc -l should count 3 merged lines";
+    EXPECT_EQ(result.exitCode, 0);
 }
