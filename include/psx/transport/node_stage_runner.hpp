@@ -23,7 +23,10 @@ public:
     // The Session this runner sends stage output/exit on must be bound() before
     // any stream is opened (it is the Session that dispatches onOpen to us).
     explicit NodeStageRunner(psx::runtime::Reactor& reactor);
-    void bind(Session& session) noexcept { session_ = &session; }
+    void bind(Session& session) {
+        session_ = &session;
+        session_->onStreamWritable([this](StreamId id) { resumeReads(id); });
+    }
     ~NodeStageRunner() override;
     NodeStageRunner(const NodeStageRunner&) = delete;
     NodeStageRunner& operator=(const NodeStageRunner&) = delete;
@@ -42,6 +45,7 @@ private:
         bool stdoutOpen = true;
         bool stderrOpen = true;
         bool exited = false;
+        bool paused = false; // reads suspended for backpressure (send window full)
         psx::os::ExitStatus status{};
     };
 
@@ -49,6 +53,8 @@ private:
     void onReadable(StreamId id, bool isStdout);
     void onStageExit(StreamId id);
     void closeReader(bool isStdout, Stage& stage);
+    void setReadInterest(Stage& stage, bool enabled);
+    void resumeReads(StreamId id);
     void finishIfDone(StreamId id);
 
     psx::runtime::Reactor& reactor_;

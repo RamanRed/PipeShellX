@@ -181,3 +181,85 @@ TEST(NodeStageRunnerTest, RunsARealCommandOverTheEncryptedBackplane) {
     EXPECT_EQ(sink.status.code, 0);
     EXPECT_EQ(runner.runningStages(), 0U); // the stage was cleaned up
 }
+
+namespace {
+// A controller sink that grants credit as it receives data (so backpressure can
+// release) and collects the full output.
+struct ConsumingSink : SessionHandler {
+    Session* session = nullptr;
+    Reactor* reactor = nullptr;
+    std::string data;
+    bool exited = false;
+    void onData(StreamId id, std::string_view d, bool) override {
+        data.append(d);
+        session->consume(id, static_cast<std::uint32_t>(d.size()));
+    }
+    void onExit(StreamId, const ExitStatus&) override {
+        exited = true;
+        reactor->stop();
+    }
+};
+} // namespace
+
+TEST(NodeStageRunnerTest, BackpressureDeliversLargeOutputThroughASmallWindow) {
+    auto listener = Socket::listen("127.0.0.1", 0);
+    ASSERT_TRUE(listener.ok());
+    auto clientSock = Socket::connect("127.0.0.1", listener.value().localPort().value());
+    ASSERT_TRUE(clientSock.ok());
+    Socket serverSock = acceptWithin(listener.value());
+    ASSERT_TRUE(serverSock.valid());
+
+    const auto ctlId = tls_test::generateSelfSigned("psx://controller");
+    const auto nodeId = tls_test::generateSelfSigned("psx://node/1");
+    auto ctlTls = Tls::create(
+        {.certificatePem = ctlId.certPem, .privateKeyPem = ctlId.keyPem, .caPem = nodeId.certPem, .isServer = false});
+    auto nodeTls = Tls::create(
+        {.certificatePem = nodeId.certPem, .privateKeyPem = nodeId.keyPem, .caPem = ctlId.certPem, .isServer = true});
+    ASSERT_TRUE(ctlTls.ok() && nodeTls.ok());
+
+    auto reactor = Reactor::create();
+    ASSERT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+
+    NodeStageRunner runner(r);
+    ConsumingSink sink;
+    sink.reactor = &r;
+    bool errored = false;
+    NativeTransport* ctlPtr = nullptr;
+
+    // Deliberately tiny window (512 B) so a ~9 KB stage forces many pause/resume
+    // cycles in the node's reader.
+    NativeTransport node(r, std::move(serverSock), std::move(nodeTls.value()), Role::Node, runner,
+                         {.onError =
+                              [&](psx::Error) {
+                                  errored = true;
+                                  r.stop();
+                              }},
+                         /*initialWindow=*/512);
+    runner.bind(node.session());
+    NativeTransport ctl(r, std::move(clientSock.value()), std::move(ctlTls.value()), Role::Controller, sink,
+                        {.onReady = [&] { ctlPtr->session().open({.argv = {"sh", "-c", "seq 1 2000"}}); },
+                         .onError =
+                             [&](psx::Error) {
+                                 errored = true;
+                                 r.stop();
+                             }},
+                        /*initialWindow=*/512);
+    sink.session = &ctl.session();
+    ctlPtr = &ctl;
+
+    ASSERT_TRUE(node.start().ok());
+    ASSERT_TRUE(ctl.start().ok());
+    r.after(std::chrono::seconds(10), [&] { r.stop(); });
+    ASSERT_TRUE(r.run().ok());
+
+    EXPECT_FALSE(errored);
+    ASSERT_TRUE(sink.exited);
+    // The full `seq 1 2000` output arrived intact despite the tiny window.
+    std::string expected;
+    for (int i = 1; i <= 2000; ++i) {
+        expected += std::to_string(i) + "\n";
+    }
+    EXPECT_EQ(sink.data.size(), expected.size());
+    EXPECT_EQ(sink.data, expected);
+}

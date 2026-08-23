@@ -10,14 +10,15 @@ NativeTransport::NativeTransport(psx::runtime::Reactor& reactor,
                                  psx::os::Tls tls,
                                  Role role,
                                  SessionHandler& handler,
-                                 Callbacks callbacks)
+                                 Callbacks callbacks,
+                                 std::uint32_t initialWindow)
     : callbacks_(std::move(callbacks)) {
     // The Session's outbound frames are encrypted and sent by the TlsStream. The
     // capture is safe: the write callback only fires when the Session sends, which
     // is after onReady, by when stream_ is set.
     session_ = std::make_unique<Session>(
         role, [this](std::string_view frame) { stream_->send(std::span<const char>(frame.data(), frame.size())); },
-        handler);
+        handler, initialWindow);
     stream_ = std::make_unique<TlsStream>(
         reactor, std::move(socket), std::move(tls),
         TlsStream::Callbacks{.onReady =

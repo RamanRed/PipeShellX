@@ -41,6 +41,7 @@ void Session::sendData(StreamId id, std::string_view bytes, bool endStream) {
 }
 
 void Session::flushStream(StreamId id, Stream& stream) {
+    const bool wasFull = stream.sendBuffer.size() >= initialWindow_;
     while (!stream.sendBuffer.empty() && stream.sendCredit > 0) {
         const auto chunk =
             static_cast<std::uint32_t>(std::min<std::size_t>(stream.sendBuffer.size(), stream.sendCredit));
@@ -60,6 +61,22 @@ void Session::flushStream(StreamId id, Stream& stream) {
         send(Frame{.type = FrameType::Data, .flags = kFlagEndStream, .streamId = id, .payload = {}});
         stream.sendEndPending = false;
     }
+    // A deferred EXIT rides out once its DATA has fully drained (terminal).
+    if (stream.sendBuffer.empty() && !stream.sendEndPending && stream.exitPending) {
+        const auto status = stream.exitStatus;
+        send(Frame{.type = FrameType::Exit, .flags = kFlagEndStream, .streamId = id, .payload = encodeExit(status)});
+        streams_.erase(id); // invalidates `stream`; nothing below may touch it
+        return;
+    }
+    // The buffer drained back below the high-water mark: the producer may resume.
+    if (wasFull && stream.sendBuffer.size() < initialWindow_ && streamWritable_) {
+        streamWritable_(id);
+    }
+}
+
+bool Session::streamWritable(StreamId id) const {
+    auto it = streams_.find(id);
+    return it == streams_.end() || it->second.sendBuffer.size() < initialWindow_;
 }
 
 void Session::consume(StreamId id, std::uint32_t n) {
@@ -74,8 +91,20 @@ void Session::consume(StreamId id, std::uint32_t n) {
 }
 
 void Session::sendExit(StreamId id, const psx::os::ExitStatus& status) {
+    auto it = streams_.find(id);
+    if (it == streams_.end()) {
+        return; // already closed
+    }
+    Stream& stream = it->second;
+    if (!stream.sendBuffer.empty() || stream.sendEndPending) {
+        // DATA is still flow-controlled in the buffer; EXIT must not overtake it.
+        // flushStream() emits it once the buffer drains.
+        stream.exitPending = true;
+        stream.exitStatus = status;
+        return;
+    }
     send(Frame{.type = FrameType::Exit, .flags = kFlagEndStream, .streamId = id, .payload = encodeExit(status)});
-    streams_.erase(id); // terminal
+    streams_.erase(it); // terminal
 }
 
 void Session::ping() {
@@ -159,7 +188,10 @@ psx::Result<void> Session::dispatch(Frame&& frame) {
         case FrameType::WindowUpdate: {
             auto it = streams_.find(frame.streamId);
             if (it == streams_.end()) {
-                return protocolError("WINDOW_UPDATE for an unknown stream");
+                // A stream can close (EXIT) while the peer still has in-flight
+                // WINDOW_UPDATEs for it; credit for a gone stream is a harmless
+                // no-op, so ignore it rather than tearing down the connection.
+                return {};
             }
             auto delta = decodeWindowUpdate(frame.payload);
             if (!delta.ok()) {

@@ -66,6 +66,14 @@ public:
     // The receiving app consumed `n` bytes previously delivered via onData for
     // this stream; may emit a WINDOW_UPDATE granting the peer more credit.
     void consume(StreamId id, std::uint32_t n);
+
+    // Backpressure for producers: false once a stream's unflushed send buffer has
+    // grown to the initial window (the peer isn't granting credit fast enough), so
+    // the producer should stop feeding sendData(). onStreamWritable(id) fires when
+    // a full stream's buffer drains back below that mark (credit arrived), so the
+    // producer can resume. Unknown streams read as writable.
+    bool streamWritable(StreamId id) const;
+    void onStreamWritable(std::function<void(StreamId)> callback) { streamWritable_ = std::move(callback); }
     void ping();
     void goAway();
 
@@ -82,6 +90,8 @@ private:
         std::uint32_t sendCredit;             // outbound: bytes we may still send on this stream
         std::string sendBuffer;               // outbound bytes waiting on credit
         bool sendEndPending = false;          // an endStream queued behind buffered bytes
+        bool exitPending = false;             // an EXIT queued behind still-buffered DATA
+        psx::os::ExitStatus exitStatus{};     // the deferred EXIT's status
     };
 
     void send(const Frame& frame);
@@ -95,6 +105,7 @@ private:
     std::unordered_map<StreamId, Stream> streams_;
     StreamId nextStreamId_ = 1;
     std::uint32_t initialWindow_;
+    std::function<void(StreamId)> streamWritable_;
     bool goneAway_ = false;
 };
 

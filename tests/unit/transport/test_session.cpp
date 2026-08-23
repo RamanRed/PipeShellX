@@ -237,3 +237,28 @@ TEST(SessionTest, AWindowUpdateThatOverflowsTheWindowIsAProtocolError) {
         {.type = FrameType::WindowUpdate, .flags = 0, .streamId = id, .payload = encodeWindowUpdate(0xFFFFFFF0u)});
     EXPECT_FALSE(ctl.receive(wu).ok());
 }
+
+TEST(SessionTest, StreamWritableSignalsBackpressureAndResumeOnCredit) {
+    SmallLink link; // window 8
+    const StreamId id = link.a.open({.argv = {"x"}, .cwd = ""});
+    ASSERT_TRUE(link.pump().ok());
+
+    bool resumed = false;
+    link.a.onStreamWritable([&](StreamId) { resumed = true; });
+
+    // Queue 24 bytes into an 8-byte window: 8 fly, 16 buffer (>= window) -> not writable.
+    link.a.sendData(id, "0123456789ABCDEFGHIJKLMN", /*endStream=*/true);
+    ASSERT_TRUE(link.pump().ok());
+    EXPECT_FALSE(link.a.streamWritable(id));
+    EXPECT_FALSE(resumed);
+
+    // The receiver consuming grants credit; the sender drains and, once back below
+    // the mark, fires onStreamWritable and reports writable again.
+    for (int round = 0; round < 4 && !link.a.streamWritable(id); ++round) {
+        link.b.consume(id, 8);
+        ASSERT_TRUE(link.pump().ok());
+    }
+    EXPECT_EQ(link.nodeBytes(), "0123456789ABCDEFGHIJKLMN");
+    EXPECT_TRUE(link.a.streamWritable(id));
+    EXPECT_TRUE(resumed);
+}

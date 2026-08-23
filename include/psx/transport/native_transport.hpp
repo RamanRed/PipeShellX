@@ -7,6 +7,7 @@
 #include "psx/transport/session.hpp"
 #include "psx/transport/tls_stream.hpp"
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -29,7 +30,8 @@ public:
                     psx::os::Tls tls,
                     Role role,
                     SessionHandler& handler,
-                    Callbacks callbacks);
+                    Callbacks callbacks,
+                    std::uint32_t initialWindow = kDefaultStreamWindow);
 
     // Registers with the reactor and starts the handshake.
     psx::Result<void> start();

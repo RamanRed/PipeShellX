@@ -97,6 +97,14 @@ void NodeStageRunner::onReadable(StreamId id, bool isStdout) {
 
     std::array<char, 16 * 1024> buffer{};
     while (true) { // edge-triggered: drain to WouldBlock
+        if (!session_->streamWritable(id)) {
+            // The peer isn't granting credit fast enough; stop pulling so the
+            // stage's own write(2) blocks (kernel backpressure). Resume on
+            // WINDOW_UPDATE via resumeReads().
+            setReadInterest(stage, false);
+            stage.paused = true;
+            return;
+        }
         auto got = psx::os::read(reader, std::span<char>(buffer.data(), buffer.size()));
         if (got.ok()) {
             if (got.value() == 0) {
@@ -142,6 +150,29 @@ void NodeStageRunner::onStageExit(StreamId id) {
     }
     stage.exited = true;
     finishIfDone(id);
+}
+
+void NodeStageRunner::setReadInterest(Stage& stage, bool enabled) {
+    const psx::os::Interest interest = enabled ? psx::os::Interest::Readable : psx::os::Interest::None;
+    if (stage.stdoutOpen && stage.stdoutToken != 0) {
+        (void)reactor_.modify(stage.stdoutToken, interest);
+    }
+    if (stage.stderrOpen && stage.stderrToken != 0) {
+        (void)reactor_.modify(stage.stderrToken, interest);
+    }
+}
+
+void NodeStageRunner::resumeReads(StreamId id) {
+    auto it = stages_.find(id);
+    if (it == stages_.end() || !it->second.paused) {
+        return;
+    }
+    it->second.paused = false;
+    setReadInterest(it->second, true);
+    // Edge-triggered: bytes may already be buffered in the pipe, so drain now
+    // rather than waiting for the next readable edge.
+    onReadable(id, /*isStdout=*/true);
+    onReadable(id, /*isStdout=*/false);
 }
 
 void NodeStageRunner::finishIfDone(StreamId id) {
