@@ -25,6 +25,8 @@ else()
         sink/group_sink.cpp
         sink/json_sink.cpp
         sink/consensus.cpp
+        sink/consensus_sink.cpp
+        sink/ordered_sink.cpp
         sink/stream_sink.cpp
         audit/audit_log.cpp
     )

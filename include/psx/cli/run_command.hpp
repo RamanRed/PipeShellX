@@ -20,7 +20,7 @@ public:
     using std::runtime_error::runtime_error;
 };
 
-enum class SinkMode { Group, Stream, Json };
+enum class SinkMode { Group, Stream, Json, Consensus };
 enum class SelectorKind { All, Group, Tag, Hosts };
 
 struct Selector {
@@ -33,6 +33,8 @@ struct RunInvocation {
     std::string inventoryPath; // -i / --inventory; empty = default lookup
     Selector selector;
     SinkMode sink = SinkMode::Group;
+    bool consensusJson = false; // --json with --consensus
+    bool ordered = false;       // --ordered: sort hosts before rendering
     int timeoutSec = 0;
     int concurrency = 64; // -c / --concurrency: workers in flight (0 = all at once)
     psx::stream::OverflowPolicy policy = psx::stream::OverflowPolicy::Block; // --policy
@@ -40,6 +42,7 @@ struct RunInvocation {
     std::string policyPath;                 // --policy FILE: restrict the command (empty = unrestricted)
     bool reuse = false;                     // --reuse: ssh ControlMaster connection reuse
     int retries = 0;                        // --retries N: extra attempts on a transient transport failure
+    bool idempotent = false;                // --idempotent: allow retrying the command
     RemoteShell shell = RemoteShell::Posix; // --shell: remote command quoting (posix/cmd/powershell)
     bool failFast = false;                  // --fail-fast: abort the run on the first final failure
     std::string auditPath;                  // --audit-log FILE: append a JSONL audit trail (empty = off)

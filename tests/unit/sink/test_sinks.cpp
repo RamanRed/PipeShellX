@@ -2,6 +2,7 @@
 
 #include "psx/sink/group_sink.hpp"
 #include "psx/sink/json_sink.hpp"
+#include "psx/sink/ordered_sink.hpp"
 #include "psx/sink/stream_sink.hpp"
 
 #include <sstream>
@@ -10,6 +11,7 @@
 using psx::sink::Channel;
 using psx::sink::GroupSink;
 using psx::sink::JsonSink;
+using psx::sink::OrderedSink;
 using psx::sink::RunSummary;
 using psx::sink::StageResult;
 using psx::sink::StreamSink;
@@ -44,6 +46,20 @@ TEST(GroupSinkTest, StagesAppearInFinishOrderEachGroupedTogether) {
     sink.stageFinished("b", StageResult{0, false, "", 0});
     sink.stageFinished("a", StageResult{0, false, "", 0});
     EXPECT_EQ(out.str(), "CLIENT b\nb1\nCLIENT a\na1\na2\n");
+}
+
+TEST(OrderedSinkTest, ReplaysStagesGroupedAndSortedAtRunEnd) {
+    std::ostringstream out;
+    OrderedSink sink(std::make_unique<GroupSink>(out));
+    sink.line("z", Channel::Stdout, "z1");
+    sink.line("a", Channel::Stdout, "a1");
+    sink.line("z", Channel::Stdout, "z2");
+    sink.stageFinished("z", StageResult{0, false, "", 0});
+    sink.stageFinished("a", StageResult{0, false, "", 0});
+
+    EXPECT_TRUE(out.str().empty());
+    sink.runFinished(RunSummary{2, 2, 0, 0, false});
+    EXPECT_EQ(out.str(), "CLIENT a\na1\nCLIENT z\nz1\nz2\n");
 }
 
 // ---------------------------------------------------------------- StreamSink

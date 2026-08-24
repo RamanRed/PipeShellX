@@ -1,4 +1,5 @@
 #include "psx/sink/consensus.hpp"
+#include "psx/sink/consensus_sink.hpp"
 
 #include <gtest/gtest.h>
 
@@ -102,4 +103,21 @@ TEST(ConsensusTest, JsonEscapesSpecialCharactersInOutput) {
     renderConsensusJson(report, out);
     EXPECT_NE(out.str().find("q\\\"t\\tn\\n"), std::string::npos); // quote/tab/newline escaped
     EXPECT_NE(out.str().find("\"unanimous\":true"), std::string::npos);
+}
+
+TEST(ConsensusSinkTest, RendersCapturedStdoutAtRunEnd) {
+    std::ostringstream out;
+    psx::sink::ConsensusSink sink(out, false);
+    sink.stageStarted("b");
+    sink.line("b", psx::sink::Channel::Stdout, "same");
+    sink.stageFinished("b", psx::sink::StageResult{});
+    sink.stageStarted("a");
+    sink.line("a", psx::sink::Channel::Stdout, "same");
+    sink.line("a", psx::sink::Channel::Stderr, "ignored");
+    sink.stageFinished("a", psx::sink::StageResult{});
+
+    EXPECT_TRUE(out.str().empty());
+    sink.runFinished(psx::sink::RunSummary{2, 2, 0, 0, false});
+    EXPECT_NE(out.str().find("all 2 hosts agree"), std::string::npos);
+    EXPECT_EQ(out.str().find("ignored"), std::string::npos);
 }
