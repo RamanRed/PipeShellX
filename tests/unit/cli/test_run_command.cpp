@@ -48,6 +48,28 @@ TEST(ParseRunTest, SinkModesAndInventoryAndTimeout) {
     EXPECT_THROW(static_cast<void>(parseRun({"--stream", "--json", "--", "id"})), std::runtime_error); // one sink only
 }
 
+TEST(ParseRunTest, ConsensusOrderedFailureAndRetryFlags) {
+    const auto defaults = parseRun({"--", "id"});
+    EXPECT_EQ(defaults.sink, SinkMode::Group);
+    EXPECT_FALSE(defaults.consensusJson);
+    EXPECT_FALSE(defaults.ordered);
+    EXPECT_FALSE(defaults.failFast);
+    EXPECT_FALSE(defaults.idempotent);
+
+    EXPECT_EQ(parseRun({"--consensus", "--", "id"}).sink, SinkMode::Consensus);
+    const auto consensusJson = parseRun({"--consensus", "--json", "--", "id"});
+    EXPECT_EQ(consensusJson.sink, SinkMode::Consensus);
+    EXPECT_TRUE(consensusJson.consensusJson);
+    EXPECT_TRUE(parseRun({"--ordered", "--", "id"}).ordered);
+    EXPECT_TRUE(parseRun({"--fail-fast", "--", "id"}).failFast);
+    EXPECT_TRUE(parseRun({"--idempotent", "--retries", "2", "--", "id"}).idempotent);
+    EXPECT_EQ(parseRun({"--idempotent", "--retries", "2", "--", "id"}).retries, 2);
+
+    EXPECT_THROW(static_cast<void>(parseRun({"--consensus", "--stream", "--", "id"})), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(parseRun({"--consensus", "--group", "--", "id"})), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(parseRun({"--consensus", "--json", "--stream", "--", "id"})), std::runtime_error);
+}
+
 TEST(ParseRunTest, PolicyAndRingFlags) {
     using psx::stream::OverflowPolicy;
     EXPECT_EQ(psx::cli::parseRun({"--", "id"}).policy, OverflowPolicy::Block);

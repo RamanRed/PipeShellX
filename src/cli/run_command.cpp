@@ -10,8 +10,10 @@
 #include "psx/os/system.hpp"
 #include "psx/policy/policy.hpp"
 #include "psx/runtime/ids.hpp"
+#include "psx/sink/consensus_sink.hpp"
 #include "psx/sink/group_sink.hpp"
 #include "psx/sink/json_sink.hpp"
+#include "psx/sink/ordered_sink.hpp"
 #include "psx/sink/stream_sink.hpp"
 
 #if defined(PIPESHELLX_HAVE_TLS)
@@ -136,7 +138,7 @@ std::size_t parseSize(const std::string& value) {
 
 void setSink(RunInvocation& invocation, SinkMode mode, bool& sinkSet) {
     if (sinkSet) {
-        throw CliError("only one of --stream/--group/--json may be given");
+        throw CliError("only one primary sink mode may be given");
     }
     invocation.sink = mode;
     sinkSet = true;
@@ -208,13 +210,28 @@ RunInvocation parseRun(const std::vector<std::string>& args) {
         } else if (arg == "--group") {
             setSink(invocation, SinkMode::Group, sinkSet);
         } else if (arg == "--json") {
-            setSink(invocation, SinkMode::Json, sinkSet);
+            if (sinkSet && invocation.sink == SinkMode::Consensus) {
+                invocation.consensusJson = true;
+            } else {
+                setSink(invocation, SinkMode::Json, sinkSet);
+            }
+        } else if (arg == "--consensus") {
+            if (sinkSet && invocation.sink != SinkMode::Json) {
+                throw CliError("only one primary sink mode may be given");
+            }
+            invocation.consensusJson = sinkSet && invocation.sink == SinkMode::Json;
+            invocation.sink = SinkMode::Consensus;
+            sinkSet = true;
+        } else if (arg == "--ordered") {
+            invocation.ordered = true;
         } else if (arg == "--reuse") {
             invocation.reuse = true;
         } else if (arg == "--retries") {
             invocation.retries = parseIntArg(valueFor(i, arg), "--retries");
         } else if (arg == "--fail-fast") {
             invocation.failFast = true;
+        } else if (arg == "--idempotent") {
+            invocation.idempotent = true;
         } else if (arg == "--canary") {
             invocation.canary = valueFor(i, arg);
         } else if (arg == "--shell") {
@@ -261,15 +278,26 @@ namespace {
 
 std::unique_ptr<psx::sink::Sink>
 makeSink(const RunInvocation& invocation, std::ostream& out, std::ostream& err, bool colourTty) {
+    std::unique_ptr<psx::sink::Sink> sink;
     switch (invocation.sink) {
         case SinkMode::Stream:
-            return std::make_unique<psx::sink::StreamSink>(out, err, invocation.colour && colourTty);
+            sink = std::make_unique<psx::sink::StreamSink>(out, err, invocation.colour && colourTty);
+            break;
         case SinkMode::Json:
-            return std::make_unique<psx::sink::JsonSink>(out);
+            sink = std::make_unique<psx::sink::JsonSink>(out);
+            break;
+        case SinkMode::Consensus:
+            sink = std::make_unique<psx::sink::ConsensusSink>(out, invocation.consensusJson);
+            break;
         case SinkMode::Group:
         default:
-            return std::make_unique<psx::sink::GroupSink>(out);
+            sink = std::make_unique<psx::sink::GroupSink>(out);
+            break;
     }
+    if (invocation.ordered) {
+        sink = std::make_unique<psx::sink::OrderedSink>(std::move(sink));
+    }
+    return sink;
 }
 
 } // namespace
@@ -355,7 +383,7 @@ int runNative(const RunInvocation& invocation,
     }
 
     int exitCode = 0;
-    auto onComplete = [&](std::vector<psx::transport::NativeController::HostResult> results) {
+    auto finishResults = [&](std::vector<psx::transport::NativeController::HostResult> results) {
         std::size_t succeeded = 0;
         for (auto& res : results) {
             HostFramers& hf = (*framers)[res.host];
@@ -378,6 +406,9 @@ int runNative(const RunInvocation& invocation,
         }
         r.stop();
     };
+    auto onComplete = [&](std::vector<psx::transport::NativeController::HostResult> results) {
+        finishResults(std::move(results));
+    };
 
     const psx::os::TlsConfig tlsConfig{.certificatePem = *cert, .privateKeyPem = *key, .caPem = *ca, .crlPem = crl};
     if (!invocation.canary.empty()) {
@@ -388,6 +419,65 @@ int runNative(const RunInvocation& invocation,
         (void)controller.start(targets, count, invocation.command, onComplete);
         if (invocation.timeoutSec > 0) {
             r.after(std::chrono::seconds(invocation.timeoutSec), [&] { controller.cancel("timed out"); });
+        }
+        (void)r.run();
+    } else if (invocation.failFast) {
+        // One controller per host exposes each final result so a failed host
+        // can cancel its siblings before the fleet-wide callback.
+        std::vector<std::unique_ptr<psx::transport::NativeController>> controllers;
+        controllers.reserve(targets.size());
+        for (std::size_t i = 0; i < targets.size(); ++i) {
+            controllers.push_back(std::make_unique<psx::transport::NativeController>(r, tlsConfig, onOutput));
+        }
+
+        std::vector<psx::transport::NativeController::HostResult> results(targets.size());
+        std::vector<bool> received(targets.size(), false);
+        std::size_t completed = 0;
+        bool failed = false;
+        auto completeOne = [&](std::size_t index,
+                               std::vector<psx::transport::NativeController::HostResult> hostResults) {
+            if (received[index]) {
+                return;
+            }
+            received[index] = true;
+            ++completed;
+            results[index] = std::move(hostResults.front());
+            const auto& result = results[index];
+            const bool ok = result.ok && result.exitCode == 0 && result.error.empty();
+            if (!ok && !failed) {
+                failed = true;
+                for (auto& controller : controllers) {
+                    controller->cancel("fail-fast");
+                }
+            }
+            if (completed == targets.size()) {
+                finishResults(std::move(results));
+            }
+        };
+
+        for (std::size_t i = 0; i < targets.size(); ++i) {
+            auto started =
+                controllers[i]->start({targets[i]}, invocation.command,
+                                      [&, i](std::vector<psx::transport::NativeController::HostResult> hostResults) {
+                                          completeOne(i, std::move(hostResults));
+                                      });
+            if (!started.ok() && !received[i]) {
+                completeOne(i, {psx::transport::NativeController::HostResult{.host = targets[i].host,
+                                                                             .ok = false,
+                                                                             .exitCode = -1,
+                                                                             .error = started.error().message(),
+                                                                             .output = {}}});
+            }
+            if (failed) {
+                controllers[i]->cancel("fail-fast");
+            }
+        }
+        if (invocation.timeoutSec > 0) {
+            r.after(std::chrono::seconds(invocation.timeoutSec), [&] {
+                for (auto& controller : controllers) {
+                    controller->cancel("timed out");
+                }
+            });
         }
         (void)r.run();
     } else {
@@ -475,7 +565,7 @@ int runSubcommand(const RunInvocation& invocation, std::ostream& out, std::ostre
                                                .controlPath = controlPath,
                                                .cancellable = true,
                                                .failFast = invocation.failFast,
-                                               .maxRetries = invocation.retries});
+                                               .maxRetries = invocation.idempotent ? invocation.retries : 0});
     const int exitCode = result.cancelled ? kExitCancelled : (result.exitCode == 0 ? 0 : 1);
 
     if (audit) {
