@@ -49,6 +49,7 @@ struct RunInvocation {
     std::string caPath;                     // --ca: trusted CA (native)
     std::string crlPath;                    // --crl: optional CRL to reject revoked node certs (native)
     int nativePort = 7433;                  // --native-port: the node listener port (native)
+    std::string canary;                     // --canary N|N%: roll out to this subset first (native)
     bool colour = true;                     // --no-color turns it off
     std::vector<std::string> command;       // the argv after `--`
 };
@@ -60,6 +61,10 @@ RunInvocation parseRun(const std::vector<std::string>& args);
 // through the chosen sink, and returns the process exit code (0 all succeeded,
 // 1 some stage failed, 2 usage/config, 3 no hosts selected). `colourTty` is
 // whether stdout is a terminal (the effective colour is colour && colourTty).
+// The number of hosts in a canary subset: `spec` is a count ("3") or a
+// percentage ("5%", rounded up); clamped to [1, total] (0 when total is 0).
+std::size_t canaryCount(const std::string& spec, std::size_t total);
+
 int runSubcommand(const RunInvocation& invocation, std::ostream& out, std::ostream& err, bool colourTty);
 
 } // namespace psx::cli

@@ -237,3 +237,26 @@ TEST(RunSubcommandTest, MissingPolicyFileIsExitCode2) {
     EXPECT_EQ(psx::cli::runSubcommand(inv, out, err, false), 2);
     EXPECT_NE(err.str().find("cannot open"), std::string::npos) << err.str();
 }
+
+TEST(ParseRunTest, CanaryFlagCarriesTheSpecVerbatim) {
+    EXPECT_TRUE(parseRun({"--", "id"}).canary.empty());
+    EXPECT_EQ(parseRun({"--canary", "2", "--", "id"}).canary, "2");
+    EXPECT_EQ(parseRun({"--canary", "10%", "--", "id"}).canary, "10%");
+}
+
+TEST(CanaryCountTest, CountsAndPercentagesClampIntoRange) {
+    using psx::cli::canaryCount;
+    // An explicit count, clamped to [1, total].
+    EXPECT_EQ(canaryCount("3", 10), 3U);
+    EXPECT_EQ(canaryCount("0", 10), 1U);    // never zero canaries when hosts exist
+    EXPECT_EQ(canaryCount("200", 10), 10U); // never more than the whole fleet
+    // Percentages round up so a small percent still exercises at least one host.
+    EXPECT_EQ(canaryCount("50%", 10), 5U);
+    EXPECT_EQ(canaryCount("5%", 10), 1U); // ceil(0.5) -> 1
+    EXPECT_EQ(canaryCount("100%", 7), 7U);
+    EXPECT_EQ(canaryCount("25%", 8), 2U);
+    // A malformed spec falls back to a single canary host.
+    EXPECT_EQ(canaryCount("abc", 10), 1U);
+    // No hosts -> no canaries, regardless of spec.
+    EXPECT_EQ(canaryCount("50%", 0), 0U);
+}

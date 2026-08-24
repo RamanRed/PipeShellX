@@ -18,8 +18,10 @@
 #include "psx/os/tls.hpp"
 #include "psx/runtime/reactor.hpp"
 #include "psx/stream/line_framer.hpp"
+#include "psx/transport/canary_controller.hpp"
 #include "psx/transport/native_controller.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <span>
 #include <unordered_map>
@@ -142,6 +144,27 @@ void setSink(RunInvocation& invocation, SinkMode mode, bool& sinkSet) {
 
 } // namespace
 
+std::size_t canaryCount(const std::string& spec, std::size_t total) {
+    if (total == 0) {
+        return 0;
+    }
+    const bool percent = !spec.empty() && spec.back() == '%';
+    const std::string number = percent ? spec.substr(0, spec.size() - 1) : spec;
+    long long value = 1;
+    try {
+        value = std::stoll(number);
+    } catch (const std::exception&) {
+        value = 1; // a malformed spec falls back to a single canary host
+    }
+    if (value < 0) {
+        value = 1;
+    }
+    std::size_t count = percent ? static_cast<std::size_t>((value * static_cast<long long>(total) + 99) / 100)
+                                : static_cast<std::size_t>(value);
+    count = std::clamp<std::size_t>(count, 1, total);
+    return count;
+}
+
 RunInvocation parseRun(const std::vector<std::string>& args) {
     RunInvocation invocation;
     bool sinkSet = false;
@@ -192,6 +215,8 @@ RunInvocation parseRun(const std::vector<std::string>& args) {
             invocation.retries = parseIntArg(valueFor(i, arg), "--retries");
         } else if (arg == "--fail-fast") {
             invocation.failFast = true;
+        } else if (arg == "--canary") {
+            invocation.canary = valueFor(i, arg);
         } else if (arg == "--shell") {
             invocation.shell = parseShell(valueFor(i, arg));
         } else if (arg == "--audit-log") {
@@ -307,8 +332,7 @@ int runNative(const RunInvocation& invocation,
             sink->line(host, channel, line);
         }
     };
-    psx::transport::NativeController controller(
-        r, {.certificatePem = *cert, .privateKeyPem = *key, .caPem = *ca, .crlPem = crl},
+    psx::transport::NativeController::OnOutput onOutput =
         [framers, emit](const std::string& host, std::string_view bytes, psx::transport::Channel channel) {
             const bool err = channel == psx::transport::Channel::Stderr;
             HostFramers& hf = (*framers)[host];
@@ -316,7 +340,7 @@ int runNative(const RunInvocation& invocation,
             (err ? hf.err : hf.out)
                 .push(std::span<const char>(bytes.data(), bytes.size()),
                       [&](std::string_view line, bool) { emit(host, sinkChannel, line); });
-        });
+        };
 
     std::vector<psx::transport::NativeController::Target> targets;
     targets.reserve(clients.size());
@@ -331,35 +355,49 @@ int runNative(const RunInvocation& invocation,
     }
 
     int exitCode = 0;
-    (void)controller.start(
-        targets, invocation.command, [&](std::vector<psx::transport::NativeController::HostResult> results) {
-            std::size_t succeeded = 0;
-            for (auto& res : results) {
-                HostFramers& hf = (*framers)[res.host];
-                hf.out.flush([&](std::string_view line, bool) { emit(res.host, psx::sink::Channel::Stdout, line); });
-                hf.err.flush([&](std::string_view line, bool) { emit(res.host, psx::sink::Channel::Stderr, line); });
-                const bool ok = res.ok && res.exitCode == 0 && res.error.empty();
-                succeeded += ok ? 1 : 0;
-                if (!ok && exitCode == 0) {
-                    exitCode = 1;
-                }
-                if (sink != nullptr) {
-                    sink->stageFinished(res.host, psx::sink::StageResult{.exitCode = res.exitCode,
-                                                                         .timedOut = false,
-                                                                         .errorMessage = res.error,
-                                                                         .droppedBytes = 0});
-                }
+    auto onComplete = [&](std::vector<psx::transport::NativeController::HostResult> results) {
+        std::size_t succeeded = 0;
+        for (auto& res : results) {
+            HostFramers& hf = (*framers)[res.host];
+            hf.out.flush([&](std::string_view line, bool) { emit(res.host, psx::sink::Channel::Stdout, line); });
+            hf.err.flush([&](std::string_view line, bool) { emit(res.host, psx::sink::Channel::Stderr, line); });
+            const bool ok = res.ok && res.exitCode == 0 && res.error.empty();
+            succeeded += ok ? 1 : 0;
+            if (!ok && exitCode == 0) {
+                exitCode = 1;
             }
             if (sink != nullptr) {
-                sink->runFinished(
-                    psx::sink::RunSummary{results.size(), succeeded, results.size() - succeeded, 0, false});
+                sink->stageFinished(res.host, psx::sink::StageResult{.exitCode = res.exitCode,
+                                                                     .timedOut = false,
+                                                                     .errorMessage = res.error,
+                                                                     .droppedBytes = 0});
             }
-            r.stop();
-        });
-    if (invocation.timeoutSec > 0) {
-        r.after(std::chrono::seconds(invocation.timeoutSec), [&] { controller.cancel("timed out"); });
+        }
+        if (sink != nullptr) {
+            sink->runFinished(psx::sink::RunSummary{results.size(), succeeded, results.size() - succeeded, 0, false});
+        }
+        r.stop();
+    };
+
+    const psx::os::TlsConfig tlsConfig{.certificatePem = *cert, .privateKeyPem = *key, .caPem = *ca, .crlPem = crl};
+    if (!invocation.canary.empty()) {
+        // Staged rollout: run the first `canaryCount` hosts and only continue to
+        // the rest if every canary host exits cleanly (ok && exit 0 && no error).
+        const std::size_t count = canaryCount(invocation.canary, targets.size());
+        psx::transport::CanaryController controller(r, tlsConfig, onOutput);
+        (void)controller.start(targets, count, invocation.command, onComplete);
+        if (invocation.timeoutSec > 0) {
+            r.after(std::chrono::seconds(invocation.timeoutSec), [&] { controller.cancel("timed out"); });
+        }
+        (void)r.run();
+    } else {
+        psx::transport::NativeController controller(r, tlsConfig, onOutput);
+        (void)controller.start(targets, invocation.command, onComplete);
+        if (invocation.timeoutSec > 0) {
+            r.after(std::chrono::seconds(invocation.timeoutSec), [&] { controller.cancel("timed out"); });
+        }
+        (void)r.run();
     }
-    (void)r.run();
     return exitCode;
 }
 
