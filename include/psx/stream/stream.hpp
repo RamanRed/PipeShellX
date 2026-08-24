@@ -1,9 +1,9 @@
 #pragma once
 
 // psx::stream::Stream — a unidirectional byte channel with the pipe state
-// machine (L2). Bytes written by the producer are held in a BoundedBuffer and
-// drained by the sink; EOF and half-close propagate exactly as they do across
-// a local pipe.
+// machine (L2). Bytes written by the producer are held in a bounded ring or a
+// disk spill and drained by the sink; EOF and half-close propagate exactly as
+// they do across a local pipe.
 //
 //   Open ──closeRemote()──▶ HalfClosedRemote ──buffer drained──▶ Closed
 //    │                                                              ▲
@@ -11,12 +11,13 @@
 //   any state ──fail()──▶ Error   (a clean Closed is never downgraded)
 //
 // "remote" is the writer (the far end that produces bytes); "local" is the
-// sink. A drop-policy buffer never blocks the producer; a Block buffer signals
-// backpressure through writable(), which the reactor turns into read-interest
-// deregistration.
+// sink. A drop-policy or spooling buffer never blocks the producer; a Block
+// buffer signals backpressure through writable(), which the reactor turns into
+// read-interest deregistration.
 
 #include "psx/result.hpp"
 #include "psx/stream/bounded_buffer.hpp"
+#include "psx/stream/spool_buffer.hpp"
 
 #include <cstddef>
 #include <optional>
@@ -45,9 +46,9 @@ public:
     void closeLocal() noexcept;  // the sink is done (discards any buffered bytes)
     void fail(const Error& error) noexcept;
 
-    bool readable() const noexcept { return buffer_.size() > 0; }
-    // True while the producer may make progress: Open, and — for a Block
-    // buffer only — not full. Drop-policy streams are always writable.
+    bool readable() const noexcept { return buffer_.size() > 0 || !spool_.empty(); }
+    // True while the producer may make progress: Open, and not full for Block.
+    // Drop and Spool streams remain writable while open.
     bool writable() const noexcept;
     bool full() const noexcept { return buffer_.full(); }
     // No more bytes will ever be read: remote closed and the buffer is empty,
@@ -60,9 +61,12 @@ public:
     const std::optional<Error>& error() const noexcept { return error_; }
 
 private:
+    std::size_t appendSpool(std::span<const char> data);
+    void fillFromSpool() const;
     void maybeCloseAfterDrain() noexcept;
 
-    BoundedBuffer buffer_;
+    mutable BoundedBuffer buffer_;
+    mutable SpoolBuffer spool_;
     StreamState state_ = StreamState::Open;
     std::optional<Error> error_;
 };

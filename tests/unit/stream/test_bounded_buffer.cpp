@@ -38,6 +38,7 @@ TEST(BoundedBufferTest, StartsEmptyWithTheGivenCapacityAndPolicy) {
     EXPECT_EQ(buffer.available(), 256U);
     EXPECT_EQ(buffer.droppedBytes(), 0U);
     EXPECT_EQ(buffer.policy(), OverflowPolicy::Block);
+    EXPECT_FALSE(psx::stream::dropsOnOverflow(OverflowPolicy::Spool));
 }
 
 TEST(BoundedBufferTest, AppendThenConsumeIsFifo) {

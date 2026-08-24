@@ -1,7 +1,9 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -45,6 +47,10 @@ public:
                 return false;
             }
         }
+        if (std::fseek(file_, 0, SEEK_END) != 0) {
+            failed_ = true;
+            return false;
+        }
         if (std::fwrite(bytes.data(), 1, bytes.size(), file_) != bytes.size()) {
             // A short write may have left partial bytes past the size_ boundary.
             // Do NOT advance size_ — readAll reads only the first size_ bytes, so
@@ -59,7 +65,24 @@ public:
     }
 
     std::uint64_t size() const noexcept { return size_; }
-    bool empty() const noexcept { return size_ == 0; }
+    std::uint64_t remaining() const noexcept { return size_ - readOffset_; }
+    bool empty() const noexcept { return remaining() == 0; }
+
+    // Reads and consumes up to out.size() bytes from the spill.
+    std::size_t read(std::span<char> out) {
+        if (file_ == nullptr || out.empty() || empty() || failed_) {
+            return 0;
+        }
+        if (std::fflush(file_) != 0 || std::fseek(file_, static_cast<long>(readOffset_), SEEK_SET) != 0) {
+            return 0;
+        }
+        const std::size_t n = std::min<std::uint64_t>(out.size(), remaining());
+        const std::size_t got = std::fread(out.data(), 1, n, file_);
+        readOffset_ += got;
+        // Keep later appends well-defined on the update stream.
+        (void)std::fseek(file_, 0, SEEK_END);
+        return got;
+    }
 
     // Reads the entire spilled content back, in append order. Returns "" if
     // nothing was spooled or on a read/seek failure.
@@ -89,9 +112,11 @@ private:
     void moveFrom(SpoolBuffer& other) noexcept {
         file_ = other.file_;
         size_ = other.size_;
+        readOffset_ = other.readOffset_;
         failed_ = other.failed_;
         other.file_ = nullptr;
         other.size_ = 0;
+        other.readOffset_ = 0;
         other.failed_ = false;
     }
     void close() noexcept {
@@ -100,11 +125,13 @@ private:
             file_ = nullptr;
         }
         size_ = 0;
+        readOffset_ = 0;
         failed_ = false;
     }
 
     std::FILE* file_ = nullptr;
     std::uint64_t size_ = 0;
+    std::uint64_t readOffset_ = 0;
     bool failed_ = false; // a spill I/O failure poisons the buffer: drop the rest, keep size_ consistent
 };
 

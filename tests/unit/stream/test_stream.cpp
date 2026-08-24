@@ -110,6 +110,20 @@ TEST(StreamTest, DropPolicyKeepsFlowingAndCountsDrops) {
     EXPECT_EQ(stream.state(), StreamState::Closed);
 }
 
+TEST(StreamTest, SpoolPolicyPreservesBytesBeyondCapacity) {
+    Stream stream(4, OverflowPolicy::Spool);
+    const std::string expected = "ABCDEFGHIJKL";
+
+    EXPECT_EQ(stream.write(bytes(expected)), expected.size());
+    EXPECT_TRUE(stream.writable()) << "spooling keeps the producer flowing";
+    EXPECT_EQ(stream.droppedBytes(), 0U);
+
+    stream.closeRemote();
+    EXPECT_EQ(readAll(stream), expected);
+    EXPECT_EQ(stream.droppedBytes(), 0U);
+    EXPECT_EQ(stream.state(), StreamState::Closed);
+}
+
 TEST(StreamTest, FailIsTerminalAndRejectsFurtherIo) {
     Stream stream(64);
     stream.write(bytes("partial"));
