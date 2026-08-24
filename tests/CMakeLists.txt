@@ -48,6 +48,7 @@ add_executable(pipeshellx_tests
     unit/sink/test_consensus.cpp
     unit/pipeline/test_planner.cpp
     unit/pipeline/test_parser.cpp
+    unit/pipeline/test_pipeline_yaml.cpp
     unit/pipeline/test_local_runner.cpp
     unit/policy/test_policy.cpp
     unit/cli/test_run_command.cpp

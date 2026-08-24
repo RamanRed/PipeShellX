@@ -4,12 +4,15 @@
 #include "psx/pipeline/local_runner.hpp"
 #include "psx/pipeline/parser.hpp"
 #include "psx/pipeline/pipeline.hpp"
+#include "psx/pipeline/pipeline_yaml.hpp"
 #include "psx/pipeline/planner.hpp"
 #include "psx/runtime/reactor.hpp"
 
 #include "psx/inventory/inventory.hpp"
 
 #include <exception>
+#include <fstream>
+#include <optional>
 #include <ostream>
 #include <string>
 #include <string_view>
@@ -19,9 +22,6 @@
 #include "psx/pipeline/fanin_pipeline.hpp"
 #include "psx/pipeline/segmented_pipeline.hpp"
 
-#include <fstream>
-#include <optional>
-#include <sstream>
 #endif
 
 namespace psx::cli {
@@ -30,12 +30,14 @@ namespace {
 
 struct PipeArgs {
     std::string spec;          // the joined pipeline spec (non-flag args)
+    std::string filePath;      // --file/-f
     std::string inventoryPath; // -i
     std::string certPath;      // --cert
     std::string keyPath;       // --key
     std::string caPath;        // --ca
     int nativePort = 7433;     // --native-port
     bool check = false;        // --check: validate + print the plan, do not run
+    bool fileRequested = false;
 };
 
 // Splits recognised flags from the pipeline spec (everything else, rejoined).
@@ -51,6 +53,9 @@ PipeArgs parsePipeArgs(const std::vector<std::string>& args) {
         };
         if (arg == "-i") {
             takeValue(out.inventoryPath);
+        } else if (arg == "-f" || arg == "--file") {
+            out.fileRequested = true;
+            takeValue(out.filePath);
         } else if (arg == "--cert") {
             takeValue(out.certPath);
         } else if (arg == "--key") {
@@ -87,6 +92,14 @@ bool isLocalPlacement(const std::string& placement) {
     return placement.empty() || placement == "local";
 }
 
+std::optional<std::string> slurp(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        return std::nullopt;
+    }
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
 // Runs an all-local pipeline via LocalRunner; returns the pipefail exit code.
 int runLocal(const std::vector<psx::pipeline::Stage>& stages, std::ostream& out, std::ostream& err) {
     auto reactor = psx::runtime::Reactor::create({.signals = {psx::os::Signal::Interrupt, psx::os::Signal::Terminate}});
@@ -116,14 +129,6 @@ int runLocal(const std::vector<psx::pipeline::Stage>& stages, std::ostream& out,
 }
 
 #if defined(PIPESHELLX_HAVE_TLS)
-std::optional<std::string> slurp(const std::string& path) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        return std::nullopt;
-    }
-    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-}
-
 // Fan-in: the first stage runs on every host of a group and the merged output
 // feeds the rest of the pipeline (§5.2 `grep@shards | sort@local`).
 int runFanIn(const std::vector<psx::pipeline::Stage>& stages,
@@ -371,13 +376,30 @@ int runCheck(const std::vector<psx::pipeline::Stage>& stages,
 
 int pipeSubcommand(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
     const PipeArgs parsed = parsePipeArgs(args);
-    if (parsed.spec.empty()) {
-        err << "Usage: pipeshellx pipe [-i FILE --cert F --key F --ca F [--native-port P]] "
+    if (parsed.fileRequested && !parsed.spec.empty()) {
+        err << "pipeshellx pipe: --file cannot be combined with an inline pipeline spec\n";
+        return 2;
+    }
+    if (!parsed.fileRequested && parsed.spec.empty()) {
+        err << "Usage: pipeshellx pipe [-f FILE | -i FILE --cert F --key F --ca F [--native-port P]] "
                "\"'cmd'@place | 'cmd2'@place2\"\n";
         return 2;
     }
+    if (parsed.fileRequested && parsed.filePath.empty()) {
+        err << "pipeshellx pipe: --file requires a path\n";
+        return 2;
+    }
 
-    auto pipeline = psx::pipeline::parsePipeSpec(parsed.spec);
+    psx::Result<psx::pipeline::Pipeline> pipeline = [&]() -> psx::Result<psx::pipeline::Pipeline> {
+        if (!parsed.fileRequested) {
+            return psx::pipeline::parsePipeSpec(parsed.spec);
+        }
+        const auto contents = slurp(parsed.filePath);
+        if (!contents) {
+            return psx::Error{psx::ErrorClass::InvalidArgument, 0, "cannot read --file"};
+        }
+        return psx::pipeline::loadPipelineYaml(*contents);
+    }();
     if (!pipeline.ok()) {
         err << "pipeshellx pipe: " << pipeline.error().message() << "\n";
         return 2;

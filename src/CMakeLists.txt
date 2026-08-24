@@ -16,6 +16,7 @@ else()
     set(PIPESHELLX_PIPELINE_SOURCES
         pipeline/planner.cpp
         pipeline/parser.cpp
+        pipeline/pipeline_yaml.cpp
         pipeline/local_runner.cpp
     )
     set(PIPESHELLX_POLICY_SOURCES
