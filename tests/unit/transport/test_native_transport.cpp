@@ -1337,8 +1337,9 @@ TEST(DistributedRunnerTest, PipefailAcrossRemoteStages) {
     DistributedRunner runner(r, {.certificatePem = ctlId.value().certificatePem,
                                  .privateKeyPem = ctlId.value().privateKeyPem,
                                  .caPem = caCert});
-    const std::vector<RemoteStage> stages = {{.argv = {"echo", "hi"}, .host = "127.0.0.1", .port = port},
-                                             {.argv = {"sh", "-c", "exit 3"}, .host = "127.0.0.1", .port = port}};
+    const std::vector<RemoteStage> stages = {
+        {.argv = {"echo", "hi"}, .host = "127.0.0.1", .port = port},
+        {.argv = {"sh", "-c", "cat >/dev/null; exit 3"}, .host = "127.0.0.1", .port = port}};
 
     DistributedRunner::Outcome outcome;
     bool completed = false;
