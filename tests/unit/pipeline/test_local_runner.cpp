@@ -77,8 +77,10 @@ TEST(LocalRunnerTest, ThreeStagePipelineFlowsEndToEnd) {
 }
 
 TEST(LocalRunnerTest, PipefailReportsARightmostNonZeroStage) {
-    // s0 exits 0, s1 exits 2 (ignores stdin), s2 (cat) exits 0.
-    auto result = runPipeline({stage({"/bin/echo", "hi"}), stage({"/bin/sh", "-c", "exit 2"}), stage({"/bin/cat"})});
+    // Use a non-writing successful producer so the fixture cannot race a
+    // legitimate SIGPIPE against the middle stage closing its input.
+    auto result =
+        runPipeline({stage({"/bin/sh", "-c", "exit 0"}), stage({"/bin/sh", "-c", "exit 2"}), stage({"/bin/cat"})});
     ASSERT_TRUE(result.completed);
     EXPECT_EQ(result.outcome.stageExitCodes, (std::vector<int>{0, 2, 0}));
     EXPECT_EQ(result.outcome.exitCode, 2) << "pipefail: the failing middle stage sets the pipeline code";
