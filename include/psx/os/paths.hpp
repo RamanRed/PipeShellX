@@ -5,16 +5,36 @@
 
 #include "psx/result.hpp"
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 
 namespace psx::os {
 
-// $HOME, else the account database, else "" (never throws).
+namespace detail {
+
+// Internal implementation seam for testing the POSIX privilege boundary
+// without changing process credentials in a unit test.
+inline constexpr bool credentialsPermitEnvironment(std::uintmax_t realUser,
+                                                   std::uintmax_t effectiveUser,
+                                                   std::uintmax_t realGroup,
+                                                   std::uintmax_t effectiveGroup) noexcept {
+    return realUser == effectiveUser && realGroup == effectiveGroup;
+}
+
+} // namespace detail
+
+// True when environment-derived paths have the same user/group authority as
+// the process. False for set-user-ID or set-group-ID execution.
+bool environmentPathsAreTrusted() noexcept;
+
+// $HOME when environment paths are trusted, else the effective user's account
+// database entry, else "" (never throws).
 std::string homeDirectory();
 
-// Where `application` keeps state such as logs: $XDG_STATE_HOME/<app>, else
-// <home>/.local/state/<app>, else <app> relative to the working directory.
+// Where `application` keeps state such as logs: trusted
+// $XDG_STATE_HOME/<app>, else <home>/.local/state/<app>, else <app> relative to
+// the working directory.
 std::string stateDirectory(const std::string& application);
 
 // Replaces `path` atomically with `contents` using a same-directory temporary

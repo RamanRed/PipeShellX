@@ -37,9 +37,10 @@ public:
 
     // Resolves the inventory path with product precedence: an explicit CLI
     // path, $PIPESHELLX_INVENTORY, ./inventory.ini, the legacy
-    // ./clients.txt, then the per-user config inventory. Returns an empty
-    // string when no candidate exists. An explicit or environment path is
-    // returned even when missing so loadFromFile() reports that exact error.
+    // ./clients.txt, then the per-user config inventory. Environment candidates
+    // are ignored across a set-user-ID/set-group-ID boundary. Returns an empty
+    // string when no candidate exists. An explicit or trusted environment path
+    // is returned even when missing so loadFromFile() reports that exact error.
     static std::string resolvePath(const std::string& explicitPath = {});
 
     // Imports a legacy clients.txt (one `user@host` / `ssh://…` per line) as a

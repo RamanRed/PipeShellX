@@ -231,12 +231,22 @@ jobs:
           previous_root="pipeshellx-0.5.0-$RELEASE_TARGET"
           mkdir -p "$previous_source"
           git archive "$PREVIOUS_COMMIT" | tar -x -C "$previous_source"
-          cmake -S "$previous_source" -B "$previous_build" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DPIPESHELLX_NATIVE_TRANSPORT=OFF \
-            -DPIPESHELLX_BUILD_TESTS=OFF \
-            -DPIPESHELLX_BUILD_BENCH=OFF \
+          previous_cmake_args=(
+            -S "$previous_source"
+            -B "$previous_build"
+            -DCMAKE_BUILD_TYPE=Release
+            -DPIPESHELLX_NATIVE_TRANSPORT=OFF
+            -DPIPESHELLX_BUILD_TESTS=OFF
+            -DPIPESHELLX_BUILD_BENCH=OFF
             -DPIPESHELLX_WERROR=OFF
+          )
+          # The fixed v0.5 source predates glibc's stricter prlimit enum
+          # signature. Relax only this historical Linux fixture; the current
+          # release above remains warnings-as-errors and standards-strict.
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            previous_cmake_args+=("-DCMAKE_CXX_FLAGS=-fpermissive")
+          fi
+          cmake "${previous_cmake_args[@]}"
           cmake --build "$previous_build" --parallel 3
           cmake --install "$previous_build" --prefix "$RUNNER_TEMP/$previous_root"
           tar -czf "dist/$previous_root.tar.gz" -C "$RUNNER_TEMP" "$previous_root"
@@ -389,7 +399,7 @@ jobs:
               --cert-oidc-issuer "$OIDC_ISSUER" \
               --predicate-type https://spdx.dev/Document/v2.3
           done
-          shasum -a 256 -- *.tar.gz > CHECKSUMS.sha256
+          shasum -a 256 -- *.tar.gz *.spdx.json > CHECKSUMS.sha256
 
       - name: Keyless-sign aggregate dry-run checksum manifest
         run: |
@@ -490,7 +500,7 @@ jobs:
               --cert-oidc-issuer "$OIDC_ISSUER" \
               --predicate-type https://spdx.dev/Document/v2.3
           done
-          shasum -a 256 -- *.tar.gz > CHECKSUMS.sha256
+          shasum -a 256 -- *.tar.gz *.spdx.json > CHECKSUMS.sha256
 
       - name: Keyless-sign aggregate checksum manifest
         run: |
@@ -516,12 +526,27 @@ jobs:
           cp "$ATTESTATION_BUNDLE"
           release-assets/CHECKSUMS.sha256.provenance.sigstore.json
 
-      - name: Publish immutable-tag release assets
+      - name: Assemble draft and publish immutable-tag release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release create "$RELEASE_TAG"
-          release-assets/*
-          --verify-tag
-          --title "PipeShellX $RELEASE_TAG"
-          --generate-notes
+        run: |
+          set -euo pipefail
+          if release_state=$(gh release view "$RELEASE_TAG" \
+            --json isDraft \
+            --jq 'if .isDraft then "draft" else "published" end' 2>/dev/null); then
+            if [[ "$release_state" != "draft" ]]; then
+              echo "release '$RELEASE_TAG' is already published and immutable" >&2
+              exit 1
+            fi
+          else
+            gh release create "$RELEASE_TAG" \
+              --draft \
+              --verify-tag \
+              --title "PipeShellX $RELEASE_TAG" \
+              --generate-notes
+          fi
+          # Assets remain recoverable and replaceable while the release is a
+          # draft. Publication is the final operation because immutable-release
+          # enforcement rejects every asset or metadata mutation afterwards.
+          gh release upload "$RELEASE_TAG" release-assets/* --clobber
+          gh release edit "$RELEASE_TAG" --draft=false

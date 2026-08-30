@@ -193,6 +193,9 @@ int listHosts(const std::string& requestedPath, std::ostream& out) {
     if (path.empty()) {
         fail("no inventory (pass -i FILE, set PIPESHELLX_INVENTORY, or add inventory.ini)");
     }
+    // Arbitrary inventory paths are an intentional CLI capability. Ambient
+    // environment paths reach this sink only with matching real/effective IDs.
+    // lgtm[cpp/path-injection]
     const auto inventory = psx::inventory::Inventory::loadFromFile(path);
     out << "HOST\tGROUPS\tTAGS\tTRANSPORT\n";
     for (const auto& host : inventory.hosts()) {

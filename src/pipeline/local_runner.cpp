@@ -18,6 +18,12 @@ using psx::os::Readiness;
 using psx::os::SpawnSpec;
 
 namespace {
+// Bound one output dispatch so a continuously readable child cannot starve
+// child-exit, transport, or timer handlers on the reactor thread. The watch is
+// temporarily disabled around the bounded drain and re-armed afterwards;
+// every poller backend reports readiness that became pending while disabled.
+constexpr std::size_t kFinalReadQuantumBytes = 256U * 1024U;
+
 // Conventional shell exit code: the exit code for a normal exit, else 128+signal.
 int toExitCode(const ExitStatus& status) {
     return status.kind == ExitStatus::Kind::Exited ? status.code : 128 + status.code;
@@ -126,7 +132,17 @@ LocalRunner::run(const std::vector<Stage>& stages, std::function<void(Outcome)> 
 
 void LocalRunner::onFinalReadable() {
     std::array<char, 16 * 1024> buffer{};
-    while (true) { // edge-triggered: drain to WouldBlock or EOF
+    const psx::runtime::Token token = finalToken_;
+    if (token == 0 || finalClosed_) {
+        return;
+    }
+
+    // Edge-triggered backends normally require draining to WouldBlock. Disable
+    // the watch first so a bounded drain can yield safely, then use the
+    // None -> Readable transition to surface any readiness still pending.
+    const bool disarmed = reactor_.modify(token, Interest::None).ok();
+    std::size_t bytesRead = 0;
+    while (true) {
         auto got = psx::os::read(finalReader_, std::span<char>(buffer.data(), buffer.size()));
         if (got.ok()) {
             if (got.value() == 0) { // EOF: the last stage closed its stdout
@@ -141,10 +157,19 @@ void LocalRunner::onFinalReadable() {
             if (onOutput_) {
                 onOutput_(std::string_view(buffer.data(), got.value()));
             }
+            // The output callback may cancel the runner, which unwatches and
+            // closes this stream. Never re-arm or read the cancelled handle.
+            if (finalToken_ != token || finalClosed_ || done_) {
+                return;
+            }
+            bytesRead += got.value();
+            if (disarmed && bytesRead >= kFinalReadQuantumBytes) {
+                break;
+            }
             continue;
         }
         if (got.error().cls == psx::ErrorClass::WouldBlock) {
-            return; // nothing more for now
+            break; // nothing more for now
         }
         // A read error also ends the stream.
         finalClosed_ = true;
@@ -154,6 +179,17 @@ void LocalRunner::onFinalReadable() {
         }
         finishIfDone();
         return;
+    }
+
+    if (disarmed && finalToken_ == token && !finalClosed_ && !done_) {
+        // epoll MOD, kqueue filter re-add, and poll's rebuilt fd set all expose
+        // data/EOF that arrived while the registration was Interest::None.
+        if (!reactor_.modify(token, Interest::Readable).ok()) {
+            finalClosed_ = true;
+            (void)reactor_.unwatch(token);
+            finalToken_ = 0;
+            finishIfDone();
+        }
     }
 }
 

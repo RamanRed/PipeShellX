@@ -182,8 +182,9 @@ with the `security-extended` query suite on pushes and pull requests to `main`,
 weekly, and on manual dispatch. Its stable check name is `Analyze C/C++`.
 
 The `main` rules require both `Required CI` and `Analyze C/C++` from an
-up-to-date commit. Normal force-push and branch deletion are blocked;
-repository administrators retain an emergency bypass.
+up-to-date commit. Force-push and branch deletion are blocked without a
+ruleset bypass; administrators can still edit or disable the ruleset through
+an explicit repository-settings change when recovering an emergency.
 
 Each default matrix job builds the full suite, runs CTest, and checks CLI
 version/help/unknown-option behavior. The dedicated native-disabled hosted job

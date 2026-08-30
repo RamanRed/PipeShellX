@@ -30,6 +30,9 @@ void initLogging(const CliOptions& options) {
     logger.setConsoleMirror(options.verbose);
     logger.setRotation(10ULL * 1024 * 1024, 5); // 10 MiB per file, keep 5 generations
     const std::string logFile = options.logFile.empty() ? Logger::defaultLogFilePath() : options.logFile;
+    // Arbitrary log paths are an intentional CLI capability. Ambient HOME/XDG
+    // defaults reach this sink only with matching real/effective IDs.
+    // lgtm[cpp/path-injection]
     if (!logger.setLogFile(logFile)) {
         std::cerr << "PipeShellX: warning: cannot open " << logFile << "; logging to stderr instead\n";
     }

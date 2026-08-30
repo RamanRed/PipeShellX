@@ -465,6 +465,15 @@ TEST(InventoryResolutionTest, HonorsFlagEnvironmentProjectLegacyAndUserPrecedenc
     const auto fromUser = resolvedHost("");
     EXPECT_EQ(fromUser.inventoryPath, (userConfig / "inventory.ini").string());
     EXPECT_EQ(fromUser.clients.front().host, "user-host");
+
+    const auto homeConfig = cwd.path() / "home" / ".config" / "pipeshellx";
+    std::filesystem::create_directories(homeConfig);
+    writeInventory(homeConfig / "inventory.ini", "home-host");
+    test_support::ScopedEnv noXdg("XDG_CONFIG_HOME", std::nullopt);
+    test_support::ScopedEnv home("HOME", (cwd.path() / "home").string());
+    const auto fromHome = resolvedHost("");
+    EXPECT_EQ(fromHome.inventoryPath, (homeConfig / "inventory.ini").string());
+    EXPECT_EQ(fromHome.clients.front().host, "home-host");
 }
 
 TEST(HostsSubcommandTest, AddRequiresExplicitInventoryAndRejectsDuplicatesWithoutRewriting) {

@@ -124,7 +124,7 @@ from the CLI, and emits the following assets:
 | `*.tar.gz.sigstore.json` | Keyless Cosign signature bundle for the archive. |
 | `*.tar.gz.provenance.sigstore.json` | GitHub SLSA build-provenance attestation bundle. |
 | `*.tar.gz.sbom-attestation.sigstore.json` | GitHub attestation binding the SPDX SBOM to the archive. |
-| `CHECKSUMS.sha256` and its two `*.sigstore.json` files | Aggregate archive checksums, Cosign signature, and GitHub provenance bundle. |
+| `CHECKSUMS.sha256` and its two `*.sigstore.json` files | Aggregate archive and SBOM checksums, Cosign signature, and GitHub provenance bundle. |
 
 A manual dispatch against `main` exercises the complete build, smoke,
 v0.5-to-current upgrade, signing, and attestation path, then uploads a
@@ -187,6 +187,11 @@ gh attestation verify "$base.tar.gz" --repo "$repo" \
 gh attestation verify "$base.tar.gz" --repo "$repo" \
   --bundle "$base.tar.gz.sbom-attestation.sigstore.json" \
   --predicate-type https://spdx.dev/Document/v2.3 \
+  --cert-identity "$identity" \
+  --cert-oidc-issuer "$issuer"
+gh attestation verify "$base.tar.gz.spdx.json" --repo "$repo" \
+  --bundle CHECKSUMS.sha256.provenance.sigstore.json \
+  --predicate-type https://slsa.dev/provenance/v1 \
   --cert-identity "$identity" \
   --cert-oidc-issuer "$issuer"
 ```
@@ -257,6 +262,10 @@ Commands using normal inventory resolution choose the first available source:
 4. legacy `./clients.txt`;
 5. `$XDG_CONFIG_HOME/pipeshellx/inventory.ini`, or
    `$HOME/.config/pipeshellx/inventory.ini` when XDG is unset.
+
+Environment-derived paths are ignored when the process's real and effective
+user or group IDs differ; that privilege boundary falls back to the effective
+account's home directory.
 
 `run`, `ping`, `diff`, and
 `hosts list` use this resolver. A remote

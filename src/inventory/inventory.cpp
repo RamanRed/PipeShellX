@@ -1,5 +1,7 @@
 #include "psx/inventory/inventory.hpp"
 
+#include "psx/os/paths.hpp"
+
 #include <algorithm>
 #include <charconv>
 #include <cstdlib>
@@ -265,8 +267,11 @@ std::string Inventory::resolvePath(const std::string& explicitPath) {
     if (!explicitPath.empty()) {
         return explicitPath;
     }
-    if (const std::string environment = nonEmptyEnvironment("PIPESHELLX_INVENTORY"); !environment.empty()) {
-        return environment;
+    const bool trustEnvironment = psx::os::environmentPathsAreTrusted();
+    if (trustEnvironment) {
+        if (const std::string environment = nonEmptyEnvironment("PIPESHELLX_INVENTORY"); !environment.empty()) {
+            return environment;
+        }
     }
     if (isRegularFile("inventory.ini")) {
         return "inventory.ini";
@@ -278,10 +283,15 @@ std::string Inventory::resolvePath(const std::string& explicitPath) {
     }
 
     std::filesystem::path configRoot;
-    if (const std::string xdg = nonEmptyEnvironment("XDG_CONFIG_HOME"); !xdg.empty()) {
-        configRoot = xdg;
-    } else if (const std::string home = nonEmptyEnvironment("HOME"); !home.empty()) {
-        configRoot = std::filesystem::path(home) / ".config";
+    if (trustEnvironment) {
+        if (const std::string xdg = nonEmptyEnvironment("XDG_CONFIG_HOME"); !xdg.empty()) {
+            configRoot = xdg;
+        }
+    }
+    if (configRoot.empty()) {
+        if (const std::string home = psx::os::homeDirectory(); !home.empty()) {
+            configRoot = std::filesystem::path(home) / ".config";
+        }
     }
     if (!configRoot.empty()) {
         const std::filesystem::path userInventory = configRoot / "pipeshellx" / "inventory.ini";

@@ -75,6 +75,20 @@ TEST(OsPathsTest, StateDirectoryFollowsXdgThenHome) {
     }
 }
 
+TEST(OsPathsTest, EnvironmentPathTrustRequiresMatchingUserAndGroupCredentials) {
+    using psx::os::detail::credentialsPermitEnvironment;
+    EXPECT_TRUE(credentialsPermitEnvironment(1000, 1000, 100, 100));
+    EXPECT_FALSE(credentialsPermitEnvironment(1000, 0, 100, 100));
+    EXPECT_FALSE(credentialsPermitEnvironment(0, 1000, 100, 100));
+    EXPECT_FALSE(credentialsPermitEnvironment(1000, 1000, 100, 0));
+    EXPECT_FALSE(credentialsPermitEnvironment(1000, 1000, 0, 100));
+    EXPECT_FALSE(credentialsPermitEnvironment(1000, 0, 100, 0));
+    EXPECT_EQ(psx::os::environmentPathsAreTrusted(),
+              credentialsPermitEnvironment(
+                  static_cast<std::uintmax_t>(::getuid()), static_cast<std::uintmax_t>(::geteuid()),
+                  static_cast<std::uintmax_t>(::getgid()), static_cast<std::uintmax_t>(::getegid())));
+}
+
 TEST(OsPathsTest, HomeDirectoryComesFromTheEnvironmentFirst) {
     test_support::ScopedEnv home("HOME", "/home/tester");
     EXPECT_EQ(psx::os::homeDirectory(), "/home/tester");

@@ -20,6 +20,17 @@ std::string nonEmptyEnv(const char* name) {
     return value != nullptr ? std::string(value) : std::string();
 }
 
+std::string accountHomeDirectory(uid_t user) {
+    std::vector<char> buffer(16384);
+    passwd entry{};
+    passwd* found = nullptr;
+    if (::getpwuid_r(user, &entry, buffer.data(), buffer.size(), &found) == 0 && found != nullptr &&
+        found->pw_dir != nullptr) {
+        return found->pw_dir;
+    }
+    return {};
+}
+
 Result<void>
 atomicWriteWithMode(const std::string& path, std::string_view contents, mode_t mode, const char* operation) {
     namespace fs = std::filesystem;
@@ -81,24 +92,27 @@ atomicWriteWithMode(const std::string& path, std::string_view contents, mode_t m
 
 } // namespace
 
+bool environmentPathsAreTrusted() noexcept {
+    return detail::credentialsPermitEnvironment(
+        static_cast<std::uintmax_t>(::getuid()), static_cast<std::uintmax_t>(::geteuid()),
+        static_cast<std::uintmax_t>(::getgid()), static_cast<std::uintmax_t>(::getegid()));
+}
+
 std::string homeDirectory() {
-    if (const std::string home = nonEmptyEnv("HOME"); !home.empty()) {
-        return home;
+    if (environmentPathsAreTrusted()) {
+        if (const std::string home = nonEmptyEnv("HOME"); !home.empty()) {
+            return home;
+        }
     }
-    std::vector<char> buffer(16384);
-    passwd entry{};
-    passwd* found = nullptr;
-    if (::getpwuid_r(::getuid(), &entry, buffer.data(), buffer.size(), &found) == 0 && found != nullptr &&
-        found->pw_dir != nullptr) {
-        return found->pw_dir;
-    }
-    return {};
+    return accountHomeDirectory(::geteuid());
 }
 
 std::string stateDirectory(const std::string& application) {
     namespace fs = std::filesystem;
-    if (const std::string xdgState = nonEmptyEnv("XDG_STATE_HOME"); !xdgState.empty()) {
-        return (fs::path(xdgState) / application).string();
+    if (environmentPathsAreTrusted()) {
+        if (const std::string xdgState = nonEmptyEnv("XDG_STATE_HOME"); !xdgState.empty()) {
+            return (fs::path(xdgState) / application).string();
+        }
     }
     if (const std::string home = homeDirectory(); !home.empty()) {
         return (fs::path(home) / ".local" / "state" / application).string();

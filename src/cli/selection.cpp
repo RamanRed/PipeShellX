@@ -45,6 +45,9 @@ ResolvedHosts resolveHosts(const std::string& inventoryPath, const Selector& sel
             resolved.exitCode = 2;
             return resolved;
         }
+        // Arbitrary inventory paths are an intentional CLI capability. Ambient
+        // environment paths reach this sink only with matching real/effective IDs.
+        // lgtm[cpp/path-injection]
         inventory = psx::inventory::Inventory::loadFromFile(resolved.inventoryPath);
     } catch (const std::exception& ex) {
         err << ex.what() << "\n";

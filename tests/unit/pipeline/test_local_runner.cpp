@@ -6,7 +6,9 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 using psx::pipeline::LocalRunner;
@@ -110,6 +112,43 @@ TEST(LocalRunnerTest, CancelKillsAndReapsEveryUnfinishedStage) {
     ASSERT_TRUE(completed);
     EXPECT_EQ(outcome.stageExitCodes, (std::vector<int>{137}));
     EXPECT_EQ(outcome.exitCode, 137);
+}
+
+TEST(LocalRunnerTest, SustainedOutputYieldsToReadyTimers) {
+    auto reactor = Reactor::create();
+    ASSERT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+
+    constexpr std::size_t kExpectedBytes = 4U * 1024U * 1024U;
+    std::size_t bytes = 0;
+    std::optional<std::size_t> bytesWhenTimerFired;
+    bool timerScheduled = false;
+    bool completed = false;
+
+    LocalRunner runner(r, [&](std::string_view chunk) {
+        bytes += chunk.size();
+        if (!timerScheduled) {
+            timerScheduled = true;
+            (void)r.after(std::chrono::milliseconds(0), [&] { bytesWhenTimerFired = bytes; });
+        }
+        // Keep the producer's pipe full while this callback runs. An unbounded
+        // drain loop can then monopolize the reactor until all output is read.
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    });
+    ASSERT_TRUE(runner
+                    .run({stage({"/bin/sh", "-c", "dd if=/dev/zero bs=16384 count=256 2>/dev/null"})},
+                         [&](LocalRunner::Outcome) {
+                             completed = true;
+                             r.stop();
+                         })
+                    .ok());
+    (void)r.after(std::chrono::seconds(5), [&] { r.stop(); });
+    ASSERT_TRUE(r.run().ok());
+
+    ASSERT_TRUE(completed);
+    ASSERT_TRUE(bytesWhenTimerFired.has_value());
+    EXPECT_EQ(bytes, kExpectedBytes);
+    EXPECT_LT(*bytesWhenTimerFired, bytes) << "a continuously readable child starved the reactor";
 }
 
 namespace {
