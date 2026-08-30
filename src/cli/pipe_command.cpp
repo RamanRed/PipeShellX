@@ -280,7 +280,7 @@ int runFanIn(const std::vector<psx::pipeline::Stage>& stages,
     bool completed = false;
     std::string failure;
     psx::pipeline::FanInPipeline runner(
-        r, {.certificatePem = cert, .privateKeyPem = key, .caPem = ca},
+        r, {.certificatePem = cert, .privateKeyPem = key, .caPem = ca, .crlPem = {}, .isServer = false},
         [&out](std::string_view chunk) { out.write(chunk.data(), static_cast<std::streamsize>(chunk.size())); },
         [&err](std::string_view chunk) { err.write(chunk.data(), static_cast<std::streamsize>(chunk.size())); });
     auto started =
@@ -379,7 +379,7 @@ int runSegmented(const std::vector<psx::pipeline::Stage>& stages,
     bool completed = false;
     std::string failure;
     psx::pipeline::SegmentedPipeline runner(
-        r, {.certificatePem = *cert, .privateKeyPem = *key, .caPem = *ca},
+        r, {.certificatePem = *cert, .privateKeyPem = *key, .caPem = *ca, .crlPem = {}, .isServer = false},
         [&out](std::string_view chunk) { out.write(chunk.data(), static_cast<std::streamsize>(chunk.size())); },
         [&err](std::string_view chunk) { err.write(chunk.data(), static_cast<std::streamsize>(chunk.size())); });
     auto started = runner.run(resolved, [&](psx::pipeline::SegmentedPipeline::Outcome outcome) {

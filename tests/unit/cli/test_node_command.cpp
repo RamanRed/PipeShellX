@@ -194,7 +194,7 @@ TEST(NodeCommandTest, ServiceGeneratorsEscapeSystemdAndXmlValuesAndPreserveContr
 }
 
 TEST(NodeCommandTest, SystemdControlSocketMustUseTheManagedRuntimeDirectory) {
-    for (const std::string& path :
+    for (const std::string path :
          {"/tmp/node.ctl", "/run/node.ctl", "/run/pipeshellx/../node.ctl", "relative/node.ctl"}) {
         std::ostringstream out, err;
         EXPECT_EQ(nodeSubcommand({"systemd-unit", "--cert", "/c", "--key", "/k", "--ca", "/a", "--listen",

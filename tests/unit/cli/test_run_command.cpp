@@ -647,7 +647,7 @@ TEST(ParseRunTest, CanaryFlagCarriesTheSpecVerbatim) {
 }
 
 TEST(ParseRunTest, CanaryRejectsMalformedOrNonPositiveSpecs) {
-    for (const std::string& value : {"", "0", "0%", "-1", "-5%", "abc", "1.5", "10%%", "%", "2x"}) {
+    for (const std::string value : {"", "0", "0%", "-1", "-5%", "abc", "1.5", "10%%", "%", "2x"}) {
         EXPECT_THROW(static_cast<void>(parseRun({"--canary", value, "--", "id"})), psx::cli::CliError) << value;
     }
 }

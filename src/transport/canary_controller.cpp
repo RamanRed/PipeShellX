@@ -51,8 +51,10 @@ void CanaryController::onCanaryDone(std::vector<HostResult> results) {
     std::vector<HostResult> combined = std::move(canaryResults_);
     if (!allOk) {
         for (const Target& target : restTargets_) {
-            combined.push_back(
-                {.host = target.host, .ok = false, .exitCode = -1, .error = "skipped: canary failed", .output = {}});
+            HostResult skipped;
+            skipped.host = target.host;
+            skipped.error = "skipped: canary failed";
+            combined.push_back(std::move(skipped));
         }
     }
     finish(std::move(combined));

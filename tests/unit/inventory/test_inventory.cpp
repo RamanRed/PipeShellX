@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 using psx::inventory::Host;
@@ -21,13 +22,13 @@ std::vector<std::string> names(const std::vector<Host>& hosts) {
     return out;
 }
 
-const Host& find(const Inventory& inv, const std::string& name) {
+const Host& find(const Inventory& inv, std::string_view name) {
     for (const auto& h : inv.hosts()) {
         if (h.name == name) {
             return h;
         }
     }
-    throw std::runtime_error("no such host: " + name);
+    throw std::runtime_error("no such host: " + std::string(name));
 }
 
 } // namespace

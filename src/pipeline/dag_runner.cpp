@@ -33,6 +33,8 @@ psx::Error invalid(const char* operation) {
 
 struct DagRunner::Impl {
     struct Node {
+        explicit Node(const Stage& value) : stage(value) {}
+
         Stage stage;
         psx::os::Process process;
         psx::os::Handle stdoutReader;
@@ -147,7 +149,7 @@ struct DagRunner::Impl {
         nodeById.reserve(planned.value().order.size());
         for (const std::string& id : planned.value().order) {
             nodeById.emplace(id, nodes.size());
-            nodes.push_back(Node{.stage = *stagesById.at(id)});
+            nodes.emplace_back(*stagesById.at(id));
         }
 
         std::set<std::pair<std::size_t, std::size_t>> uniqueEdges;

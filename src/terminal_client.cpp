@@ -148,11 +148,14 @@ void TerminalClient::executeAndReport(const std::function<CommandResult()>& exec
             printError("Command failed with exit code " + std::to_string(result.exitCode));
         }
     } catch (const std::exception& ex) {
-        Logger::getInstance().log(
-            LogLevel::ERROR,
-            LogContext{
-                .pid = psx::os::currentProcessId(), .sessionId = sessionId, .clientId = clientId, .command = command},
-            std::string(context) + ": " + ex.what());
+        Logger::getInstance().log(LogLevel::ERROR,
+                                  LogContext{.pid = psx::os::currentProcessId(),
+                                             .sessionId = sessionId,
+                                             .clientId = clientId,
+                                             .command = command,
+                                             .runId = {},
+                                             .stageId = {}},
+                                  std::string(context) + ": " + ex.what());
         printError(formatTerminalError(ex.what()));
     }
 }

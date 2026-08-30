@@ -55,8 +55,9 @@ add_library(pipeshellx_warnings INTERFACE)
 target_compile_options(pipeshellx_warnings INTERFACE
   $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall;-Wextra>
   # Omitted aggregate members are intentionally value-initialized throughout
-  # the C++20 designated initializers; GCC alone diagnoses those under -Wextra.
-  $<$<CXX_COMPILER_ID:GNU>:-Wno-missing-field-initializers>
+  # the C++20 designated initializers; GNU and upstream Clang diagnose those
+  # under -Wextra even when every omitted member has a safe default.
+  $<$<CXX_COMPILER_ID:GNU,Clang>:-Wno-missing-field-initializers>
   $<$<AND:$<BOOL:${PIPESHELLX_WERROR}>,$<CXX_COMPILER_ID:GNU,Clang,AppleClang>>:-Werror>
   $<$<CXX_COMPILER_ID:MSVC>:/W4>
   $<$<AND:$<BOOL:${PIPESHELLX_WERROR}>,$<CXX_COMPILER_ID:MSVC>>:/WX>

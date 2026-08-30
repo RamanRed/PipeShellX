@@ -64,7 +64,7 @@ TEST(PipeCommandTest, RejectsUnknownOptionLikeArgumentsExactly) {
 }
 
 TEST(PipeCommandTest, RejectsEveryMissingOptionValue) {
-    for (const std::string& option : {"-i", "-f", "--file", "--cert", "--key", "--ca", "--native-port"}) {
+    for (const std::string option : {"-i", "-f", "--file", "--cert", "--key", "--ca", "--native-port"}) {
         SCOPED_TRACE(option);
         std::ostringstream out, err;
         EXPECT_EQ(pipeSubcommand({option}, out, err), 2);
@@ -97,7 +97,7 @@ TEST(PipeCommandTest, RejectsDuplicateSingletonOptions) {
 }
 
 TEST(PipeCommandTest, NativePortRequiresAnExactIntegerAcrossTheFullPortRange) {
-    for (const std::string& port : {"-1", "0", "65536", "7433junk", "999999999999999999999999"}) {
+    for (const std::string port : {"-1", "0", "65536", "7433junk", "999999999999999999999999"}) {
         SCOPED_TRACE(port);
         std::ostringstream out, err;
         EXPECT_EQ(pipeSubcommand({"--native-port", port, "'true'"}, out, err), 2);
@@ -105,7 +105,7 @@ TEST(PipeCommandTest, NativePortRequiresAnExactIntegerAcrossTheFullPortRange) {
         EXPECT_EQ(err.str(), "pipeshellx pipe: --native-port must be an integer in 1..65535\n");
     }
 
-    for (const std::string& port : {"1", "65535"}) {
+    for (const std::string port : {"1", "65535"}) {
         SCOPED_TRACE(port);
         std::ostringstream out, err;
         EXPECT_EQ(pipeSubcommand({"--native-port", port, "'true'"}, out, err), 0) << err.str();

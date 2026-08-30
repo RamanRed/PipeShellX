@@ -123,7 +123,7 @@ void DistributedRunner::onConnReady(std::size_t index) {
     // All connections are secured: open every stream so routing always has a
     // live downstream (all OPEN frames precede any DATA on the reactor).
     for (std::size_t j = 0; j < conns_.size(); ++j) {
-        conns_[j]->streamId = conns_[j]->session->open({.argv = argvs_[j]});
+        conns_[j]->streamId = conns_[j]->session->open({.argv = argvs_[j], .cwd = {}});
     }
     streamsOpen_ = true;
     Conn& first = *conns_.front();
