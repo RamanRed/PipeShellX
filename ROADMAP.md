@@ -8,12 +8,10 @@ release promises or supported behavior.
 
 ## Release and distribution
 
-- Tag and publish v0.6.0 after release validation; produce checksums and signed
-  provenance for supported artifacts.
+- Tag and publish v0.6.0 after the implemented signed release workflow and
+  final release-candidate validation pass.
 - Add reproducible release builds and package channels for the supported Linux
   and macOS scope. Windows packages depend on the Windows port.
-- Publish an SBOM and complete the third-party dependency/license attribution
-  review for distributed artifacts.
 
 ## Platform portability
 
@@ -58,5 +56,5 @@ release promises or supported behavior.
 - Turn the nightly benchmark artifact into a documented, statistically sound
   regression gate with comparable baselines; cover cold/warm SSH, native
   fan-out, throughput, overload, handle hygiene, startup, and artifact size.
-- Add release-artifact installation and upgrade tests on every supported
-  package/platform combination.
+- Extend installation and upgrade coverage from versioned archives to future
+  package-manager channels and heterogeneous deployment environments.

@@ -1,6 +1,7 @@
 # PipeShellX
 
 ![CI](https://github.com/patil-rushikesh/PipeShellX/actions/workflows/ci.yml/badge.svg)
+![CodeQL](https://github.com/patil-rushikesh/PipeShellX/actions/workflows/codeql.yml/badge.svg)
 
 PipeShellX is a C++20 command-execution controller for Linux and macOS. It
 fans commands out over OpenSSH or an optional mutual-TLS transport, runs local
@@ -48,7 +49,8 @@ Windows CI job. For Windows SSH targets, select `--shell cmd` or
 
 Requirements are CMake 3.20 or newer, a C++20 compiler, and Ninja or Make.
 The default native-enabled build also requires OpenSSL 3. Tests are enabled by
-default and use an installed GoogleTest or fetch v1.17.0 during configuration.
+default and use an installed GoogleTest or fetch the immutable v1.17.0 source
+commit during configuration.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -82,6 +84,24 @@ Installed CMake consumers use:
 find_package(pipeshellx 0.6 CONFIG REQUIRED)
 target_link_libraries(my_program PRIVATE pipeshellx::lib)
 ```
+
+## Release candidates
+
+The release workflow builds and consumes three native-enabled archives:
+
+- `linux-x86_64`;
+- `macos-x86_64`; and
+- `macos-arm64`.
+
+Each candidate includes SHA-256 checksums, an SPDX JSON SBOM, a keyless Cosign
+signature bundle, and GitHub build-provenance and SBOM attestations. A manual
+workflow dispatch creates a signed dry-run Actions artifact only. Pushing the
+version-matching tag takes the separately gated publication path and creates
+the GitHub release. No v0.6 tag or release has been published yet.
+
+See [deployment](docs/deployment.md#release-archives-and-verification) for the
+asset contract, verification commands, and atomic versioned-directory upgrade
+procedure.
 
 ## Minimal inventory and usage
 
@@ -142,5 +162,7 @@ Run `pipeshellx --help` for the complete command synopsis.
 - [Security](SECURITY.md)
 - [Changelog](CHANGELOG.md)
 
-PipeShellX is licensed under Apache License 2.0. The license and attribution
-notices are included at the repository root and in installed packages.
+PipeShellX is licensed under Apache License 2.0. The license, attribution, and
+direct dependency notices are in [LICENSE](LICENSE), [NOTICE](NOTICE), and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). These files are included at
+the repository root and in installed packages.

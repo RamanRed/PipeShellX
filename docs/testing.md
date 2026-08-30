@@ -63,12 +63,12 @@ validated separately below.
 
 ## Install and package gate
 
-A normal non-sanitized CTest run registers both packaging checks. They can be
-rerun directly with:
+A normal non-sanitized CTest run registers all three focused packaging and
+dependency-metadata checks. They can be rerun directly with:
 
 ```bash
 ctest --test-dir build-native \
-  -R '^(packaging_install_consumer_smoke|native_transport_requires_openssl3)$' \
+  -R '^(dependency_notice_metadata|packaging_install_consumer_smoke|native_transport_requires_openssl3)$' \
   --output-on-failure
 ```
 
@@ -92,6 +92,41 @@ cmake -S tests/packaging/downstream -B build-package-consumer \
 cmake --build build-package-consumer --parallel
 ./build-package-consumer/bin/pipeshellx_package_consumer
 ```
+
+## Release archive gate
+
+`.github/workflows/release.yml` builds and tests three release targets:
+
+- Ubuntu 22.04 x86-64 as `linux-x86_64`;
+- macOS 15 Intel as `macos-x86_64`; and
+- macOS 15 Apple silicon as `macos-arm64`.
+
+For each target the workflow runs the full release CTest suite, installs and
+archives one versioned root, rejects a dynamic `libssl` or `libcrypto` CLI
+dependency, generates an SPDX JSON SBOM and SHA-256 checksum, then consumes the
+archive on a fresh job. `scripts/smoke_release_archive.sh` validates path
+safety, required files, the public/private header boundary, CLI behavior, the
+relocatable downstream CMake package, and clean installation.
+
+The same smoke reconstructs a fixed v0.5.0 fixture from commit
+`7aae3db2ca9bfede8efb37af2f3594384c5ac5b9`. It installs v0.5 and the current
+candidate in separate immutable versioned directories, atomically changes a
+relative `current` symlink, and verifies all of these upgrade properties:
+
+- the selected CLI reports the current version;
+- the obsolete uppercase `PipeShellX` executable is not visible through the
+  current install;
+- operator-managed configuration outside the release directories survives;
+  and
+- a fresh downstream `find_package(pipeshellx)` consumer still builds and
+  runs.
+
+After every archive passes its target smoke, the workflow creates keyless
+Cosign signatures plus GitHub SLSA provenance and SPDX SBOM attestations. A
+manual dispatch assembles and verifies a signed dry-run Actions artifact but
+does not publish. Only a pushed tag exactly matching the CMake version can
+create a GitHub release. See [deployment](deployment.md#release-archives-and-verification)
+for the asset and consumer-verification contract.
 
 ## Repository maintenance gates
 
@@ -133,14 +168,27 @@ descriptor and zombie regression loops.
 - macOS AppleClang Debug and Release;
 - Linux Clang Debug with ASan+UBSan;
 - static-OpenSSL Release install and downstream-package validation;
-- an SSH-only native-disabled build, install, CLI smoke, and downstream
-  consumer;
+- a full SSH-only native-disabled test suite, build, install, CLI smoke, and
+  downstream consumer;
 - layering and tracked-Markdown link checks.
+
+The stable `Required CI` job succeeds only when every matrix, sanitizer,
+packaging, native-disabled, layering, and documentation dependency succeeds.
+This single name is the branch-rule contract even when internal matrix labels
+change.
+
+`.github/workflows/codeql.yml` performs a C/C++ CodeQL manual-build analysis
+with the `security-extended` query suite on pushes and pull requests to `main`,
+weekly, and on manual dispatch. Its stable check name is `Analyze C/C++`.
+
+The `main` rules require both `Required CI` and `Analyze C/C++` from an
+up-to-date commit. Normal force-push and branch deletion are blocked;
+repository administrators retain an emergency bypass.
 
 Each default matrix job builds the full suite, runs CTest, and checks CLI
 version/help/unknown-option behavior. The dedicated native-disabled hosted job
-currently builds with tests disabled, so the full native-off CTest command
-above remains an explicit release gate.
+also builds and runs the full applicable SSH-only suite before installation
+and downstream consumption.
 
 `.github/workflows/bench.yml` is scheduled and manually dispatchable. It builds
 the current Release benchmark, configures localhost OpenSSH, runs the harness,
@@ -158,8 +206,10 @@ The maintained gates do not provide:
 - qualification against a heterogeneous external SSH/native fleet;
 - native reconnect/resume or general non-linear remote DAG behavior, which the
   product does not implement;
-- continuous libFuzzer, sandbox/privilege-separation, signed-audit, or release
-  artifact-signing validation;
+- continuous libFuzzer, sandbox/privilege-separation, or signed-audit
+  validation;
+- byte-for-byte reproducible release builds and package-manager installation
+  or upgrade coverage beyond the versioned archives;
 - reproducible performance guarantees from the shared hosted benchmark runner.
 
 Passing the POSIX matrix supports the documented Linux/macOS scope only; it is

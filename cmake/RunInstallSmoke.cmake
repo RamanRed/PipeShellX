@@ -67,7 +67,7 @@ foreach(_forbidden IN ITEMS "${PIPESHELLX_SOURCE_DIR}" "${PIPESHELLX_BUILD_DIR}"
 endforeach()
 
 set(_doc_dir "${_prefix}/${PIPESHELLX_INSTALL_DATADIR}/doc/pipeshellx")
-foreach(_doc_file IN ITEMS LICENSE NOTICE README.md CHANGELOG.md)
+foreach(_doc_file IN ITEMS LICENSE NOTICE THIRD_PARTY_NOTICES.md README.md CHANGELOG.md)
     if(NOT EXISTS "${_doc_dir}/${_doc_file}")
         message(FATAL_ERROR "install tree is missing documentation file: ${_doc_dir}/${_doc_file}")
     endif()

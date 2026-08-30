@@ -34,6 +34,17 @@ endif()
 set(PIPESHELLX_SANITIZE "" CACHE STRING
     "Comma-separated sanitizers to enable (e.g. address,undefined or thread)")
 
+# Test dependency provenance. These are ordinary variables rather than cache
+# options so a build cannot accidentally replace the reviewed source revision.
+set(PIPESHELLX_GOOGLETEST_FALLBACK_VERSION "1.17.0")
+set(PIPESHELLX_GOOGLETEST_FALLBACK_COMMIT "52eb8108c5bdec04579160ae17225d66034bd723")
+string(LENGTH "${PIPESHELLX_GOOGLETEST_FALLBACK_COMMIT}" _pipeshellx_googletest_commit_length)
+if(NOT _pipeshellx_googletest_commit_length EQUAL 40 OR
+   NOT PIPESHELLX_GOOGLETEST_FALLBACK_COMMIT MATCHES "^[0-9a-f]+$")
+  message(FATAL_ERROR "PIPESHELLX_GOOGLETEST_FALLBACK_COMMIT must be a full immutable Git commit")
+endif()
+unset(_pipeshellx_googletest_commit_length)
+
 # Build type default
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
@@ -115,6 +126,6 @@ install(FILES
     "${CMAKE_CURRENT_BINARY_DIR}/pipeshellxConfigVersion.cmake"
     DESTINATION "${PIPESHELLX_INSTALL_CMAKEDIR}"
     COMPONENT Development)
-install(FILES LICENSE NOTICE README.md CHANGELOG.md
+install(FILES LICENSE NOTICE THIRD_PARTY_NOTICES.md README.md CHANGELOG.md
     DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/pipeshellx"
     COMPONENT Runtime)

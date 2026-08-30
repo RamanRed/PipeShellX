@@ -229,8 +229,9 @@ remote `pipe` are native-only.
   secret memory, and signed/tamper-evident audit are not implemented.
 - Lossless capture and spool completion are not memory/disk bounded, and
   psx/1 has no connection-wide credit window.
-- Release artifacts, heterogeneous-fleet qualification, continuous fuzzing,
-  and the Windows matrix remain roadmap work.
+- Publishing the first signed release, heterogeneous-fleet qualification,
+  continuous fuzzing, and the Windows matrix remain roadmap work; the signed
+  Linux/macOS release workflow itself is implemented.
 
 See [ROADMAP.md](../ROADMAP.md) for only the unfinished commitments; completed
 history belongs in version control and the changelog rather than the roadmap.

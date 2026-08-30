@@ -1,0 +1,527 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  metadata:
+    name: Validate release metadata
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Match tag and CMake project version
+        id: release
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          version=$(sed -nE \
+            's/^project\(pipeshellx VERSION ([0-9]+\.[0-9]+\.[0-9]+).*$/\1/p' \
+            CMakeLists.txt)
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "could not read one semantic project version from CMakeLists.txt" >&2
+            exit 1
+          fi
+          tag="v$version"
+          if [[ "$EVENT_NAME" == "push" && "$REF_NAME" != "$tag" ]]; then
+            echo "tag '$REF_NAME' does not match CMake project version '$tag'" >&2
+            exit 1
+          fi
+          if [[ "$EVENT_NAME" == "workflow_dispatch" && "$REF_NAME" != "$DEFAULT_BRANCH" ]]; then
+            echo "manual release validation must run from '$DEFAULT_BRANCH', not '$REF_NAME'" >&2
+            exit 1
+          fi
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            release_commit=$(git rev-parse "$RELEASE_SHA^{commit}")
+            if ! git merge-base --is-ancestor \
+              "$release_commit" "origin/$DEFAULT_BRANCH"; then
+              echo "release commit is not on the default branch '$DEFAULT_BRANCH'" >&2
+              exit 1
+            fi
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.target }} archive
+    needs: metadata
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: linux-x86_64
+            arch: x86_64
+          - runner: macos-15-intel
+            target: macos-x86_64
+            arch: x86_64
+          - runner: macos-15
+            target: macos-arm64
+            arch: arm64
+    env:
+      ARCHIVE_BASE: pipeshellx-${{ needs.metadata.outputs.version }}-${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify runner architecture
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          actual_arch=$(uname -m)
+          if [[ "$actual_arch" != "$EXPECTED_ARCH" ]]; then
+            echo "expected $EXPECTED_ARCH runner, got $actual_arch" >&2
+            exit 1
+          fi
+
+      - name: Install OpenSSL 3 (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          brew install openssl@3
+          openssl_root=$(brew --prefix openssl@3)
+          echo "OPENSSL_ROOT_DIR=$openssl_root" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$openssl_root/lib/pkgconfig" >> "$GITHUB_ENV"
+
+      - name: Configure release build
+        run: |
+          set -euo pipefail
+          cmake_args=(
+            -S .
+            -B build-release
+            -DCMAKE_BUILD_TYPE=Release
+            -DPIPESHELLX_BUILD_TESTS=ON
+            -DPIPESHELLX_BUILD_BENCH=OFF
+            -DPIPESHELLX_STATIC_OPENSSL=ON
+          )
+          cmake "${cmake_args[@]}"
+
+      - name: Build and test release configuration
+        run: |
+          set -euo pipefail
+          cmake --build build-release --parallel 3
+          ctest --test-dir build-release --output-on-failure --timeout 180
+
+      - name: Stage and archive install tree
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/$ARCHIVE_BASE"
+          cmake --install build-release --prefix "$stage"
+          "$stage/bin/pipeshellx" --version
+          mkdir -p dist
+          tar -czf "dist/$ARCHIVE_BASE.tar.gz" -C "$RUNNER_TEMP" "$ARCHIVE_BASE"
+
+      - name: Reject dynamic OpenSSL release dependency
+        run: |
+          set -euo pipefail
+          executable="$RUNNER_TEMP/$ARCHIVE_BASE/bin/pipeshellx"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            dependencies=$(otool -L "$executable")
+          else
+            dependencies=$(ldd "$executable")
+          fi
+          printf '%s\n' "$dependencies"
+          if grep -E '/lib(ssl|crypto)(\.|/)|lib(ssl|crypto)\.' <<<"$dependencies"; then
+            echo "release executable retains a dynamic OpenSSL dependency" >&2
+            exit 1
+          fi
+
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          path: ${{ runner.temp }}/${{ env.ARCHIVE_BASE }}
+          format: spdx-json
+          output-file: dist/${{ env.ARCHIVE_BASE }}.tar.gz.spdx.json
+          syft-version: v1.51.1
+          dependency-snapshot: false
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Record archive checksum
+        run: |
+          set -euo pipefail
+          cd dist
+          shasum -a 256 "$ARCHIVE_BASE.tar.gz" > "$ARCHIVE_BASE.tar.gz.sha256"
+
+      - name: Upload unsigned release candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-candidate-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  smoke:
+    name: Consume ${{ matrix.target }} archive
+    needs: [metadata, build]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: linux-x86_64
+          - runner: macos-15-intel
+            target: macos-x86_64
+          - runner: macos-15
+            target: macos-arm64
+    env:
+      ARCHIVE_BASE: pipeshellx-${{ needs.metadata.outputs.version }}-${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install OpenSSL 3 (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          brew install openssl@3
+          openssl_root=$(brew --prefix openssl@3)
+          echo "OPENSSL_ROOT_DIR=$openssl_root" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$openssl_root/lib/pkgconfig" >> "$GITHUB_ENV"
+
+      - name: Download release candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-candidate-${{ matrix.target }}
+          path: dist
+
+      - name: Verify checksum and SBOM
+        run: |
+          set -euo pipefail
+          cd dist
+          shasum -a 256 -c "$ARCHIVE_BASE.tar.gz.sha256"
+          python3 -m json.tool "$ARCHIVE_BASE.tar.gz.spdx.json" >/dev/null
+
+      - name: Build fixed v0.5 upgrade fixture
+        env:
+          PREVIOUS_COMMIT: 7aae3db2ca9bfede8efb37af2f3594384c5ac5b9
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          previous_source="$RUNNER_TEMP/pipeshellx-v0.5-source"
+          previous_build="$RUNNER_TEMP/pipeshellx-v0.5-build"
+          previous_root="pipeshellx-0.5.0-$RELEASE_TARGET"
+          mkdir -p "$previous_source"
+          git archive "$PREVIOUS_COMMIT" | tar -x -C "$previous_source"
+          cmake -S "$previous_source" -B "$previous_build" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPIPESHELLX_NATIVE_TRANSPORT=OFF \
+            -DPIPESHELLX_BUILD_TESTS=OFF \
+            -DPIPESHELLX_BUILD_BENCH=OFF \
+            -DPIPESHELLX_WERROR=OFF
+          cmake --build "$previous_build" --parallel 3
+          cmake --install "$previous_build" --prefix "$RUNNER_TEMP/$previous_root"
+          tar -czf "dist/$previous_root.tar.gz" -C "$RUNNER_TEMP" "$previous_root"
+
+      - name: Test clean install and archive upgrade
+        env:
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: >-
+          ./scripts/smoke_release_archive.sh
+          "dist/$ARCHIVE_BASE.tar.gz"
+          "$RELEASE_VERSION"
+          "$RELEASE_TARGET"
+          "dist/pipeshellx-0.5.0-$RELEASE_TARGET.tar.gz"
+
+  attest:
+    name: Sign and attest ${{ matrix.target }}
+    needs: [metadata, smoke]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [linux-x86_64, macos-x86_64, macos-arm64]
+    env:
+      ARCHIVE_BASE: pipeshellx-${{ needs.metadata.outputs.version }}-${{ matrix.target }}
+      CERTIFICATE_IDENTITY: ${{ github.server_url }}/${{ github.repository }}/.github/workflows/release.yml@${{ github.ref }}
+      OIDC_ISSUER: https://token.actions.githubusercontent.com
+    steps:
+      - name: Download validated release candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-candidate-${{ matrix.target }}
+          path: dist
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+
+      - name: Keyless-sign and verify archive
+        run: |
+          set -euo pipefail
+          archive="dist/$ARCHIVE_BASE.tar.gz"
+          bundle="$archive.sigstore.json"
+          cosign sign-blob --yes --bundle "$bundle" "$archive"
+          cosign verify-blob "$archive" \
+            --bundle "$bundle" \
+            --certificate-identity "$CERTIFICATE_IDENTITY" \
+            --certificate-oidc-issuer "$OIDC_ISSUER"
+
+      - name: Generate SLSA build provenance
+        id: provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/${{ env.ARCHIVE_BASE }}.tar.gz
+
+      - name: Attest SPDX SBOM
+        id: sbom-attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/${{ env.ARCHIVE_BASE }}.tar.gz
+          sbom-path: dist/${{ env.ARCHIVE_BASE }}.tar.gz.spdx.json
+
+      - name: Preserve attestation bundles with release assets
+        env:
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+          SBOM_BUNDLE: ${{ steps.sbom-attestation.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          cp "$PROVENANCE_BUNDLE" "dist/$ARCHIVE_BASE.tar.gz.provenance.sigstore.json"
+          cp "$SBOM_BUNDLE" "dist/$ARCHIVE_BASE.tar.gz.sbom-attestation.sigstore.json"
+
+      - name: Upload signed release assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-signed-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  dry-run:
+    name: Assemble dry-run release
+    if: github.event_name == 'workflow_dispatch'
+    needs: [metadata, attest]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      CERTIFICATE_IDENTITY: ${{ github.server_url }}/${{ github.repository }}/.github/workflows/release.yml@${{ github.ref }}
+      OIDC_ISSUER: https://token.actions.githubusercontent.com
+    steps:
+      - name: Download signed and attested candidates
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-signed-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+
+      - name: Assemble and verify dry-run bundle end to end
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+          archive_count=$(find . -maxdepth 1 -type f -name '*.tar.gz' | wc -l | tr -d ' ')
+          sbom_count=$(find . -maxdepth 1 -type f -name '*.spdx.json' | wc -l | tr -d ' ')
+          checksum_count=$(find . -maxdepth 1 -type f -name '*.tar.gz.sha256' | wc -l | tr -d ' ')
+          signature_count=$(find . -maxdepth 1 -type f -name '*.tar.gz.sigstore.json' | wc -l | tr -d ' ')
+          provenance_count=$(find . -maxdepth 1 -type f -name '*.tar.gz.provenance.sigstore.json' | wc -l | tr -d ' ')
+          sbom_attestation_count=$(find . -maxdepth 1 -type f -name '*.tar.gz.sbom-attestation.sigstore.json' | wc -l | tr -d ' ')
+          if [[ "$archive_count" -ne 3 || "$sbom_count" -ne 3 || \
+                "$checksum_count" -ne 3 || "$signature_count" -ne 3 || \
+                "$provenance_count" -ne 3 || "$sbom_attestation_count" -ne 3 ]]; then
+            echo "release candidate is missing an archive, checksum, SBOM, signature, or attestation" >&2
+            exit 1
+          fi
+          for checksum in *.tar.gz.sha256; do
+            shasum -a 256 -c "$checksum"
+          done
+          for archive in *.tar.gz; do
+            cosign verify-blob "$archive" \
+              --bundle "$archive.sigstore.json" \
+              --certificate-identity "$CERTIFICATE_IDENTITY" \
+              --certificate-oidc-issuer "$OIDC_ISSUER"
+            gh attestation verify "$archive" \
+              --repo "$GITHUB_REPOSITORY" \
+              --bundle "$archive.provenance.sigstore.json" \
+              --cert-identity "$CERTIFICATE_IDENTITY" \
+              --cert-oidc-issuer "$OIDC_ISSUER" \
+              --predicate-type https://slsa.dev/provenance/v1
+            gh attestation verify "$archive" \
+              --repo "$GITHUB_REPOSITORY" \
+              --bundle "$archive.sbom-attestation.sigstore.json" \
+              --cert-identity "$CERTIFICATE_IDENTITY" \
+              --cert-oidc-issuer "$OIDC_ISSUER" \
+              --predicate-type https://spdx.dev/Document/v2.3
+          done
+          shasum -a 256 -- *.tar.gz > CHECKSUMS.sha256
+
+      - name: Keyless-sign aggregate dry-run checksum manifest
+        run: |
+          set -euo pipefail
+          checksum=release-assets/CHECKSUMS.sha256
+          bundle="$checksum.sigstore.json"
+          cosign sign-blob --yes --bundle "$bundle" "$checksum"
+          cosign verify-blob "$checksum" \
+            --bundle "$bundle" \
+            --certificate-identity "$CERTIFICATE_IDENTITY" \
+            --certificate-oidc-issuer "$OIDC_ISSUER"
+
+      - name: Attest aggregate dry-run archive checksums
+        id: dry-run-checksums-attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: release-assets/CHECKSUMS.sha256
+
+      - name: Preserve dry-run checksum attestation bundle
+        env:
+          ATTESTATION_BUNDLE: ${{ steps.dry-run-checksums-attestation.outputs.bundle-path }}
+        run: >-
+          cp "$ATTESTATION_BUNDLE"
+          release-assets/CHECKSUMS.sha256.provenance.sigstore.json
+
+      - name: Upload complete dry-run release
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pipeshellx-${{ needs.metadata.outputs.version }}-release-dry-run
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [metadata, attest]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      CERTIFICATE_IDENTITY: ${{ github.server_url }}/${{ github.repository }}/.github/workflows/release.yml@${{ github.ref }}
+      OIDC_ISSUER: https://token.actions.githubusercontent.com
+      RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+    steps:
+      - name: Download signed assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-signed-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+
+      - name: Verify assets and assemble checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+          archive_count=$(find . -maxdepth 1 -type f -name '*.tar.gz' | wc -l | tr -d ' ')
+          sbom_count=$(find . -maxdepth 1 -type f -name '*.spdx.json' | wc -l | tr -d ' ')
+          checksum_count=$(find . -maxdepth 1 -type f -name '*.tar.gz.sha256' | wc -l | tr -d ' ')
+          signature_count=$(find . -maxdepth 1 -type f -name '*.tar.gz.sigstore.json' | wc -l | tr -d ' ')
+          provenance_count=$(find . -maxdepth 1 -type f -name '*.tar.gz.provenance.sigstore.json' | wc -l | tr -d ' ')
+          sbom_attestation_count=$(find . -maxdepth 1 -type f -name '*.tar.gz.sbom-attestation.sigstore.json' | wc -l | tr -d ' ')
+          if [[ "$archive_count" -ne 3 || "$sbom_count" -ne 3 || \
+                "$checksum_count" -ne 3 || "$signature_count" -ne 3 || \
+                "$provenance_count" -ne 3 || "$sbom_attestation_count" -ne 3 ]]; then
+            echo "release candidate is missing an archive, checksum, SBOM, signature, or attestation" >&2
+            exit 1
+          fi
+          for checksum in *.tar.gz.sha256; do
+            shasum -a 256 -c "$checksum"
+          done
+          for archive in *.tar.gz; do
+            cosign verify-blob "$archive" \
+              --bundle "$archive.sigstore.json" \
+              --certificate-identity "$CERTIFICATE_IDENTITY" \
+              --certificate-oidc-issuer "$OIDC_ISSUER"
+            gh attestation verify "$archive" \
+              --repo "$GITHUB_REPOSITORY" \
+              --bundle "$archive.provenance.sigstore.json" \
+              --cert-identity "$CERTIFICATE_IDENTITY" \
+              --cert-oidc-issuer "$OIDC_ISSUER" \
+              --predicate-type https://slsa.dev/provenance/v1
+            gh attestation verify "$archive" \
+              --repo "$GITHUB_REPOSITORY" \
+              --bundle "$archive.sbom-attestation.sigstore.json" \
+              --cert-identity "$CERTIFICATE_IDENTITY" \
+              --cert-oidc-issuer "$OIDC_ISSUER" \
+              --predicate-type https://spdx.dev/Document/v2.3
+          done
+          shasum -a 256 -- *.tar.gz > CHECKSUMS.sha256
+
+      - name: Keyless-sign aggregate checksum manifest
+        run: |
+          set -euo pipefail
+          checksum=release-assets/CHECKSUMS.sha256
+          bundle="$checksum.sigstore.json"
+          cosign sign-blob --yes --bundle "$bundle" "$checksum"
+          cosign verify-blob "$checksum" \
+            --bundle "$bundle" \
+            --certificate-identity "$CERTIFICATE_IDENTITY" \
+            --certificate-oidc-issuer "$OIDC_ISSUER"
+
+      - name: Attest aggregate archive checksums
+        id: release-checksums-attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: release-assets/CHECKSUMS.sha256
+
+      - name: Preserve checksum attestation bundle
+        env:
+          ATTESTATION_BUNDLE: ${{ steps.release-checksums-attestation.outputs.bundle-path }}
+        run: >-
+          cp "$ATTESTATION_BUNDLE"
+          release-assets/CHECKSUMS.sha256.provenance.sigstore.json
+
+      - name: Publish immutable-tag release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$RELEASE_TAG"
+          release-assets/*
+          --verify-tag
+          --title "PipeShellX $RELEASE_TAG"
+          --generate-notes

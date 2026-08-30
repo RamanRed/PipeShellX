@@ -31,7 +31,9 @@ jobs:
           - os: macos-latest
             compiler: gcc
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Select compiler
         shell: bash
@@ -73,7 +75,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Configure static-OpenSSL release
         run: >-
@@ -91,6 +95,7 @@ jobs:
           "$RUNNER_TEMP/pipeshellx-prefix/bin/pipeshellx" --version
           test -f "$RUNNER_TEMP/pipeshellx-prefix/share/doc/pipeshellx/LICENSE"
           test -f "$RUNNER_TEMP/pipeshellx-prefix/share/doc/pipeshellx/NOTICE"
+          test -f "$RUNNER_TEMP/pipeshellx-prefix/share/doc/pipeshellx/THIRD_PARTY_NOTICES.md"
           test -f "$RUNNER_TEMP/pipeshellx-prefix/share/doc/pipeshellx/README.md"
           test -f "$RUNNER_TEMP/pipeshellx-prefix/share/doc/pipeshellx/CHANGELOG.md"
           test -f "$RUNNER_TEMP/pipeshellx-prefix/include/psx/pipeline/planner.hpp"
@@ -113,18 +118,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Configure without discovering OpenSSL
         run: >-
           cmake -S . -B build-native-off -DCMAKE_BUILD_TYPE=Release
           -DPIPESHELLX_NATIVE_TRANSPORT=OFF
           -DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=TRUE
-          -DPIPESHELLX_BUILD_TESTS=OFF -DPIPESHELLX_BUILD_BENCH=OFF
+          -DPIPESHELLX_BUILD_TESTS=ON -DPIPESHELLX_BUILD_BENCH=OFF
 
-      - name: Build, install, and smoke
+      - name: Build, test, install, and smoke
         run: |
           cmake --build build-native-off --parallel
+          ctest --test-dir build-native-off --output-on-failure --timeout 180
           ./build-native-off/bin/pipeshellx --version
           ./build-native-off/bin/pipeshellx --help
           cmake --install build-native-off --prefix "$RUNNER_TEMP/pipeshellx-native-off"
@@ -139,7 +147,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Check layering rules
         run: ./scripts/check_layering.sh
       - name: Check documentation links
@@ -155,10 +165,46 @@ jobs:
       ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
       UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DPIPESHELLX_SANITIZE=address,undefined
       - name: Build
         run: cmake --build build --parallel
       - name: Test
         run: ctest --test-dir build --output-on-failure --timeout 180
+
+  required:
+    name: Required CI
+    if: ${{ always() }}
+    needs:
+      - build-test
+      - packaging
+      - native-off
+      - layering
+      - sanitizers
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Verify required jobs
+        env:
+          BUILD_TEST_RESULT: ${{ needs.build-test.result }}
+          PACKAGING_RESULT: ${{ needs.packaging.result }}
+          NATIVE_OFF_RESULT: ${{ needs.native-off.result }}
+          LAYERING_RESULT: ${{ needs.layering.result }}
+          SANITIZERS_RESULT: ${{ needs.sanitizers.result }}
+        shell: bash
+        run: |
+          for result in \
+            "$BUILD_TEST_RESULT" \
+            "$PACKAGING_RESULT" \
+            "$NATIVE_OFF_RESULT" \
+            "$LAYERING_RESULT" \
+            "$SANITIZERS_RESULT"; do
+            if [[ "$result" != "success" ]]; then
+              echo "A required CI dependency finished with: $result" >&2
+              exit 1
+            fi
+          done

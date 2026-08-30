@@ -31,6 +31,10 @@ as 0.6.0, but no version tag or release artifact has been published on GitHub.
   diagnostic and nonzero stage exits treated as host failures.
 - Installable executable and library, relocatable CMake package, downstream
   packaging smoke tests, and an explicit native-disabled SSH-only build.
+- Signed release automation for Linux x86-64, macOS x86-64, and macOS arm64,
+  with SHA-256 manifests, SPDX SBOMs, Cosign bundles, GitHub provenance/SBOM
+  attestations, clean archive consumption, and atomic v0.5 upgrade tests.
+- C/C++ CodeQL analysis with the `security-extended` query suite.
 
 ### Changed
 
@@ -45,8 +49,9 @@ as 0.6.0, but no version tag or release artifact has been published on GitHub.
   remains an SSH-target tier reached from a POSIX controller.
 - CI covers Linux GCC/Clang and macOS AppleClang in Debug and Release, Linux
   Clang ASan+UBSan, layering, install/downstream packaging, and a
-  native-disabled build. The benchmark runs separately as a best-effort
-  scheduled workflow.
+  native-disabled build. `Required CI` is the stable aggregate check; CodeQL's
+  `Analyze C/C++` is independently required. The benchmark runs separately as
+  a best-effort scheduled workflow.
 
 ### Fixed
 
@@ -84,6 +89,12 @@ as 0.6.0, but no version tag or release artifact has been published on GitHub.
 - Limited installed headers to the supported `include/psx/` API surface;
   internal CLI/application and OS-backend headers are no longer published as
   compatibility commitments.
+- Added installed third-party notices with explicit redistribution boundaries,
+  pinned the GoogleTest fallback to its immutable v1.17.0 commit, and added a
+  metadata drift test for the reviewed dependency record.
+- Protected `main` with up-to-date `Required CI` and `Analyze C/C++` checks and
+  blocked normal force-push and deletion while retaining an administrator
+  emergency bypass.
 
 ### Known limitations
 
@@ -98,9 +109,9 @@ as 0.6.0, but no version tag or release artifact has been published on GitHub.
   separation, per-stage sandbox, locked secret-memory type, or signed audit.
 - The lossless `block` capture policy is unbounded. Spool bounds its in-memory
   tail but not temporary-disk growth or final full-result materialization.
-- A passing source-tree CI run is not a published release or a substitute for
-  signed artifacts, checksums, provenance, and multi-platform release
-  qualification.
+- The signed release path is implemented, but no v0.6 tag or public release
+  exists yet; a source-tree or manual dry-run result is not a published
+  release.
 
 ## Published releases
 

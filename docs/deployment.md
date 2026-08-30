@@ -83,7 +83,9 @@ cmake --install build-release --prefix /opt/pipeshellx
 ```
 
 The install contains the executable, `pipeshellx::lib`, its supported public
-headers, CMake package metadata, and the project license/readme/changelog.
+headers, CMake package metadata, and the project license, third-party notices,
+readme, and changelog.
+
 A downstream CMake project can use:
 
 ```cmake
@@ -98,6 +100,129 @@ headers used by the executable are intentionally not installed.
 Native-enabled packages retain their OpenSSL 3 and Threads dependencies.
 Native-disabled packages do not require OpenSSL. The CI packaging jobs verify
 installation, relocation, and consumption from a fresh downstream project.
+
+## Release archives and verification
+
+No v0.6 release has been published yet. The release workflow is ready to
+produce these native-enabled archives when v0.6.0 is published:
+
+| Target | Build runner | Archive root |
+| --- | --- | --- |
+| `linux-x86_64` | Ubuntu 22.04 x86-64 | `pipeshellx-0.6.0-linux-x86_64/` |
+| `macos-x86_64` | macOS 15 Intel | `pipeshellx-0.6.0-macos-x86_64/` |
+| `macos-arm64` | macOS 15 Apple silicon | `pipeshellx-0.6.0-macos-arm64/` |
+
+Each build runs the release test suite, installs into that single versioned
+root, verifies clean archive consumption, rejects a dynamic OpenSSL dependency
+from the CLI, and emits the following assets:
+
+| Asset | Purpose |
+| --- | --- |
+| `pipeshellx-VERSION-TARGET.tar.gz` | Versioned install tree. |
+| `*.tar.gz.sha256` | Per-archive SHA-256 checksum. |
+| `*.tar.gz.spdx.json` | SPDX JSON software bill of materials generated from the install tree. |
+| `*.tar.gz.sigstore.json` | Keyless Cosign signature bundle for the archive. |
+| `*.tar.gz.provenance.sigstore.json` | GitHub SLSA build-provenance attestation bundle. |
+| `*.tar.gz.sbom-attestation.sigstore.json` | GitHub attestation binding the SPDX SBOM to the archive. |
+| `CHECKSUMS.sha256` and its two `*.sigstore.json` files | Aggregate archive checksums, Cosign signature, and GitHub provenance bundle. |
+
+A manual dispatch against `main` exercises the complete build, smoke,
+v0.5-to-current upgrade, signing, and attestation path, then uploads a
+short-lived `pipeshellx-0.6.0-release-dry-run` Actions artifact. It does not
+create a tag or GitHub release. Only a pushed `v0.6.0` tag matching the CMake
+project version enters the publish job.
+
+Maintainers run the non-publishing gate explicitly:
+
+```bash
+gh workflow run release.yml --ref main
+```
+
+After that run and all required checks pass, publication is deliberately a
+separate tag operation against the validated commit:
+
+```bash
+git tag -a v0.6.0 VALIDATED_COMMIT -m "PipeShellX v0.6.0"
+git push origin refs/tags/v0.6.0
+```
+
+These commands describe the release procedure; they have not been run for
+v0.6.0. A mismatched tag and project version fails metadata validation before
+publication.
+
+### Verify a published archive
+
+Install `cosign`, GitHub CLI `gh`, `jq`, and a SHA-256 implementation first.
+Download all assets into one directory, select the archive for the machine,
+and verify it before extraction. For a future tagged v0.6.0 release:
+
+```bash
+repo=patil-rushikesh/PipeShellX
+version=0.6.0
+tag="v$version"
+target=linux-x86_64 # or macos-x86_64 / macos-arm64
+base="pipeshellx-$version-$target"
+identity="https://github.com/$repo/.github/workflows/release.yml@refs/tags/$tag"
+issuer=https://token.actions.githubusercontent.com
+
+shasum -a 256 -c "$base.tar.gz.sha256"
+shasum -a 256 -c CHECKSUMS.sha256
+jq -e '.spdxVersion and (.packages | type == "array")' \
+  "$base.tar.gz.spdx.json" >/dev/null
+
+cosign verify-blob "$base.tar.gz" \
+  --bundle "$base.tar.gz.sigstore.json" \
+  --certificate-identity "$identity" \
+  --certificate-oidc-issuer "$issuer"
+cosign verify-blob CHECKSUMS.sha256 \
+  --bundle CHECKSUMS.sha256.sigstore.json \
+  --certificate-identity "$identity" \
+  --certificate-oidc-issuer "$issuer"
+
+gh attestation verify "$base.tar.gz" --repo "$repo" \
+  --bundle "$base.tar.gz.provenance.sigstore.json" \
+  --predicate-type https://slsa.dev/provenance/v1 \
+  --cert-identity "$identity" \
+  --cert-oidc-issuer "$issuer"
+gh attestation verify "$base.tar.gz" --repo "$repo" \
+  --bundle "$base.tar.gz.sbom-attestation.sigstore.json" \
+  --predicate-type https://spdx.dev/Document/v2.3 \
+  --cert-identity "$identity" \
+  --cert-oidc-issuer "$issuer"
+```
+
+For a manually dispatched dry run from `main`, use the downloaded dry-run
+artifact and change only the expected identity suffix from
+`@refs/tags/v0.6.0` to `@refs/heads/main`. Verification against an unexpected
+tag, branch, repository, OIDC issuer, digest, or predicate type must fail.
+
+### Install and upgrade atomically
+
+Keep each release immutable and keep inventories, certificates, policies,
+logs, and other operator-managed state outside its directory. After verifying
+an archive, install it beside the old version and atomically replace a relative
+`current` symlink:
+
+```bash
+install_root="$HOME/.local/pipeshellx"
+archive_root="$base"
+mkdir -p "$install_root/releases" "$install_root/etc/pipeshellx"
+tar -xzf "$base.tar.gz" -C "$install_root/releases"
+
+next="$install_root/current.next.$$"
+ln -s "releases/$archive_root" "$next"
+python3 -c 'import os,sys; os.replace(sys.argv[1], sys.argv[2])' \
+  "$next" "$install_root/current"
+"$install_root/current/bin/pipeshellx" --version
+```
+
+The release smoke performs this process with a fixed, source-derived v0.5.0
+install fixture on all three targets. It proves that the old uppercase
+`PipeShellX` executable is not retained through the `current` path, the new
+lowercase `pipeshellx` CLI and downstream CMake package work, and state kept
+under `etc/pipeshellx/` is not overwritten. Rollback uses the same atomic
+symlink replacement to select the previous versioned directory; do not merge
+two release trees in place.
 
 ## Inventory
 
