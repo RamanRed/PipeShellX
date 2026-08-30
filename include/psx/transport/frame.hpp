@@ -5,7 +5,7 @@
 
 namespace psx::transport {
 
-// Frame types of the psx/1 native backplane (see docs/wire_protocol.md, ADR-006).
+// Frame types of the psx/1 native backplane (see docs/wire_protocol.md).
 // The codec treats the type as an opaque byte; semantics live one layer up, so
 // an unknown type decodes cleanly (forward compatibility) rather than erroring.
 enum class FrameType : std::uint8_t {

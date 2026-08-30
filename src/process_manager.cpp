@@ -35,8 +35,8 @@ using psx::os::SpawnSpec;
 using psx::runtime::Reactor;
 using psx::runtime::Token;
 
-// Resource caps for local children (unchanged from v0.1.0; configurable per
-// stage in Phase 6).
+// Fixed compatibility caps for local children. They are not yet configurable
+// per stage; that limitation is tracked in ROADMAP.md.
 constexpr std::uint32_t kLocalCpuSeconds = 5;
 constexpr std::uint64_t kLocalAddressSpaceBytes = 64ULL * 1024 * 1024;
 

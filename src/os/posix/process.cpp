@@ -330,7 +330,7 @@ Result<void> applyLimits(pid_t pid, const Limits& limits) {
     ::_exit(127);
 }
 
-// RLIMIT_AS is advisory: Darwin rejects or ignores it (PLAN.md §3.8), and a
+// RLIMIT_AS is advisory: Darwin rejects or ignores it, and a
 // refused memory cap must not prevent the program from starting.
 bool applyLimitInChild(int resource, const std::optional<std::uint64_t>& value) noexcept {
     if (!value) {

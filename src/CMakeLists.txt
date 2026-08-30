@@ -2,7 +2,8 @@ find_package(Threads REQUIRED)
 
 # L0 — OS primitive backends (the only place platform headers may appear)
 if(WIN32)
-    message(FATAL_ERROR "The Win32 backend arrives in Phase 3 (PLAN.md)")
+    message(FATAL_ERROR
+        "PipeShellX does not yet implement a Win32 controller or native node (see ROADMAP.md)")
 else()
     set(PIPESHELLX_STREAM_SOURCES
         stream/bounded_buffer.cpp

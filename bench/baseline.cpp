@@ -1,9 +1,8 @@
-// Baseline measurement harness for PLAN.md §7 (recorded in docs/benchmarks.md).
+// Baseline measurement harness documented in docs/benchmarks.md.
 //
-// Measures what the *current* implementation costs so that later phases have
-// numbers to beat:
+// Measures the current ProcessManager execution paths:
 //   --spawn N        N round-trips of ProcessManager::execute({"true"})
-//                    (fork + exec + 3 pipes + poll + waitpid), p50/p90/p99
+//                    (managed spawn + pipes + reactor + reap), p50/p90/p99
 //   --fanout N[,N…]  executeRemote() against N copies of `ssh localhost uptime`
 //                    (skipped with a reason when localhost is not reachable)
 // Every section also reports the open-descriptor count and peak RSS.

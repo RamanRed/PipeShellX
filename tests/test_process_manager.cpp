@@ -167,7 +167,7 @@ TEST_F(ProcessManagerTest, TimeoutAbandonsPipesHeldOutsideTheProcessGroup) {
     EXPECT_LT(elapsed, std::chrono::seconds(6));
 }
 
-// Phase 1 exit criterion: zero descriptor leaks and zero zombies in a soak.
+// Regression invariant: a process soak leaves zero descriptor leaks or zombies.
 TEST_F(ProcessManagerTest, ExecuteSoakLeaksNeitherDescriptorsNorZombies) try {
     const int cycles = std::getenv("PIPESHELLX_SOAK") != nullptr ? 10000 : 300;
     (void)psx::os::raiseHandleLimit();

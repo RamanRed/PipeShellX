@@ -1,6 +1,6 @@
 #pragma once
 
-// psx::Result<T> — expected-style return type used by L0–L2 (ADR-005).
+// psx::Result<T> — expected-style return type used by the lower layers.
 // Public headers under include/psx/ use std:: types only.
 
 #include <cstdint>

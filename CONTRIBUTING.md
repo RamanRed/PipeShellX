@@ -1,102 +1,140 @@
 # Contributing to PipeShellX
 
-Thanks for helping build PipeShellX. This document covers the mechanics; the
-*what* and *why* live in [`PLAN.md`](PLAN.md) (the single source of truth for
-scope) and the architecture decision records in [`docs/adr/`](docs/adr/).
+Thank you for improving PipeShellX. Contributions should keep command
+execution predictable, portable, testable, and honest about its trust and
+platform boundaries.
 
-## Build and test
+## Set up a development build
 
-Requirements: CMake ≥ 3.20, a C++20 compiler (GCC ≥ 11, Clang ≥ 14,
-Apple Clang ≥ 14), Ninja or Make, network access on first configure
-(GoogleTest is fetched via `FetchContent`; set `-DPIPESHELLX_SYSTEM_GTEST=ON`
-to use an installed copy instead).
+You need CMake 3.20 or newer, a C++20 compiler, and Ninja or Make. The default
+build also needs OpenSSL 3. CMake uses an installed GoogleTest when available
+or fetches v1.17.0 during configuration; use `PIPESHELLX_SYSTEM_GTEST=ON` for
+a strictly system-provided dependency.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build
+cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ./build/bin/pipeshellx --help
 ```
 
-Useful options:
+Useful CMake options:
 
-| Option | Default | Effect |
-|---|---|---|
-| `PIPESHELLX_BUILD_TESTS` | `ON` | build the GoogleTest suite |
-| `PIPESHELLX_BUILD_BENCH` | `ON` | build `bench/` (`pipeshellx_bench_baseline`) |
-| `PIPESHELLX_WERROR` | `ON` | `-Werror` / `/WX` for first-party targets |
-| `PIPESHELLX_SANITIZE` | empty | e.g. `address,undefined` or `thread` |
-| `PIPESHELLX_SYSTEM_GTEST` | `OFF` | `find_package(GTest)` instead of FetchContent |
+| Option | Default | Purpose |
+| --- | ---: | --- |
+| `PIPESHELLX_BUILD_TESTS` | `ON` | Build and register the GoogleTest suite. |
+| `PIPESHELLX_BUILD_BENCH` | `ON` | Build the baseline benchmark. |
+| `PIPESHELLX_WERROR` | `ON` | Treat first-party warnings as errors. |
+| `PIPESHELLX_NATIVE_TRANSPORT` | `ON` | Build OpenSSL-backed native transport, CA, and node support. |
+| `PIPESHELLX_STATIC_OPENSSL` | `OFF` | Prefer static OpenSSL libraries; this is not a fully-static guarantee. |
+| `PIPESHELLX_SYSTEM_GTEST` | `OFF` | Require an installed GoogleTest rather than fetching it. |
+| `PIPESHELLX_SANITIZE` | empty | Enable a sanitizer list such as `address,undefined`. |
 
-Run the sanitizer build before opening a PR that touches process, pipe, or
-threading code:
+For an SSH-only build without OpenSSL discovery:
 
 ```bash
-cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DPIPESHELLX_SANITIZE=address,undefined
-cmake --build build-asan && ctest --test-dir build-asan --output-on-failure
+cmake -S . -B build-ssh \
+  -DPIPESHELLX_NATIVE_TRANSPORT=OFF \
+  -DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=TRUE
+cmake --build build-ssh --parallel
+ctest --test-dir build-ssh --output-on-failure
 ```
 
-## Workflow
+See [testing](docs/testing.md) for sanitizer, focused-test, soak, packaging,
+and CI commands.
 
-1. **Tests first.** Every behaviour change starts with a failing test in
-   `tests/`. Unit tests are GoogleTest; use `tests/test_support.hpp`
-   (`ScopedTempCwd`, `ScopedEnv`) so tests never depend on the caller's CWD or
-   environment.
-2. **Warnings are errors.** `-Wall -Wextra -Werror` on GCC/Clang, `/W4 /WX` on
-   MSVC, applied through the `pipeshellx_warnings` target.
-3. **Format what you touch.** `clang-format -i <files>` using the repository
-   `.clang-format`. Do not reformat files you did not otherwise change.
-4. **Lint.** `clang-tidy -p build <file>` with the repository `.clang-tidy`;
-   new warnings in changed code should be fixed or justified in the PR.
-   (Homebrew LLVM on macOS needs the Apple SDK:
-   `clang-tidy -p build --extra-arg=-isysroot --extra-arg="$(xcrun --show-sdk-path)" <file>`.)
-5. **Docs move with code.** Each roadmap item in `PLAN.md` names the `docs/`
-   files it extends; update them in the same PR. Scope changes update
-   `PLAN.md` itself.
-6. **Decisions get an ADR.** Anything that changes a public contract, a
-   security default, a dependency, or a layering rule gets a new
-   `docs/adr/ADR-NNN-*.md` (template in `docs/adr/README.md`).
+## Make changes
 
-## Layering and portability rules
+- Add or update a focused regression test for behavior changes. Tests must not
+  depend on the caller's working directory, environment, real fleet, or
+  external network.
+- Use helpers in `tests/test_support.hpp` for temporary directories and scoped
+  environment changes.
+- Keep production code warning-clean under `-Wall -Wextra -Werror` or
+  `/W4 /WX`.
+- Run `clang-format -i` on files you touch. Do not reformat unrelated code.
+- Run `clang-tidy -p build <file>` for materially changed C++ files and fix or
+  explain new findings.
+- Update public documentation whenever a command, option, output schema,
+  security boundary, platform claim, or packaging contract changes.
 
-These are enforced progressively by CI (see `PLAN.md` §3.1, §4.1):
+## Preserve layering and portability
 
-- Public headers under `include/psx/` (introduced in Phase 1) expose only
-  `std::` types. Platform headers (`<unistd.h>`, `<sys/*.h>`, `<windows.h>`)
-  live in `src/os/posix/` and `src/os/win32/` only.
-- A layer may include only the layer directly below it.
-- Every descriptor/handle is non-inheritable at creation; the only exception
-  is the three stdio handles handed explicitly to a child.
-- Nothing unbounded: buffers, descriptors, in-flight bytes, retries, and time
-  are all capped.
+Dependencies point down from CLI and orchestration through transports,
+runtime, and the OS abstraction. In particular:
 
-## Commit messages
+- headers under `include/psx/` expose standard C++ types rather than native
+  file descriptors, sockets, or platform headers;
+- POSIX platform headers and implementations stay under `src/os/posix/`;
+- higher layers use the OS abstraction instead of calling platform APIs
+  directly;
+- new resources have explicit ownership, cleanup, cancellation, and error
+  paths;
+- Linux and macOS behavior must remain equivalent where the feature is
+  documented as supported.
 
-Conventional Commits, imperative mood, wrapped at 72 columns:
+Run the repository checks after relevant changes:
 
-```
-feat(ssh): pass passwords to sshpass over a pipe instead of argv
-
-Closes the `ps`-visible secret described in docs/authentication.md.
+```bash
+./scripts/check_layering.sh
+./scripts/check_docs.py
 ```
 
-Types: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`, `perf`, `ci`.
-Phase completions use `feat(phase-N): complete Phase N milestones`.
+## Validate before opening a pull request
 
-## Pull request checklist
+At minimum:
 
-- [ ] tests added/updated and `ctest` green locally
-- [ ] sanitizer build green if process/pipe/thread code changed
-- [ ] no new warnings; touched files clang-formatted
-- [ ] `docs/` and, if scope changed, `PLAN.md` updated
-- [ ] ADR added for contract/security/dependency/layering changes
-- [ ] no secrets, hostnames, or local paths in the diff
+```bash
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+./scripts/check_layering.sh
+./scripts/check_docs.py
+./build/bin/pipeshellx --version
+./build/bin/pipeshellx --help
+```
 
-## Reporting security issues
+For process, pipe, socket, TLS, cancellation, or concurrency changes, also run
+ASan and UBSan:
 
-Please follow [`SECURITY.md`](SECURITY.md) rather than opening a public issue.
+```bash
+cmake -S . -B build-asan \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DPIPESHELLX_SANITIZE=address,undefined
+cmake --build build-asan --parallel
+ctest --test-dir build-asan --output-on-failure
+```
+
+Pull requests should be narrow enough to review and should explain the user
+impact, supported platforms, tests run, and any known limitation. Before
+submitting, verify that:
+
+- tests cover the changed behavior and pass locally;
+- touched files are formatted and warning-clean;
+- layering and sanitizer checks relevant to the change pass;
+- documentation and changelog entries match the implementation;
+- the diff contains no credentials, private hostnames, audit output, generated
+  inventories, build artifacts, or local absolute paths.
+
+Conventional Commit subjects are preferred, for example:
+
+```text
+fix(transport): preserve stderr channel attribution
+```
+
+## Security reports
+
+Do not disclose suspected vulnerabilities in a public pull request or issue.
+Follow [SECURITY.md](SECURITY.md) for the current private-reporting procedure
+and supported versions.
+
+## Respectful conduct
+
+Be constructive, specific, and respectful. Focus criticism on code and ideas;
+do not harass, insult, discriminate against, or expose private information
+about another participant. Maintainers may edit or remove abusive content and
+restrict participation when necessary to keep collaboration safe.
 
 ## License
 
-By contributing you agree that your contributions are licensed under the
-Apache License 2.0 (see `LICENSE` and `NOTICE`).
+By submitting a contribution, you agree that it may be distributed under the
+repository's Apache License 2.0.

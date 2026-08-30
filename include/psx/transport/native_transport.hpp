@@ -28,8 +28,8 @@ struct HeartbeatOptions {
     int maxMissed{3};
 };
 
-// The default backplane lease: ping every 2 s, fail after 3 silent intervals
-// (~6 s to surface a partition; matches PLAN.md §7 target T9).
+// The default backplane lease: ping every 2 s and fail after 3 silent intervals
+// (~6 s to surface a partition).
 inline constexpr HeartbeatOptions kDefaultLease{std::chrono::milliseconds(2000), 3};
 
 // One end of the psx/1 native backplane: a Session multiplexed over a TlsStream

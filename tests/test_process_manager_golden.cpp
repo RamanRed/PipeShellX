@@ -1,7 +1,7 @@
-// Golden behaviour of ProcessManager as of v0.1.0: these tests pin the
+// Compatibility behavior of ProcessManager: these tests pin the
 // observable contract (exit codes, captured output, remote output format,
-// error classes, password hand-off, timeouts) so that the Phase 1 refactor
-// onto psx::os / psx::runtime can be proven behaviour-preserving.
+// error classes, password hand-off, and timeouts across implementation
+// refactors onto psx::os / psx::runtime.
 
 #include <gtest/gtest.h>
 
@@ -358,7 +358,7 @@ TEST_F(GoldenRemoteTest, ADropRingStillStreamsEveryByteToTheSink) {
     EXPECT_NE(err.str().find("dropped"), std::string::npos) << err.str();
 }
 
-// --- Retries: transient transport failures back off and retry (Phase 2) ---
+// --- Retries: transient transport failures back off and retry ---
 
 TEST_F(GoldenRemoteTest, PersistentTransientFailureExhaustsRetries) {
     // `refused` fails with "Connection refused" (exit 255) every time: with two
@@ -400,7 +400,7 @@ TEST_F(GoldenRemoteTest, ACommandsOwnNonZeroExitIsNotRetried) {
     EXPECT_EQ(result.clientResults[0].exitCode, 7);
 }
 
-// --- Fail-fast: the first final failure aborts the rest (Phase 2) ---
+// --- Fail-fast: the first final failure aborts the rest ---
 
 TEST_F(GoldenRemoteTest, FailFastAbortsTheRemainingWorkers) {
     // Window of 1, three hosts that all fail: the first failure aborts the two

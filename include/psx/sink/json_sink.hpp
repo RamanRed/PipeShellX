@@ -1,7 +1,8 @@
 #pragma once
 
 // JsonSink — JSON Lines: one object per stage when it finishes, then a final
-// summary object. Machine-readable; the schema is documented in docs/json.md.
+// summary object. Machine-readable; the schema is documented in
+// docs/pipelines.md.
 
 #include "psx/sink/sink.hpp"
 

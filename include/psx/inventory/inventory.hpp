@@ -1,11 +1,12 @@
 #pragma once
 
-// psx::inventory::Inventory — the fleet a run targets (Phase 2). An INI file
+// psx::inventory::Inventory — the fleet a run targets. An INI file
 // with a [defaults] section and [group] sections listing hosts; each host may
-// carry per-host options (user, port, identity, tag). Hosts are selectable by
-// group, tag, explicit name, or all. A legacy clients.txt imports as one
-// implicit group named "all". Self-contained (std-only); a Host is turned into
-// an SSH descriptor at the transport boundary.
+// carry per-host SSH/native options (user, port, identity, tag, transport,
+// SAN, and native port). Hosts are selectable by group, tag, explicit name,
+// or all. A legacy clients.txt imports as one implicit group named "all".
+// Self-contained (std-only); selection converts a Host to a ClientEntry at the
+// transport boundary.
 
 #include <cstdint>
 #include <string>

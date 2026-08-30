@@ -1,6 +1,7 @@
 #pragma once
 
-// Shared helpers for the PipeShellX test suite (POSIX only until Phase 3).
+// Shared helpers for the POSIX test suite. A future Windows backend needs
+// equivalent platform-specific fixtures.
 
 #include "client_config.hpp"
 

@@ -94,10 +94,13 @@ endif()
 # ---------------------------------------------------------------------------
 # Installable CMake package
 # ---------------------------------------------------------------------------
-install(DIRECTORY include/
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+install(DIRECTORY include/psx/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/psx
     COMPONENT Development
-    FILES_MATCHING PATTERN "*.hpp")
+    FILES_MATCHING
+        PATTERN "*.hpp"
+        PATTERN "cli" EXCLUDE
+        PATTERN "backend.hpp" EXCLUDE)
 
 configure_package_config_file(
     cmake/pipeshellxConfig.cmake.in

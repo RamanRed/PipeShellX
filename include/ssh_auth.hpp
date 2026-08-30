@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-// Connection-level ssh options (Phase 2). ControlMaster reuse is opt-in
+// Connection-level SSH options. ControlMaster reuse is opt-in
 // (`run --reuse`): when controlPath is non-empty the worker adds
 // ControlMaster=auto / ControlPersist / ControlPath so a persisted master
 // socket lets repeated runs against the same host skip the TCP+KEX handshake.

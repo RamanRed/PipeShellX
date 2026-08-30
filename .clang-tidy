@@ -1,6 +1,7 @@
 # Static-analysis baseline for PipeShellX. Run with
 #   clang-tidy -p build <file>      (compile_commands.json is exported by CMake)
-# Checks are advisory in Phase 0; the CI lint job is added in Phase 1.
+# Checks are advisory locally; CI currently enforces compiler warnings,
+# layering, documentation links, and the sanitizer suite.
 ---
 Checks: >
   -*,

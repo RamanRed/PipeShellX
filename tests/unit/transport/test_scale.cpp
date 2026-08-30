@@ -73,9 +73,8 @@ TEST(ScaleTest, OneConnectionMultiplexesAThousandConcurrentStreams) {
     EXPECT_EQ(nodeSession.openStreamCount(), 0U);
 }
 
-// 1000 simulated nodes, each on its own connection, every one running a stage to
-// completion — the fan-out count the Phase 4 exit criterion targets, exercised
-// through the real protocol (no TLS/socket/process cost).
+// 1000 simulated nodes, each on its own connection, every one running a stage
+// to completion through the real protocol (without TLS/socket/process cost).
 TEST(ScaleTest, ThousandSimulatedNodesEachRunAStage) {
     constexpr int kNodes = 1000;
     int completed = 0;

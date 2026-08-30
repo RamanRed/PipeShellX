@@ -1,149 +1,166 @@
-# Testing
+# Testing and validation
 
-PipeShellX uses GoogleTest with each test discovered individually by CTest.
-Tests are enabled by default and cannot be silently omitted: CMake uses an
-installed GoogleTest when requested or fetches the pinned v1.17.0 source.
+PipeShellX uses GoogleTest with individual tests discovered by CTest. Tests are
+enabled by default. CMake uses an installed GoogleTest when
+`PIPESHELLX_SYSTEM_GTEST=ON`; otherwise it finds one or fetches the pinned
+source. Use a fresh build directory for release validation so deleted sources,
+stale cache entries, and packaging references cannot be hidden by an
+incremental build.
 
-Release validation records the final discovered count and pass/skip result in
-the commit or release handoff rather than hard-coding a number here as the suite
-continues to grow.
+## Default native build
 
-## Coverage map
-
-| Area | Evidence in the suite |
-| --- | --- |
-| OS primitives | Handle inheritance/leaks, pipe EOF/nonblocking/broken-pipe behavior, process spawn/groups/limits/reaping, sockets, TLS, poller/child/signal backends, atomic file rewrite. |
-| Runtime | Reactor readiness, timers, child exits, signals, backend parametrization, and retry backoff. |
-| Streams and sinks | Bounded-buffer policies, credit windows, line framing, spool replay, grouped/stream/JSON/ordered/consensus rendering. |
-| Inventory and policy | INI parsing, precedence, selectors, legacy `clients.txt` import, identity preservation, secret rejection, transport validation, serialization, duplicate detection, and optional command policy. |
-| Product CLI | Strict parsers and exit codes for `run`, `ping`, `diff`, `pipe`, `hosts`, `ca`, and `node`. |
-| SSH | Hardened argv, target-shell quoting, fake `ssh`/`sshpass` workers, error classification, timeout, fail-fast, cancellation, concurrency, retry gating, and golden behavior. |
-| Native transport | Frame/payload codecs, TLS identity/CRL, channel separation, credit/drop/spool behavior, leases, GOAWAY, session faults, pre-spawn node-policy rejection/exit 126, node fencing, concurrent connections, cancellation, timeout, fail-fast, canary, and audit integration. |
-| Pipelines | Parser/planner/YAML validation, local chains, declared-edge order, local fan-in/fan-out, bounded slow-consumer edges, deterministic pipefail, mixed linear placement, and exact rejection of non-linear remote DAGs. |
-| Diff | Strict option parsing, exact stdout consensus, stderr exclusion, drift/unanimous exit codes, and nonzero stage exit as host failure. |
-| Packaging | Install-tree smoke, lowercase installed executable, relocatable exported CMake package consumed by a fresh downstream project, and required-OpenSSL failure behavior. |
-
-Most transport tests use loopback sockets or deterministic fake executables and
-do not require external network reachability. Scale tests exercise a
-1,000-stream multiplexed session, 1,000 simulated nodes, and a smaller
-concurrent real-mTLS server fan-out without requiring an external fleet.
-
-## Running the suite
+The default configuration enables the OpenSSL 3 native transport, tests,
+benchmarks, and warnings as errors.
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build --parallel
-ctest --test-dir build --output-on-failure
+cmake -S . -B build-native -DCMAKE_BUILD_TYPE=Release
+cmake --build build-native --parallel
+ctest --test-dir build-native --output-on-failure --timeout 120
+
+./build-native/bin/pipeshellx --version
+./build-native/bin/pipeshellx --help
 ```
 
-Use an installed GoogleTest for an offline build:
+The discovered suite includes the portable-poll golden test, the install and
+downstream-consumer smoke test, and the check that native transport cannot be
+configured without OpenSSL 3. Test counts are reported at validation time
+rather than frozen in this document because the suite changes.
 
-```bash
-cmake -S . -B build-system-gtest \
-  -DPIPESHELLX_SYSTEM_GTEST=ON \
-  -DCMAKE_BUILD_TYPE=Debug
-```
+## SSH-only build
 
-Run a focused CTest selection:
-
-```bash
-ctest --test-dir build -R 'DiffCommandTest|PipeCommandTest' --output-on-failure
-```
-
-Or invoke the test binary with a GoogleTest filter:
-
-```bash
-build/bin/pipeshellx_tests \
-  --gtest_filter='InventoryTest.*:HostsSubcommandTest.*:RunSubcommandTest.*:DiffCommandTest.*'
-```
-
-## Alternate configurations
-
-### Sanitizers
-
-```bash
-cmake -S . -B build-asan \
-  -DCMAKE_BUILD_TYPE=Debug \
-  -DPIPESHELLX_SANITIZE=address,undefined
-cmake --build build-asan --parallel
-ctest --test-dir build-asan --output-on-failure
-```
-
-The build system also accepts the thread sanitizer on supported toolchains,
-although the main CI sanitizer job is ASan+UBSan.
-
-### SSH-only build
+This gate proves that the project neither discovers nor links OpenSSL when the
+native transport is disabled. Keep tests enabled: they cover the SSH product
+and the CLI diagnostics for unavailable native-only commands.
 
 ```bash
 cmake -S . -B build-native-off \
+  -DCMAKE_BUILD_TYPE=Release \
   -DPIPESHELLX_NATIVE_TRANSPORT=OFF \
-  -DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=TRUE
+  -DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=TRUE \
+  -DPIPESHELLX_BUILD_BENCH=OFF
 cmake --build build-native-off --parallel
-ctest --test-dir build-native-off --output-on-failure
+ctest --test-dir build-native-off --output-on-failure --timeout 120
 ```
 
-Native-only source/tests are excluded, while the CLI must still explain that
-`node`, `ca`, `diff`, native `run`,
-and remote `pipe` are unavailable.
+## Sanitizers
 
-### Portable poll backend and soak
-
-`PIPESHELLX_POLLER=poll` forces the portable reactor backend. CTest
-also registers `golden_on_poll_backend` for the golden,
-`ProcessManager`, and `CommandExecutor` suites.
-
-`PIPESHELLX_SOAK=1` lengthens spawn/execute loops for descriptor and
-zombie checks:
+Run the Linux Clang ASan+UBSan gate for changes involving processes, signals,
+pipes, sockets, reactors, or object lifetime:
 
 ```bash
-PIPESHELLX_SOAK=1 build/bin/pipeshellx_tests \
-  --gtest_filter='ProcessTest.*:ProcessManagerTest.*'
+CC=clang CXX=clang++ cmake -S . -B build-sanitize \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DPIPESHELLX_SANITIZE=address,undefined \
+  -DPIPESHELLX_BUILD_BENCH=OFF
+cmake --build build-sanitize --parallel
+ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 \
+UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
+ctest --test-dir build-sanitize --output-on-failure --timeout 180
 ```
 
-### Layering
+The install smoke is intentionally omitted from sanitizer builds; packaging is
+validated separately below.
+
+## Install and package gate
+
+A normal non-sanitized CTest run registers both packaging checks. They can be
+rerun directly with:
+
+```bash
+ctest --test-dir build-native \
+  -R '^(packaging_install_consumer_smoke|native_transport_requires_openssl3)$' \
+  --output-on-failure
+```
+
+The release-package job additionally exercises the static-OpenSSL preference,
+an isolated install prefix, the lowercase CLI, and a fresh downstream
+`find_package(pipeshellx)` consumer:
+
+```bash
+cmake -S . -B build-package \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DPIPESHELLX_BUILD_TESTS=OFF \
+  -DPIPESHELLX_BUILD_BENCH=OFF \
+  -DPIPESHELLX_STATIC_OPENSSL=ON
+cmake --build build-package --parallel
+cmake --install build-package --prefix "$PWD/build-package-prefix"
+"$PWD/build-package-prefix/bin/pipeshellx" --version
+
+cmake -S tests/packaging/downstream -B build-package-consumer \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH="$PWD/build-package-prefix"
+cmake --build build-package-consumer --parallel
+./build-package-consumer/bin/pipeshellx_package_consumer
+```
+
+## Repository maintenance gates
+
+Run these checks for every repository or documentation cleanup:
 
 ```bash
 ./scripts/check_layering.sh
+./scripts/check_docs.py
+python3 -m py_compile scripts/check_docs.py
+actionlint .github/workflows/*.yml
+git diff --check
 ```
 
-The check rejects platform headers outside the OS implementation, public
-platform types, and upward layer dependencies.
+`check_layering.sh` rejects platform headers outside the OS implementation,
+platform types in public headers, and upward layer dependencies.
+`check_docs.py` resolves relative links in tracked and unignored new Markdown,
+so missing, repository-escaping, and case-mismatched targets fail on every
+filesystem.
 
-## Continuous integration
+For focused debugging, pass a regular expression to CTest or a GoogleTest
+filter to the test executable:
 
-`.github/workflows/ci.yml` is configured for:
+```bash
+ctest --test-dir build-native -R 'DiffCommandTest|PipeCommandTest' --output-on-failure
+build-native/bin/pipeshellx_tests \
+  --gtest_filter='InventoryTest.*:HostsSubcommandTest.*:RunSubcommandTest.*'
+```
 
-- Linux GCC and Clang, Debug and Release;
-- macOS AppleClang, Debug and Release (macOS+Homebrew GCC is explicitly
-  excluded because it is not a supported Apple SDK compiler pairing);
-- warnings as errors;
-- CLI version/help/error smoke tests;
-- ASan+UBSan on Linux Clang Debug;
-- layering lint;
-- static-OpenSSL install/downstream-package smoke;
-- an SSH-only native-disabled build/install/downstream smoke.
+`PIPESHELLX_POLLER=poll` forces the portable reactor backend. CTest already
+registers `golden_on_poll_backend`. `PIPESHELLX_SOAK=1` lengthens selected
+descriptor and zombie regression loops.
 
-`.github/workflows/bench.yml` configures a Release build without the
-test suite, starts localhost OpenSSH, runs the baseline spawn/fan-out harness,
-and uploads the result as a best-effort nightly artifact.
+## GitHub Actions matrix
 
-These statements describe workflow configuration. They do not claim that an
-unpublished commit or release tag has already passed GitHub-hosted CI.
+`.github/workflows/ci.yml` runs:
 
-## Known gaps
+- Linux GCC Debug and Release;
+- Linux Clang Debug and Release;
+- macOS AppleClang Debug and Release;
+- Linux Clang Debug with ASan+UBSan;
+- static-OpenSSL Release install and downstream-package validation;
+- an SSH-only native-disabled build, install, CLI smoke, and downstream
+  consumer;
+- layering and tracked-Markdown link checks.
 
-The current suite does not complete these release/roadmap items:
+Each default matrix job builds the full suite, runs CTest, and checks CLI
+version/help/unknown-option behavior. The dedicated native-disabled hosted job
+currently builds with tests disabled, so the full native-off CTest command
+above remains an explicit release gate.
 
-- a Windows controller/native-node build and MSVC/clang-cl test matrix;
-- end-to-end qualification against a heterogeneous real SSH/native fleet;
-- general non-linear remote DAG execution (the product rejects it);
-- reconnect/resume testing (the protocol does not implement it);
-- node-death containment for every hard-kill/platform case;
-- in-tree continuous libFuzzer jobs (structured and mutation fuzz-style tests
-  exist, but not the release fuzzing program);
-- sandbox/privilege-separation tests, because those features are deferred;
-- signed-audit and release-artifact verification, also deferred.
+`.github/workflows/bench.yml` is scheduled and manually dispatchable. It builds
+the current Release benchmark, configures localhost OpenSSH, runs the harness,
+and uploads its Markdown output. It is measurement evidence, not a merge gate.
 
-Passing the POSIX suite is necessary for v0.6, but it is not evidence that
-deferred Windows, isolation, resilience, or release-distribution milestones
-are complete.
+Workflow definitions are not proof that an unpublished revision passed them.
+Record the commit, run URL, discovered counts, failures, and platform skips in
+the release handoff.
+
+## Known limitations
+
+The maintained gates do not provide:
+
+- a Windows controller/native-node build or MSVC/clang-cl coverage;
+- qualification against a heterogeneous external SSH/native fleet;
+- native reconnect/resume or general non-linear remote DAG behavior, which the
+  product does not implement;
+- continuous libFuzzer, sandbox/privilege-separation, signed-audit, or release
+  artifact-signing validation;
+- reproducible performance guarantees from the shared hosted benchmark runner.
+
+Passing the POSIX matrix supports the documented Linux/macOS scope only; it is
+not evidence for deferred platforms or features.

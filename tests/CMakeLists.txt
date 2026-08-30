@@ -89,11 +89,12 @@ target_link_libraries(pipeshellx_tests PRIVATE
 include(GoogleTest)
 gtest_discover_tests(pipeshellx_tests
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    DISCOVERY_TIMEOUT 30
     PROPERTIES TIMEOUT 120
 )
 
-# Phase 1 exit criterion "poll backend removable without behaviour change":
-# the behavioural suites must pass on the portable poll backend too.
+# The portable poll backend is the behavior oracle: these suites must pass on
+# it as well as on the platform-preferred backend.
 add_test(NAME golden_on_poll_backend
     COMMAND pipeshellx_tests --gtest_filter=Golden*:ProcessManagerTest.*:CommandExecutorTest.*
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
@@ -102,10 +103,14 @@ set_tests_properties(golden_on_poll_backend PROPERTIES ENVIRONMENT "PIPESHELLX_P
 # Installation is a supported API: verify the lowercase executable, relocatable
 # CMake export, and a fresh downstream find_package/link/run cycle.
 set(_pipeshellx_smoke_bindir "${CMAKE_INSTALL_BINDIR}")
+set(_pipeshellx_smoke_includedir "${CMAKE_INSTALL_INCLUDEDIR}")
 set(_pipeshellx_smoke_libdir "${CMAKE_INSTALL_LIBDIR}")
 set(_pipeshellx_smoke_datadir "${CMAKE_INSTALL_DATADIR}")
 if(_pipeshellx_smoke_bindir STREQUAL "")
     set(_pipeshellx_smoke_bindir bin)
+endif()
+if(_pipeshellx_smoke_includedir STREQUAL "")
+    set(_pipeshellx_smoke_includedir include)
 endif()
 if(_pipeshellx_smoke_libdir STREQUAL "")
     set(_pipeshellx_smoke_libdir lib)
@@ -119,6 +124,7 @@ if(NOT PIPESHELLX_SANITIZE)
             -DPIPESHELLX_BUILD_DIR=${PROJECT_BINARY_DIR}
             -DPIPESHELLX_SOURCE_DIR=${PROJECT_SOURCE_DIR}
             -DPIPESHELLX_INSTALL_BINDIR=${_pipeshellx_smoke_bindir}
+            -DPIPESHELLX_INSTALL_INCLUDEDIR=${_pipeshellx_smoke_includedir}
             -DPIPESHELLX_INSTALL_LIBDIR=${_pipeshellx_smoke_libdir}
             -DPIPESHELLX_INSTALL_DATADIR=${_pipeshellx_smoke_datadir}
             -DPIPESHELLX_GENERATOR=${CMAKE_GENERATOR}

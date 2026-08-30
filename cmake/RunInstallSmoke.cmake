@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 
 foreach(_required IN ITEMS PIPESHELLX_BUILD_DIR PIPESHELLX_SOURCE_DIR PIPESHELLX_INSTALL_BINDIR
-                           PIPESHELLX_INSTALL_LIBDIR PIPESHELLX_INSTALL_DATADIR PIPESHELLX_GENERATOR)
+                           PIPESHELLX_INSTALL_INCLUDEDIR PIPESHELLX_INSTALL_LIBDIR
+                           PIPESHELLX_INSTALL_DATADIR PIPESHELLX_GENERATOR)
     if(NOT DEFINED ${_required} OR "${${_required}}" STREQUAL "")
         message(FATAL_ERROR "RunInstallSmoke.cmake requires -D${_required}=...")
     endif()
@@ -69,6 +70,19 @@ set(_doc_dir "${_prefix}/${PIPESHELLX_INSTALL_DATADIR}/doc/pipeshellx")
 foreach(_doc_file IN ITEMS LICENSE NOTICE README.md CHANGELOG.md)
     if(NOT EXISTS "${_doc_dir}/${_doc_file}")
         message(FATAL_ERROR "install tree is missing documentation file: ${_doc_dir}/${_doc_file}")
+    endif()
+endforeach()
+
+set(_include_dir "${_prefix}/${PIPESHELLX_INSTALL_INCLUDEDIR}")
+if(NOT EXISTS "${_include_dir}/psx/pipeline/planner.hpp")
+    message(FATAL_ERROR "install tree is missing supported public headers")
+endif()
+foreach(_internal_header IN ITEMS cli_options.hpp client_config.hpp client_manager.hpp
+                                  command_executor.hpp logger.hpp process_manager.hpp ssh_auth.hpp
+                                  ssh_transport.hpp terminal_client.hpp psx/cli/run_command.hpp
+                                  psx/os/backend.hpp)
+    if(EXISTS "${_include_dir}/${_internal_header}")
+        message(FATAL_ERROR "install tree exposes internal header: ${_internal_header}")
     endif()
 endforeach()
 

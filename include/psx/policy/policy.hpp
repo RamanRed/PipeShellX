@@ -1,7 +1,7 @@
 #pragma once
 
 // psx::policy::Policy — an optional command policy loaded from a file
-// (`run --policy FILE`, PLAN.md §2.1, §3.8). It replaces the hardcoded
+// (`run --policy FILE`). It replaces the hardcoded
 // allowlist for operator use: allowed argv[0] names, a max argument count, and
 // a shell-metacharacter guard (on by default; a policy that runs shells opts
 // out). An empty policy (the default) allows anything.

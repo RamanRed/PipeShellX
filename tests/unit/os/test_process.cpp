@@ -391,7 +391,7 @@ TEST(OsProcessTest, CpuLimitTerminatesARunawayChild) {
 
 TEST(OsProcessTest, AddressSpaceLimitIsEnforcedWhereTheKernelSupportsIt) {
 #if defined(__APPLE__)
-    GTEST_SKIP() << "Darwin does not reliably enforce RLIMIT_AS (PLAN.md §3.8)";
+    GTEST_SKIP() << "Darwin does not reliably enforce RLIMIT_AS";
 #else
     SpawnSpec spec = shell("dd if=/dev/zero of=/dev/null bs=200M count=1 2>/dev/null");
     spec.limits.addressSpaceBytes = 64ULL * 1024 * 1024;

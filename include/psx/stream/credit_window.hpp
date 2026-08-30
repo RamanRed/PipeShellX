@@ -1,7 +1,7 @@
 #pragma once
 
 // psx::stream::CreditWindow — one direction of HTTP/2-style flow control for
-// the native backplane (L2, consumed by the Phase 4 transport). It is the
+// the native backplane (L2, consumed by the native transport). It is the
 // receiver's view: the peer may send up to `sendable()` bytes; each arriving
 // DATA frame calls onData() (rejected if it would exceed the window); as the
 // sink drains buffered bytes, onConsumed() accumulates and, once at least

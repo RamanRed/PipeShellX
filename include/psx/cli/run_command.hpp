@@ -1,8 +1,7 @@
 #pragma once
 
-// psx::cli — parsing and execution of the `pipeshellx run` subcommand
-// (PLAN.md Appendix A). Kept separate from execution so the argument grammar
-// is unit-tested on its own.
+// psx::cli — parsing and execution of the `pipeshellx run` subcommand. Kept
+// separate from execution so the argument grammar is unit-tested on its own.
 
 #include "psx/stream/bounded_buffer.hpp"
 #include "ssh_auth.hpp" // RemoteShell

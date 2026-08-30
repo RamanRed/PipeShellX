@@ -18,6 +18,7 @@ jobs:
   build-test:
     name: ${{ matrix.os }} · ${{ matrix.compiler }} · ${{ matrix.build_type }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -30,7 +31,7 @@ jobs:
           - os: macos-latest
             compiler: gcc
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Select compiler
         shell: bash
@@ -70,8 +71,9 @@ jobs:
   packaging:
     name: Install + downstream CMake package (ubuntu, Release)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Configure static-OpenSSL release
         run: >-
@@ -91,6 +93,10 @@ jobs:
           test -f "$RUNNER_TEMP/pipeshellx-prefix/share/doc/pipeshellx/NOTICE"
           test -f "$RUNNER_TEMP/pipeshellx-prefix/share/doc/pipeshellx/README.md"
           test -f "$RUNNER_TEMP/pipeshellx-prefix/share/doc/pipeshellx/CHANGELOG.md"
+          test -f "$RUNNER_TEMP/pipeshellx-prefix/include/psx/pipeline/planner.hpp"
+          test ! -e "$RUNNER_TEMP/pipeshellx-prefix/include/cli_options.hpp"
+          test ! -e "$RUNNER_TEMP/pipeshellx-prefix/include/psx/cli"
+          test ! -e "$RUNNER_TEMP/pipeshellx-prefix/include/psx/os/backend.hpp"
           if grep -R -E "$GITHUB_WORKSPACE|pipeshellx_warnings" \
             "$RUNNER_TEMP/pipeshellx-prefix/lib/cmake/pipeshellx"; then
             echo "installed CMake export leaked a build path or warnings target" >&2
@@ -105,8 +111,9 @@ jobs:
   native-off:
     name: SSH-only build without OpenSSL
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Configure without discovering OpenSSL
         run: >-
@@ -128,23 +135,27 @@ jobs:
           ./build-native-off-consumer/bin/pipeshellx_package_consumer
 
   layering:
-    name: Layering lint (platform headers, public types, layer order)
+    name: Layering + documentation checks
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Check layering rules
         run: ./scripts/check_layering.sh
+      - name: Check documentation links
+        run: ./scripts/check_docs.py
 
   sanitizers:
     name: ASan + UBSan (ubuntu, clang, Debug)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       CC: clang
       CXX: clang++
       ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
       UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DPIPESHELLX_SANITIZE=address,undefined
       - name: Build

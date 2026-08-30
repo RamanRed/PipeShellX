@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Layering lint (PLAN.md §3.1, §4.1). Fails when:
+# Architecture layering lint. Fails when:
 #   1. a platform header is included outside src/os/ (tests/ and bench/ may
 #      use platform APIs to *audit* the abstractions);
 #   2. a public header under include/psx/ uses a POSIX/Win32 type;

@@ -1,7 +1,7 @@
 #pragma once
 
-// Well-known per-user locations (XDG on POSIX, %APPDATA% family on Windows
-// in Phase 3).
+// Well-known per-user locations (XDG on POSIX; a future Windows backend will
+// provide the corresponding Windows directories).
 
 #include "psx/result.hpp"
 

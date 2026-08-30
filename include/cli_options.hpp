@@ -17,7 +17,7 @@ public:
     using std::runtime_error::runtime_error;
 };
 
-// Exit-code contract (PLAN.md §3.7): 2 = usage / configuration error.
+// Product exit-code contract: 2 = usage / configuration error.
 inline constexpr int kExitUsage = 2;
 inline constexpr int kExitCancelled = 130; // POSIX: 128 + SIGINT
 

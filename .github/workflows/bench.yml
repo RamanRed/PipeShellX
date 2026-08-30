@@ -1,7 +1,7 @@
 name: Nightly baseline benchmark
 
-# Publishes the numbers compared against PLAN.md §7. Best effort: the job
-# never blocks a merge; results are attached as an artifact.
+# Captures the current spawn and localhost-SSH measurements documented in
+# docs/benchmarks.md. It is separate from the merge-gating correctness matrix.
 on:
   schedule:
     - cron: '23 3 * * *'
@@ -13,8 +13,9 @@ permissions:
 jobs:
   baseline:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Enable ssh to localhost
         run: |
@@ -35,11 +36,13 @@ jobs:
           cmake --build build --parallel --target pipeshellx_bench_baseline
 
       - name: Run baseline
+        shell: bash
         run: |
+          set -o pipefail
           ulimit -n 4096
           ./build/bin/pipeshellx_bench_baseline --spawn 2000 --fanout 50,100 | tee baseline.md
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: baseline-${{ github.run_id }}
           path: baseline.md
