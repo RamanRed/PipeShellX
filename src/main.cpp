@@ -32,7 +32,7 @@ void initLogging(const CliOptions& options) {
     const std::string logFile = options.logFile.empty() ? Logger::defaultLogFilePath() : options.logFile;
     // Arbitrary log paths are an intentional CLI capability. Ambient HOME/XDG
     // defaults reach this sink only with matching real/effective IDs.
-    // lgtm[cpp/path-injection]
+    // codeql[cpp/path-injection]
     if (!logger.setLogFile(logFile)) {
         std::cerr << "PipeShellX: warning: cannot open " << logFile << "; logging to stderr instead\n";
     }

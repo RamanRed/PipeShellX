@@ -195,7 +195,7 @@ int listHosts(const std::string& requestedPath, std::ostream& out) {
     }
     // Arbitrary inventory paths are an intentional CLI capability. Ambient
     // environment paths reach this sink only with matching real/effective IDs.
-    // lgtm[cpp/path-injection]
+    // codeql[cpp/path-injection]
     const auto inventory = psx::inventory::Inventory::loadFromFile(path);
     out << "HOST\tGROUPS\tTAGS\tTRANSPORT\n";
     for (const auto& host : inventory.hosts()) {
