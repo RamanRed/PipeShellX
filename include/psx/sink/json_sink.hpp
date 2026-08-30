@@ -15,6 +15,7 @@ class JsonSink : public Sink {
 public:
     explicit JsonSink(std::ostream& out) : out_(out) {}
 
+    bool streamsLive() const noexcept override { return false; }
     void stageStarted(std::string_view stage) override;
     void line(std::string_view stage, Channel channel, std::string_view text) override;
     void stageFinished(std::string_view stage, const StageResult& result) override;

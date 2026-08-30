@@ -18,9 +18,10 @@ L0 os        include/psx/os/*.hpp                 src/os/posix/*.cpp       (the 
 ```
 
 Dependency rule: a layer includes only layers at or below its own. The
-legacy application code (`ProcessManager`, `CommandExecutor`, the REPL) sits
-on top and is migrated layer by layer (Phase 2 introduces L2 streams and the
-L3 transports).
+application code (`ProcessManager`, the CLI, pipelines, transports, and
+the legacy REPL) sits above these layers. L2 streams and both SSH/native L3
+transports are present in v0.6; the Win32 L0/L1 implementation remains
+deferred.
 
 ## Error model (ADR-005)
 

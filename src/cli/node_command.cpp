@@ -2,8 +2,10 @@
 
 #include "psx/ca/certificate_authority.hpp"
 #include "psx/os/io.hpp"
+#include "psx/os/paths.hpp"
 #include "psx/os/socket.hpp"
 #include "psx/os/tls.hpp"
+#include "psx/policy/policy.hpp"
 #include "psx/runtime/reactor.hpp"
 #include "psx/transport/node_server.hpp"
 
@@ -11,6 +13,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <optional>
 #include <span>
 #include <sstream>
@@ -31,6 +34,42 @@ std::optional<std::string> flag(const std::vector<std::string>& args, std::size_
         }
     }
     return std::nullopt;
+}
+
+bool validateFlags(const std::vector<std::string>& args,
+                   std::size_t from,
+                   std::initializer_list<std::string_view> allowed,
+                   std::ostream& err) {
+    std::unordered_set<std::string> allowedSet;
+    for (const auto option : allowed) {
+        allowedSet.emplace(option);
+    }
+    std::unordered_set<std::string> seen;
+    for (std::size_t i = from; i < args.size();) {
+        const std::string& option = args[i];
+        if (option.rfind("--", 0) != 0) {
+            err << "pipeshellx node: unexpected argument '" << option << "'\n";
+            return false;
+        }
+        if (allowedSet.count(option) == 0) {
+            err << "pipeshellx node: unknown option '" << option << "'\n";
+            return false;
+        }
+        if (!seen.insert(option).second) {
+            err << "pipeshellx node: " << option << " may only be specified once\n";
+            return false;
+        }
+        if (i + 1 >= args.size() || args[i + 1].rfind("--", 0) == 0) {
+            err << "pipeshellx node: " << option << " requires a value\n";
+            return false;
+        }
+        if (args[i + 1].find_first_of("\r\n\0", 0, 3) != std::string::npos) {
+            err << "pipeshellx node: " << option << " contains an unsafe control character\n";
+            return false;
+        }
+        i += 2;
+    }
+    return true;
 }
 
 std::optional<std::string> readFile(const std::string& path) {
@@ -62,15 +101,18 @@ bool parseListen(const std::string& value, std::string& host, std::uint16_t& por
 }
 
 bool writeFile(const std::string& path, const std::string& content, bool secret, std::ostream& err) {
+    if (secret) {
+        const auto written = psx::os::atomicWritePrivateFile(path, content);
+        if (!written.ok()) {
+            err << "pipeshellx node keygen: cannot write " << path << ": " << written.error().message() << "\n";
+            return false;
+        }
+        return true;
+    }
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     if (!out || !(out << content) || (out.close(), !out)) {
         err << "pipeshellx node keygen: cannot write " << path << "\n";
         return false;
-    }
-    if (secret) {
-        std::error_code ec;
-        std::filesystem::permissions(path, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-                                     std::filesystem::perm_options::replace, ec);
     }
     return true;
 }
@@ -108,7 +150,7 @@ std::optional<std::vector<std::string>> nodeExecArgv(const std::vector<std::stri
     const auto listen = flag(args, 1, "--listen");
     if (!cert || !key || !ca || !listen) {
         err << "pipeshellx node <systemd-unit|launchd-plist>: --cert F --key F --ca F --listen HOST:PORT are required "
-               "(optional --allow SANs, --crl F, --exec PATH)\n";
+               "(optional --allow SANs, --crl F, --policy F, --control PATH, --exec PATH)\n";
         return std::nullopt;
     }
     std::vector<std::string> argv{
@@ -121,19 +163,84 @@ std::optional<std::vector<std::string>> nodeExecArgv(const std::vector<std::stri
         argv.emplace_back("--crl");
         argv.push_back(*crl);
     }
+    if (const auto policy = flag(args, 1, "--policy")) {
+        argv.emplace_back("--policy");
+        argv.push_back(*policy);
+    }
+    if (const auto control = flag(args, 1, "--control")) {
+        argv.emplace_back("--control");
+        argv.push_back(*control);
+    }
     return argv;
 }
 
+std::string systemdQuote(std::string_view value) {
+    std::string quoted{"\""};
+    for (const char c : value) {
+        if (c == '\\' || c == '"') {
+            quoted.push_back('\\');
+        }
+        if (c == '$' || c == '%') {
+            quoted.push_back(c); // systemd uses doubled '$'/'%' for a literal
+        }
+        quoted.push_back(c);
+    }
+    quoted.push_back('"');
+    return quoted;
+}
+
+std::string xmlEscape(std::string_view value) {
+    std::string escaped;
+    for (const char c : value) {
+        switch (c) {
+            case '&':
+                escaped += "&amp;";
+                break;
+            case '<':
+                escaped += "&lt;";
+                break;
+            case '>':
+                escaped += "&gt;";
+                break;
+            case '"':
+                escaped += "&quot;";
+                break;
+            case '\'':
+                escaped += "&apos;";
+                break;
+            default:
+                escaped.push_back(c);
+                break;
+        }
+    }
+    return escaped;
+}
+
 int nodeSystemdUnit(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
+    const auto control = flag(args, 1, "--control");
+    if (control) {
+        const std::filesystem::path normalized = std::filesystem::path(*control).lexically_normal();
+        if (!normalized.is_absolute() || normalized.parent_path() != "/run/pipeshellx" ||
+            normalized.filename().empty()) {
+            err << "pipeshellx node systemd-unit: --control must be /run/pipeshellx/FILE so the hardened unit can "
+                   "manage its writable runtime directory\n";
+            return 2;
+        }
+    }
     const auto argv = nodeExecArgv(args, err);
     if (!argv) {
         return 2;
     }
     std::string execStart;
     for (std::size_t i = 0; i < argv->size(); ++i) {
-        execStart += (i == 0 ? "" : " ") + (*argv)[i];
+        execStart += (i == 0 ? "" : " ") + systemdQuote((*argv)[i]);
     }
     const std::string user = flag(args, 1, "--user").value_or("pipeshellx");
+    if (user.empty() || user.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-") !=
+                            std::string::npos) {
+        err << "pipeshellx node systemd-unit: --user must be a safe account name\n";
+        return 2;
+    }
     out << "[Unit]\n"
         << "Description=PipeShellX node agent (psx/1 mTLS backplane)\n"
         << "After=network-online.target\n"
@@ -144,8 +251,17 @@ int nodeSystemdUnit(const std::vector<std::string>& args, std::ostream& out, std
         << "Restart=on-failure\n"
         << "RestartSec=5\n"
         << "User=" << user << "\n"
-        << "Group=" << user
-        << "\n"
+        << "Group=" << user << "\n";
+    if (control) {
+        // ProtectSystem=strict makes /run read-only except for managed runtime
+        // directories. systemd creates this one with the service account as
+        // owner before ExecStart and removes it when the unit stops.
+        out << "RuntimeDirectory=pipeshellx\n"
+            << "RuntimeDirectoryMode=0750\n"
+            << "ReadWritePaths=/run/pipeshellx\n"
+            << "UMask=0077\n";
+    }
+    out
         // Hardening: this daemon runs untrusted remote commands, so confine it.
         << "NoNewPrivileges=yes\n"
         << "ProtectSystem=strict\n"
@@ -155,7 +271,7 @@ int nodeSystemdUnit(const std::vector<std::string>& args, std::ostream& out, std
         << "ProtectControlGroups=yes\n"
         << "ProtectKernelModules=yes\n"
         << "ProtectKernelTunables=yes\n"
-        << "RestrictAddressFamilies=AF_INET AF_INET6\n"
+        << "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\n"
         << "RestrictNamespaces=yes\n"
         << "LockPersonality=yes\n\n"
         << "[Install]\n"
@@ -174,10 +290,10 @@ int nodeLaunchdPlist(const std::vector<std::string>& args, std::ostream& out, st
            "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
         << "<plist version=\"1.0\">\n"
         << "<dict>\n"
-        << "  <key>Label</key>\n  <string>" << label << "</string>\n"
+        << "  <key>Label</key>\n  <string>" << xmlEscape(label) << "</string>\n"
         << "  <key>ProgramArguments</key>\n  <array>\n";
     for (const std::string& arg : *argv) {
-        out << "    <string>" << arg << "</string>\n";
+        out << "    <string>" << xmlEscape(arg) << "</string>\n";
     }
     out << "  </array>\n"
         << "  <key>RunAtLoad</key>\n  <true/>\n"
@@ -253,18 +369,40 @@ int nodeStatus(const std::vector<std::string>& args, std::ostream& out, std::ost
 
 int nodeSubcommand(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
     if (!args.empty() && args[0] == "keygen") {
+        if (!validateFlags(args, 1, {"--san", "--out"}, err)) {
+            return 2;
+        }
         return nodeKeygen(args, out, err);
     }
     if (!args.empty() && args[0] == "systemd-unit") {
+        if (!validateFlags(args, 1,
+                           {"--exec", "--cert", "--key", "--ca", "--listen", "--allow", "--crl", "--policy",
+                            "--control", "--user"},
+                           err)) {
+            return 2;
+        }
         return nodeSystemdUnit(args, out, err);
     }
     if (!args.empty() && args[0] == "launchd-plist") {
+        if (!validateFlags(args, 1,
+                           {"--exec", "--cert", "--key", "--ca", "--listen", "--allow", "--crl", "--policy",
+                            "--control", "--label"},
+                           err)) {
+            return 2;
+        }
         return nodeLaunchdPlist(args, out, err);
     }
     if (!args.empty() && args[0] == "status") {
+        if (!validateFlags(args, 1, {"--control"}, err)) {
+            return 2;
+        }
         return nodeStatus(args, out, err);
     }
     const std::size_t from = (!args.empty() && args[0] == "run") ? 1 : 0;
+    if (!validateFlags(args, from, {"--cert", "--key", "--ca", "--listen", "--allow", "--crl", "--policy", "--control"},
+                       err)) {
+        return 2;
+    }
 
     const auto certPath = flag(args, from, "--cert");
     const auto keyPath = flag(args, from, "--key");
@@ -272,8 +410,21 @@ int nodeSubcommand(const std::vector<std::string>& args, std::ostream& out, std:
     const auto listen = flag(args, from, "--listen");
     if (!certPath || !keyPath || !caPath || !listen) {
         err << "Usage: pipeshellx node --cert F --key F --ca F --listen HOST:PORT [--allow SAN[,SAN...]] [--crl F] "
-               "[--control PATH]\n";
+               "[--policy F] [--control PATH]\n";
         return 2;
+    }
+
+    psx::transport::NodeStageRunner::CommandValidator validateCommand;
+    if (const auto policyPath = flag(args, from, "--policy")) {
+        try {
+            auto policy = psx::policy::Policy::loadFromFile(*policyPath);
+            validateCommand = [policy = std::move(policy)](const psx::transport::OpenRequest& request) {
+                return policy.validate(request.argv);
+            };
+        } catch (const std::exception& ex) {
+            err << "pipeshellx node: " << ex.what() << "\n";
+            return 2;
+        }
     }
 
     const auto certPem = readFile(*certPath);
@@ -334,8 +485,8 @@ int nodeSubcommand(const std::vector<std::string>& args, std::ostream& out, std:
     }
     psx::transport::NodeServer server(
         *reactor.value(), std::move(listener.value()),
-        {.certificatePem = *certPem, .privateKeyPem = *keyPem, .caPem = *caPem, .crlPem = crlPem},
-        std::move(authorize));
+        {.certificatePem = *certPem, .privateKeyPem = *keyPem, .caPem = *caPem, .crlPem = crlPem}, std::move(authorize),
+        std::move(validateCommand));
     if (auto started = server.start(); !started.ok()) {
         err << "pipeshellx node: " << started.error().message() << "\n";
         return 2;

@@ -69,8 +69,11 @@ void FanInPipeline::onSourceDone(std::vector<NativeController::HostResult> resul
     if (done_) {
         return;
     }
+    sourceDone_ = true;
     for (const auto& result : results) {
-        if (!result.ok || !result.error.empty()) {
+        if (sourceCancellationRequested_ && !result.ok && result.error == "downstream completed") {
+            sourceExit_ = 137; // NativeController closed it; node fencing is SIGKILL
+        } else if (!result.ok || !result.error.empty()) {
             sourceError_ =
                 "source host " + result.host + ": " + (result.error.empty() ? "non-zero exit" : result.error);
         } else if (result.exitCode != 0) {
@@ -84,16 +87,34 @@ void FanInPipeline::onSourceDone(std::vector<NativeController::HostResult> resul
         finish(std::move(outcome));
         return;
     }
-    downstream_->closeStdin(); // every source finished: EOF the downstream
+    if (!downstreamDone_) {
+        downstream_->closeStdin(); // every source finished: EOF the downstream
+    }
+    finishIfReady();
 }
 
 void FanInPipeline::onDownstreamDone(Outcome downstreamOutcome) {
     if (done_) {
         return;
     }
+    downstreamOutcome_ = std::move(downstreamOutcome);
+    downstreamDone_ = true;
+    if (!sourceDone_) {
+        sourceCancellationRequested_ = true;
+        source_->cancel("downstream completed");
+        return; // cancellation completion may synchronously destroy this
+    }
+    finishIfReady();
+}
+
+void FanInPipeline::finishIfReady() {
+    if (!sourceDone_ || !downstreamDone_ || !downstreamOutcome_) {
+        return;
+    }
     // pipefail: a downstream failure wins (it is rightmost); otherwise a source
     // failure surfaces. A source connect failure is reported via error.
-    Outcome outcome = std::move(downstreamOutcome);
+    Outcome outcome = std::move(*downstreamOutcome_);
+    downstreamOutcome_.reset();
     if (outcome.exitCode == 0 && sourceExit_ != 0) {
         outcome.exitCode = sourceExit_;
     }

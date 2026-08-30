@@ -56,12 +56,18 @@ public:
     void writeStdin(std::string_view bytes);
     void closeStdin();
 
+    // Closes every unfinished remote connection and completes with those
+    // stages accounted as the node's forced-fencing status (137).
+    void cancel();
+
 private:
     struct Conn;
     void onConnReady(std::size_t index);
     void onConnError(std::size_t index, const std::string& message);
     void forward(std::size_t index, std::string_view data);
     void onStageExit(std::size_t index);
+    void fenceBefore(std::size_t index);
+    Outcome outcome() const;
     void finish(Outcome outcome);
 
     psx::runtime::Reactor& reactor_;

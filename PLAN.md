@@ -1,6 +1,6 @@
 # PipeShellX — Systems Architecture & Engineering Master Plan
 
-**One-liner:** A single static binary that composes processes into pipelines *across machines* —
+**One-liner:** A single executable that composes processes into pipelines *across machines* —
 anonymous pipes on one host, backpressured mTLS streams between hosts — with the same semantics
 (`|`, exit codes, signals, EOF) an engineer already expects from a Unix shell.
 
@@ -8,8 +8,15 @@ anonymous pipes on one host, backpressured mTLS streams between hosts — with t
 **Plan status:** v2 — supersedes the product/launch plan (its product, legal, and risk material is
 carried forward in Appendix A). This document is the single source of truth for scope; update it
 in the same PR as any scope change.
-**Baseline date:** 2026-08-22, commit `2e10869`.
-**Phase status:** Phase 0 (`v0.1.0`), Phase 1 (`v0.2.0`), Phase 2 (`v0.3.0`), **Phase 4 — Native backplane (`v0.5.0`)** complete + reviewed. **Phase 3 (Windows) is DEFERRED to future work** — it needs an MSVC/clang-cl Windows toolchain not available in this environment; the design is Windows-ready and `docs/windows.md` captures the tiers/differences, so it can resume on a Windows-capable host. → **active phase: Phase 5 — Pipelines as DAGs (`v0.6.0`)**.
+**Historical baseline:** 2026-08-22, commit `2e10869`.
+**Release snapshot (2026-08-30):** CMake and the lowercase
+`pipeshellx` executable report `0.6.0`. Phase 5 has shipped
+local general-DAG execution, native linear cross-node pipelines, strict
+stdout-only consensus, canary/fail-fast, and the documented inventory/product
+contract. Phase 5 is **not fully complete**: non-linear remote DAGs, SSH
+cross-node edges, `splice()`, all-platform reference scenarios, and
+the Windows controller/native node remain open. The repository has no
+`v0.6.0` tag or published release artifacts yet.
 
 ---
 
@@ -17,7 +24,17 @@ in the same PR as any scope change.
 
 ### 1.1 Where the project is, and where it is going
 
-PipeShellX today is a ~2.6 kLOC C++20 POSIX application (`docs/architecture.md`) that runs an
+PipeShellX v0.6 is a multi-command C++20 POSIX controller and optional native
+node. `run` fans arbitrary operator argv over SSH or psx/1 mTLS,
+`pipe` runs a general local DAG or a declared linear native pipeline,
+`diff` performs exact stdout consensus, and `hosts` manages
+INI inventories while retaining legacy `clients.txt` import. The
+current product boundary is documented in `docs/architecture.md`,
+`docs/security.md`, and `docs/pipelines.md`.
+
+The following paragraph and gap tables preserve the historical starting point
+at commit `2e10869`; they are not claims about v0.6. At that baseline,
+PipeShellX was a ~2.6 kLOC C++20 POSIX application that ran an
 allowlisted command either locally — `fork()` / `pipe()` / `dup2()` / `execvp()` / `poll()` /
 `waitpid()` (`docs/process_management.md`, `docs/ipc_design.md`) — or in parallel on every host in
 `clients.txt` by forking one `ssh` worker per host and multiplexing all worker pipes through one
@@ -30,22 +47,25 @@ checking is disabled.
 The target is an **industry-ready, cross-platform distributed pipeline tool** built on the same
 primitives the project already demonstrates, generalised in three directions:
 
-| Direction | From (today) | To (target) |
+| Direction | From (historical baseline) | To (target) |
 |---|---|---|
 | **I/O model** | one `poll()` loop, unbounded `std::string` buffers, post-hoc output | completion-oriented runtime over `epoll` / `kqueue` / `IOCP`, bounded buffers with credit-based backpressure, live streaming |
 | **Topology** | 1 controller → N hosts, one command, stdout collected | DAG of stages placed on nodes; edges are pipes locally and multiplexed mTLS streams remotely; SSH remains the zero-install transport |
 | **Portability** | POSIX only, `fork`/`termios`/`/usr/bin/ssh` hardcoded, POSIX types in public headers | `psx::os` abstraction with `posix/` and `win32/` backends; no OS header leaks outside `src/os/`; Linux, macOS, Windows as first-class controller *and* target |
 
-Two transport modes coexist by design:
+Two transport modes now coexist:
 
-1. **Agentless (SSH)** — what exists now, hardened. Targets need only `sshd`. This stays the
-   on-ramp and the bootstrap channel for mode 2.
+1. **Agentless (SSH)** — targets need only `sshd`. Authentication and
+   the target remote shell remain OpenSSH responsibilities.
 2. **Native backplane** — an optional `pipeshellx node` agent (same binary) speaking a framed,
    multiplexed, credit-flow-controlled protocol over mTLS/TCP. This is what makes cross-node pipe
    streaming, end-to-end backpressure, leases/fencing, and thousand-host fan-out feasible without
    one `ssh` process per host.
 
-### 1.2 Verified project status (fresh clone, 2026-08-22)
+### 1.2 Historical baseline status (fresh clone, 2026-08-22)
+
+This table is retained as migration evidence for commit `2e10869`.
+It does not describe the v0.6 tree.
 
 | Area | State | Evidence |
 |---|---|---|
@@ -71,13 +91,15 @@ Module inventory (LOC from `wc -l`):
 | `Pipe` | `ipc_engine.{h,cpp}` | 40 + 101 | **Dormant** | RAII pipe + non-blocking toggle; not used by `ProcessManager` (`docs/ipc_design.md`) |
 | `main` | `main.cpp` | 20 | Active | starts logger + REPL |
 
-### 1.3 What is already right and is preserved
+### 1.3 Baseline decisions preserved or generalized
 
 These are the design decisions from `docs/` and the code that the target architecture keeps
 verbatim or generalises rather than replaces:
 
-- **No shell on the execution path** — argv-based `execvp()`; remote commands are single-quoted
-  per argument (`command_executor.cpp`, `docs/security.md`).
+- **Explicit argv at process boundaries** — local/native stages are spawned
+  from argv; SSH serializes argv for the target's remote shell. The fixed
+  allowlist remains only in the legacy demo shell, while `run --policy`
+  is an optional controller restriction.
 - **Child hygiene** — `setpgid(0,0)` + `kill(-pgid)` on timeout; `_exit()` after `fork()`;
   `EINTR` retry on every syscall; drain-until-`EAGAIN` reads (already edge-trigger-ready);
   monotonic `steady_clock` deadlines (`docs/process_management.md`).
@@ -102,8 +124,9 @@ verbatim or generalises rather than replaces:
    across nodes exactly as they would across a local `|`.
 4. **Secure by default, agentless by default** — host-key verification on, mTLS on, keys/agent
    only; the native agent is opt-in.
-5. **One static binary, no orchestrator** — controller and node are the same executable; no
-   daemon, database, or cluster is required to run a pipeline.
+5. **One executable, no central orchestrator service** — controller and node
+   are the same executable; native placement uses the optional node daemon,
+   but no database or control-plane cluster is required.
 6. **Portability without leaks** — `include/psx/` exposes only `std::` types; platform headers
    live in `src/os/{posix,win32}/` only.
 
@@ -113,11 +136,15 @@ controllers (runs are idempotent and re-runnable instead); an embedded SSH imple
 
 ---
 
-## 2. Current vs. Target Architecture Gap Analysis
+## 2. Historical Baseline vs. Target Architecture Gap Analysis
+
+Section 2 records the 2026-08-22 migration analysis. Many “Today” cells have
+since been implemented; use the release snapshot above and the linked current
+docs for v0.6 behavior.
 
 ### 2.1 Gap matrix by systems concern
 
-| Concern | Today (evidence) | Gap / risk | Target |
+| Concern | Baseline (2026-08-22 evidence) | Gap / risk | Target |
 |---|---|---|---|
 | **Event demultiplexing** | `poll()` with the `pollfd` vector rebuilt every iteration (`process_manager.cpp:667-671`) | O(N) per wake-up; at 1 000 hosts each ready byte costs a 2 000-entry scan | `psx::Reactor` with `epoll` (ET), `kqueue` (`EV_CLEAR`), `IOCP`; `poll` kept as portable fallback |
 | **Child-exit notification** | no-op `SIGCHLD` handler (`:171-179`) + `waitpid(WNOHANG)` on *every* worker *every* loop (`:740`) | O(N) syscalls per iteration → O(N²) per run; exit observed only via pipe EOF | pollable process handles: `pidfd` (Linux ≥ 5.3), `kqueue EVFILT_PROC/NOTE_EXIT` (macOS), Job Object completion port (Windows); `signalfd`/self-pipe for the rest |
@@ -298,9 +325,11 @@ remote process ──write(2)──▶ pipe (64 KiB) ──read──▶ node/ss
 - **Local (pipe) boundary:** when a stream's buffer is full, the reactor *deregisters interest*
   in that handle; the pipe fills; the producer's `write(2)` blocks. No bytes are dropped, no
   memory grows. This single change fixes the unbounded `std::string` growth in `executeRemote()`.
-- **Backplane boundary:** per-stream and per-connection credit windows (HTTP/2- and
-  SSH-channel-style). Initial stream window 256 KiB, connection window 4 MiB, `WINDOW_UPDATE` sent
-  when ≥ 50 % consumed. A `DATA` frame carries ≤ 64 KiB so one frame equals one pipe read.
+- **Backplane boundary target:** per-stream and per-connection credit windows
+  (HTTP/2- and SSH-channel-style). Current psx/1 implements the 256 KiB
+  per-stream window and sends `WINDOW_UPDATE` as bytes are consumed; the
+  separate connection-wide window and a fixed 64 KiB `DATA` frame cap remain
+  future work.
 - **Fairness:** a merge sink distributes credits round-robin across producers so one chatty host
   cannot starve others (head-of-line protection).
 - **Policies** (per sink, chosen by the use case): `block` (default, lossless), `drop-oldest` /
@@ -310,74 +339,69 @@ remote process ──write(2)──▶ pipe (64 KiB) ──read──▶ node/ss
 - **Line framing:** `LineFramer` emits complete lines only (configurable max line length, CRLF
   normalisation); partial lines are flushed at EOF with a marker. Guarantees no interleaved
   partial lines in `--stream` output — a property test, not an aspiration.
-- **Zero-copy where the kernel offers it:** `splice()` pipe→socket and socket→pipe on Linux for
-  cross-node edges; plain copy elsewhere.
+- **Current v0.6 copy path:** local edges use bounded userspace buffers and
+  native edges use credit-controlled TLS. A Linux `splice()` fast path
+  remains an unchecked Phase 5 item.
 
 ### 3.6 L3 — Transports
 
-#### `SshTransport` (agentless; hardened version of today's `executeRemote`)
+#### `SshTransport` (agentless)
 
-- `ssh` found on `PATH` (`/usr/bin/ssh`, `/opt/homebrew/bin/ssh`, `%SystemRoot%\System32\OpenSSH\ssh.exe`);
-  minimum version detected at startup (OpenSSH ≥ 7.6 for `accept-new`).
-- Defaults: `-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=<inventory>.known_hosts
-  -o BatchMode=yes -o ConnectTimeout=<cfg> -o ServerAliveInterval=15`; changed host keys fail
-  the host and are reported with old/new fingerprints. `--insecure` exists and warns.
-- `ControlMaster=auto`/`ControlPersist` opt-in (`--reuse`) for repeated runs against the same hosts.
-- Passwords (kept for parity with `docs/authentication.md`): never on argv — `sshpass -d <fd>`
-  with a CLOEXEC-cleared pipe, or `SSH_ASKPASS_REQUIRE=force` with a helper that reads from an
-  inherited fd (OpenSSH ≥ 8.4). Deprecated in favour of keys/agent/certs; removed in 1.0.
-- Remote process lifetime is bound to the SSH session by `sshd` (`SIGHUP` on disconnect) — this
-  is the lease mechanism for free in agentless mode.
-- Scaling ceiling is inherent (one `ssh` process ≈ 5–8 MB RSS): documented, measured (§7), and
-  the reason `NativeTransport` exists.
+- `ssh` is found on `PATH`; v0.6 does not hard-code a
+  platform path.
+- Defaults are `StrictHostKeyChecking=accept-new`, a per-inventory
+  `UserKnownHostsFile`, `BatchMode=yes` when no legacy
+  password is used, `ConnectTimeout=5`, and
+  `ServerAliveInterval=15`. There is no `--insecure` flag.
+- `--reuse` enables OpenSSH control-socket reuse for repeated runs.
+- The legacy interactive password path uses `sshpass -d <fd>`; no
+  password is placed on argv or written to inventory.
+- The controller starts one managed SSH process per in-flight host and bounds
+  them with `-c`. OpenSSH and the target login shell own remote
+  authentication/interpretation.
 
 #### `NativeTransport` — the `psx/1` backplane
 
-One TCP + mTLS connection per node, many stages multiplexed on it. The same binary serves as the
-node agent: `pipeshellx node --listen :7433 --ca fleet-ca.pem --cert node.pem --key node.key`.
+One TCP+mTLS connection per target carries multiplexed stage streams. The same
+binary serves as the node agent:
 
-Frame header (12 bytes, big-endian), payload ≤ 64 KiB:
-
-```text
- 0      1      2             4                  8                 12
- +------+------+-------------+------------------+------------------+
- | ver  | type | flags (u16) | stream_id (u32)  | length (u32)     |
- +------+------+-------------+------------------+------------------+
- flags bits 0-1: channel (0=stdin 1=stdout 2=stderr)   bit 2: END (half-close)
+```bash
+pipeshellx node --listen 0.0.0.0:7433 \
+  --cert node.crt --key node.key --ca ca/ca.crt \
+  --allow spiffe://psx/controller/ops --policy node.policy
 ```
 
-| Type | Name | Direction | Payload |
-|---|---|---|---|
-| `0x01` | `HELLO` | both | protocol version, capabilities, node name, max windows |
-| `0x10` | `OPEN` | ctrl→node | stage spec: `run_id`, `stage_id`, `attempt`, argv, env, cwd, limits, pty? (CBOR or TLV — decided in the Phase 4 spike) |
-| `0x11` | `OPENED` | node→ctrl | pid/handle, start time |
-| `0x12` | `DATA` | both | bytes for `channel` of `stream_id` |
-| `0x13` | `WINDOW` | both | credit increment (stream or connection when `stream_id=0`) |
-| `0x14` | `EOF` | both | half-close of `channel` |
-| `0x15` | `SIGNAL` | ctrl→node | `Graceful` / `Kill` / `Resize(cols,rows)` |
-| `0x16` | `EXIT` | node→ctrl | exit status, signal, `rusage` (user/sys/maxrss), end time |
-| `0x17` | `RESET` | both | abort stream with error code |
-| `0x20`/`0x21` | `PING`/`PONG` | both | opaque 8 bytes; doubles as lease renewal |
-| `0x30` | `GOAWAY` | both | last accepted `stream_id`, reason; graceful connection drain |
+- **Normative protocol:** [`docs/wire_protocol.md`](docs/wire_protocol.md)
+  defines the actual 10-byte psx/1 envelope, frame types, channel flags,
+  versioned `OPEN` payload, credit, liveness, fencing, and
+  compatibility rules. It supersedes earlier frame sketches.
+- **Identity and authorization:** both peers present CA-signed TLS 1.3
+  certificates; inventory can pin a node SAN URI, `node --allow` can
+  restrict controller SAN URIs, and optional CRLs revoke identities.
+- **Command authorization:** independent `run --policy` and
+  `node --policy` gates exist. Node rejection occurs before spawn,
+  writes a diagnostic to stage stderr, and exits 126. Without node policy, an
+  admitted controller may request arbitrary argv.
+- **Enrollment:** `node keygen` creates a local key/CSR and
+  `ca sign` issues the certificate. Automated SSH copy/install is not
+  implemented.
+- **Liveness and fencing:** PING/PONG leases make a lost/silent connection
+  terminal and node teardown kills its owned stages.
+- **No resume:** reconnect-and-resume and native pipeline retry are not
+  implemented in v0.6.
+- **Local control:** a POSIX `AF_UNIX` endpoint exposes the node status
+  snapshot used by `node status --control`. Win32 named-pipe support
+  is deferred with the Windows port.
 
-- **Identity & auth:** mTLS 1.3; every node and controller certificate carries a SAN URI
-  `psx://<fleet>/node/<name>` or `psx://<fleet>/operator/<user>`; authorisation = fleet match +
-  optional allow-list in the node config. Offline CA: `pipeshellx ca init|issue|revoke` (CRL file
-  pushed over SSH). No online CA, no OCSP — air-gapped by construction.
-- **Enrollment reuses the SSH transport:** `pipeshellx node enroll -g web` copies the binary
-  (optional), issues a cert, writes the service unit, and starts the agent — over `ssh`.
-- **Stream ids:** controller-initiated odd, node-initiated even (reserved for future
-  node→controller calls such as log shipping).
-- **Heartbeats & leases:** `PING` every 2 s when idle; 3 missed → node kills all jobs of that
-  connection (fencing: no orphans after controller loss); controller marks the node `LOST` and
-  applies the stage retry policy. Agentless mode gets the same guarantee from `sshd`.
-- **Connection loss mid-stream:** `DATA` frames carry implicit sequence numbers (frame order on
-  TCP); a reconnect within the lease window can resume a stream from the last acknowledged
-  window offset; otherwise the stage is `LOST` and retried only if `idempotent`.
-- **Local IPC endpoint:** the node also listens on `AF_UNIX` / Win32 named pipe for same-host
-  tooling (no TLS, peer credentials via `SO_PEERCRED`/`GetNamedPipeClientProcessId`).
+### 3.7 Target L4 — Orchestration, lifecycle, and fault tolerance
 
-### 3.7 L4 — Orchestration, lifecycle, and fault tolerance
+This subsection is the target model. The v0.6 product contract is narrower:
+`run` has a concurrency window, timeout, cancellation, fail-fast,
+explicitly idempotent SSH retries, and native canaries; native
+reconnect/resume, duplicate-spawn suppression, per-node circuit breakers,
+deadline metadata in `OPEN`, and Windows mappings are not
+implemented. Current exit codes are documented in
+`docs/distributed_execution.md` and `docs/pipelines.md`.
 
 **Stage state machine** (replaces `RemoteWorkerState` booleans):
 
@@ -416,7 +440,7 @@ Pending ─▶ Spawning ─▶ Running ─▶ Draining ─▶ Exited(code)
   merge order is arrival order (non-deterministic); `--ordered` buffers within a window and emits
   by `(node, seq)`; timestamps are sender-monotonic plus wall-clock for log use.
 
-### 3.8 Isolation and security model
+### 3.8 Target isolation and security model
 
 | Tier | Mechanism | Linux | macOS | Windows |
 |---|---|---|---|---|
@@ -428,13 +452,29 @@ Pending ─▶ Spawning ─▶ Running ─▶ Draining ─▶ Exited(code)
 | Wire | mTLS 1.3 only; no plaintext mode; cipher suites fixed to AEAD | OpenSSL 3 | OpenSSL 3 | OpenSSL 3 / SChannel |
 | Audit | append-only JSONL `{ts, run_id, user, node, stage, argv, exit, duration, bytes}`; `--no-audit` opt-out | `~/.local/state/pipeshellx/audit.jsonl` | `~/Library/Application Support/…` | `%LOCALAPPDATA%\PipeShellX\audit.jsonl` |
 
-Threat model v2 (extends `docs/security.md`): (1) operator workstation compromise → bounded by
+**v0.6 boundary:** address-space isolation, POSIX process groups, bounded
+capture/credit, native mTLS, SAN authorization/CRL, and opt-in unsigned JSONL
+audit exist. `run --policy` and independent
+`node --policy` use exact command names, an argv-count cap, and a
+metacharacter guard; the node rejects before spawn with stage exit 126. Policy
+does not scrub the environment or provide a sandbox, and it is optional at
+both boundaries. Sandboxes,
+`SecureString`, configurable limits across all stages, signed/default
+audit, privilege separation, and every Windows column in the target table are
+not implemented.
+
+Target threat model v2 (extends `docs/security.md`): (1) operator workstation compromise → bounded by
 audit + per-fleet CA scoping; (2) hostile node → cannot open streams to the controller
 (odd/even id rule + capability gating), cannot exceed windows; (3) network attacker → mTLS,
 host-key pinning in SSH mode, no downgrade; (4) hostile stage → sandbox tiers + limits;
 (5) controller loss → leases guarantee no orphaned work.
 
-### 3.9 Observability
+### 3.9 Target observability
+
+In v0.6, contextual application logs, run/stage identifiers, opt-in unsigned
+JSONL run audit, and the node's local control-socket counters exist. JSON log
+mode, rotation/retention guarantees, Prometheus endpoints, default audit,
+signed audit, and the full metric list below remain target work.
 
 - Logs: existing `LogContext` format kept; add JSON lines, levels, rotation, and `run_id`/
   `stage_id` fields (the trace context). Default sink is a file; `--verbose` mirrors to stderr.
@@ -550,6 +590,12 @@ smaller SSH-only binary.
 
 ## 5. Reference Architectures for Enterprise Use Cases
 
+**v0.6 reading rule:** these scenarios describe the architectural direction.
+The command blocks below use the current CLI, but only the subsets called out
+as implemented are release claims. In particular, remote execution is linear,
+there is no automatic enrollment, reconnect, `splice()`, per-stage
+sandbox/limits, signed audit, or native Windows node.
+
 ### 5.1 Real-time multi-node log streaming
 
 **Scenario:** 500 web nodes; an SRE wants every `5xx` line from `access.log` on one terminal,
@@ -563,25 +609,30 @@ live, and piped into an alerting script — no log shipper installed on the node
 ```
 
 ```bash
-# agentless (works today-ish after Phase 2), 500 ssh processes
-pipeshellx run -g web --stream -- tail -F /var/log/nginx/access.log | grep ' 50[0-9] ' | ./alert.sh
-# native backplane (Phase 4+), one TLS connection per node
-pipeshellx pipe --transport native --policy drop-oldest --ring 1MiB \
-  'tail -F /var/log/nginx/access.log'@web  '|'  "grep ' 50[0-9] '"@local  '|'  './alert.sh'@local
+# Agentless: one managed SSH process per in-flight host.
+pipeshellx run -i inventory.ini -g web --stream \
+  --overflow drop-oldest --ring 1MiB -- tail -F /var/log/nginx/access.log \
+  | grep ' 50[0-9] ' | ./alert.sh
+
+# Native: supported first-stage group fan-in followed by one linear chain.
+pipeshellx pipe -i inventory.ini \
+  --cert controller.crt --key controller.key --ca ca/ca.crt \
+  "'tail -F /var/log/nginx/access.log'@web | 'grep 500'@local | './alert.sh'@local"
 ```
 
 - **OS primitives in play:** `tail` blocks on `write(2)` when its pipe fills (kernel
   backpressure); the agent reads only with credits; the controller merges from 500 streams on one
   `epoll`/`kqueue`/IOCP loop; line framing guarantees unbroken lines.
-- **DS properties:** per-host FIFO, arrival-order merge (`--ordered` optional), liveness over
-  completeness (`drop-oldest` with drop counters in the summary), node loss reported within
-  3 heartbeats (≤ 6 s) and auto-reattached when the node returns (`--retries inf` for this
-  stage class).
-- **Sizing:** controller RSS ≤ 500 × (256 KiB window + 1 MiB ring) ≈ 640 MiB worst case,
-  flat under load; typical tens of MB. Agentless: + 500 `ssh` processes (≈ 3–4 GB RSS across the
-  controller host) — the documented reason to enroll nodes for this use case.
+- **DS properties:** per-host FIFO and arrival-order merge. `run`
+  drop policies report dropped bytes; native pipeline edges use credit
+  backpressure. Connection loss is terminal—v0.6 does not auto-reattach or
+  offer infinite retries.
+- **Sizing:** credit and configured rings make memory planning explicit, but
+  fleet-specific RSS/throughput figures must come from the benchmark harness;
+  the plan does not present estimates as release measurements.
 - **Exit semantics:** a `tail -F` pipeline is infinite; Ctrl-C → graceful cancel → summary with
-  lines/host, drops/host, nodes lost/recovered; exit `130`.
+  stage/drop/cancellation state; exit `130`. No recovery/resume is
+  implied.
 
 ### 5.2 Low-overhead distributed IPC pipelines
 
@@ -595,55 +646,75 @@ nodes with a single merged, sorted result.
 ```
 
 ```bash
-pipeshellx pipe 'pg_dump prod'@db1 '|' 'zstd -T4'@db1 '|' 'zstd -d'@analytics1 '|' 'psql warehouse'@analytics1
-pipeshellx pipe --ordered 'grep -h "order=42" /data/*.log'@shards '|' 'sort -m -k1'@local
+pipeshellx pipe -i inventory.ini \
+  --cert controller.crt --key controller.key --ca ca/ca.crt \
+  "'pg_dump prod'@db1 | 'zstd -T4'@db1 | 'zstd -d'@analytics1 | 'psql warehouse'@analytics1"
+
+pipeshellx pipe -i inventory.ini \
+  --cert controller.crt --key controller.key --ca ca/ca.crt \
+  "'grep -h order=42 /data/shard.log'@shards | 'sort -m -k1'@local"
 ```
 
-- **Why this is "low-overhead":** same-host edges are ordinary pipes (no agent in the data path);
-  only the `db1 → analytics1` edge crosses the backplane, as one multiplexed stream with `splice()`
-  pipe→socket on Linux — no user-space copy on the sending node. TLS is the only CPU cost.
+- **Current data path:** local-only graph edges are ordinary pipes with bounded
+  controller edge buffers. Native remote segments use credit-controlled TLS
+  and a controller relay. The Linux `splice()` fast path is not
+  implemented, so v0.6 does not claim zero-copy remote transfer.
 - **Pipe semantics across nodes:** `pg_dump` EOF → `zstd` EOF → `EOF` frame → `zstd -d` sees
   EOF → `psql` finishes → exit statuses propagate; a non-zero exit anywhere fails the run with
   per-stage status (`set -o pipefail` semantics by default).
 - **Backpressure end-to-end:** if `psql` is slow, credits stop, `zstd -T4` blocks on its pipe,
   `pg_dump` blocks on its pipe. Memory on every hop is bounded by one window.
-- **Fault tolerance:** the snapshot stage is *not* idempotent → `Lost` fails the run
-  immediately with a clear message; the `grep` shards *are* (`--idempotent`), so a lost shard is
-  retried with backoff up to `--retries 3`; `--ordered` merge buffers per shard within the
-  window.
-- **Isolation:** `limits{mem=2GiB, cpu=4}` per `zstd` stage → cgroup v2 / Job Object.
+- **Fault tolerance:** a lost native pipeline connection fails unfinished
+  stages and fences node-owned work. Pipeline-stage retry/resume is not
+  implemented; `--idempotent --retries` applies to SSH
+  `run`, not to `pipe`.
+- **Isolation:** stages run as the controller/node service account. Per-stage
+  configurable limits and sandboxing remain Phase 6 work.
 
 ### 5.3 Lightweight air-gapped automation (no Kubernetes)
 
 **Scenario:** a 120-host facility network with no internet and no container platform. A
-single jump host must: verify configuration drift nightly, roll out a patch with a canary,
+ single jump host must: verify configuration drift nightly, roll out a patch with a canary,
 and keep an audit trail — with one binary carried in on removable media.
 
 ```text
- jump host (controller)                         fleet (120 hosts, Linux + Windows)
+ jump host (controller)                         fleet (POSIX native + Windows SSH)
  ┌───────────────────────────────┐              ┌──────────────────────────────────────┐
- │ pipeshellx (static binary)    │──ssh (boot)──▶ enroll: copy binary, cert, service    │
- │ offline CA  ~/.config/…/ca    │──mTLS 7433───▶ pipeshellx node (systemd / SCM)       │
+ │ pipeshellx controller         │──external───▶ copy binary/cert/service config       │
+ │ offline CA + CRL              │──mTLS 7433──▶ pipeshellx node (systemd / launchd)    │
+ │                               │──OpenSSH────▶ Windows SSH targets                    │
  │ inventory.ini (groups/tags)   │              │                                      │
- │ cron: nightly drift + audit   │◀─JSONL audit─┤ stage results, rusage                │
+ │ cron: nightly drift + audit   │◀─stage data──┤ process output/status                 │
  └───────────────────────────────┘              └──────────────────────────────────────┘
 ```
 
 ```bash
-pipeshellx ca init --fleet plant-7                           # offline CA, no network
-pipeshellx node enroll -i inventory.ini -g all               # bootstrap over existing SSH
-pipeshellx diff -g linux  -- cat /etc/ssh/sshd_config        # consensus: majority vs outliers
-pipeshellx run  -g all --canary 5% --fail-fast --timeout 300 -- ./apply-patch   # canary rollout
-pipeshellx run  -g windows -- powershell -c Get-HotFix        # Windows nodes, same CLI
+pipeshellx ca init --cn plant-7 --dir ca
+pipeshellx node keygen --san spiffe://psx/node/node-01 --out node-01
+pipeshellx ca sign --ca ca --csr node-01.csr \
+  --san spiffe://psx/node/node-01 --out node-01.crt
+
+pipeshellx diff -i inventory.ini -g linux-native \
+  --cert controller.crt --key controller.key --ca ca/ca.crt \
+  -- cat /etc/ssh/sshd_config
+
+pipeshellx run -i inventory.ini -g linux-native --transport native \
+  --cert controller.crt --key controller.key --ca ca/ca.crt \
+  --canary 5% --fail-fast --timeout 300 --audit-log audit.jsonl \
+  -- /usr/local/bin/apply-patch
+
+pipeshellx run -i inventory.ini -g windows-ssh \
+  --transport ssh --shell powershell -- Get-HotFix
 ```
 
 - **No orchestrator:** no etcd, no API server, no scheduler daemon; `cron`/Task Scheduler on the
   jump host triggers runs; state is the inventory file and the audit log.
-- **Security in an air gap:** mTLS with a fleet-scoped CA; CRL distributed by the tool itself;
-  host-key pinning for the SSH bootstrap; audit JSONL signed per run (hash chain) so tampering is
-  detectable offline.
-- **Drift detection** is the consensus sink: normalise → SHA-256 → cluster → majority + unified
-  diff of outliers (the feature carried from the previous plan, now expressed as a pipeline sink).
+- **Security in an air gap:** mTLS with a fleet-scoped CA and optional CRL;
+  host-key pinning for SSH; externally managed distribution. The opt-in audit
+  JSONL is unsigned and not tamper-evident in v0.6.
+- **Drift detection** groups successful hosts by exact stdout bytes. stderr is
+  excluded, and nonzero exits are host failures. There is no normalization,
+  hashing contract, or unified-diff renderer in v0.6.
 - **Fault tolerance for automation:** idempotent stages retried; non-idempotent stages
   (`apply-patch`) run once with canary gating; strict exit codes make the cron job's success
   unambiguous.
@@ -652,8 +723,8 @@ pipeshellx run  -g windows -- powershell -c Get-HotFix        # Windows nodes, s
 
 Distributed test fan-out (`pipeshellx run -g ci-agents --json -- ctest …` → CI parses JSON);
 fleet-wide forensic collection (`tar c … | zstd`@each → `spool` sink to local disk with
-per-host files); edge/IoT fleets on musl static builds; HPC-style scatter/gather on a few dozen
-nodes without Slurm.
+per-host files), musl release artifacts, and arbitrary remote scatter/gather
+remain target applications rather than shipped v0.6 guarantees.
 
 ---
 
@@ -709,7 +780,7 @@ Extends `docs/ipc_design.md`, `docs/process_management.md`, `docs/architecture.m
 
 ### Phase 2 — Streaming engine and the real CLI (10–15 days) → `v0.3.0`
 Extends `docs/ipc_design.md`, `docs/system_flow.md`, `docs/distributed_execution.md`, `docs/testing.md`; creates `docs/pipelines.md` (sinks), `docs/json.md`.
-- [x] `stream::{Stream, BoundedBuffer, CreditWindow, LineFramer}`; pipe-level backpressure by interest deregistration; policies `block|drop-oldest|drop-newest|spool`.
+- [~] `stream::{Stream, BoundedBuffer, CreditWindow, LineFramer}`; local DAG edges use bounded backpressure and `run` implements bounded drop capture plus disk spool. **Open:** `run --overflow block` is currently lossless/unbounded rather than pausing producers, and spool reconstructs the full result at completion.
 - [x] Live `--stream` (host-prefixed, colour-stable, TTY-detected), `--group` (today's format, kept), `--json`; end-of-run summary; strict exit codes; `130` on cancel.
 - [~] Orchestrator v1: sliding-window scheduler (`-c`, default 64) ✓, per-stage + global deadlines ✓, `--retries` jittered backoff ✓, cancellation via `SignalSource` (exit `130`) ✓, `--fail-fast` ✓. **Deferred:** a formal `Run`/`Stage` state-machine *type* and the per-node **circuit breaker** (premature in the single-command model — the breaker needs multi-stage-per-node work).
 - [x] `SshTransport` extracted from `executeRemote`; `ControlMaster` opt-in (`--reuse`); Windows-target quoting (support tier T1, `--shell posix|cmd|powershell`); host-key-change reporting UX.
@@ -717,7 +788,7 @@ Extends `docs/ipc_design.md`, `docs/system_flow.md`, `docs/distributed_execution
 - [x] REPL rewritten as a thin client over `Run`; spin-wait threads removed.
 - [x] Audit log JSONL; file logging with rotation; `run_id`/`stage_id` in `LogContext`.
 - [~] Integration rig: property test "no interleaved partial lines" ✓ (randomized, in `test_line_framer.cpp`). **Blocked in this env:** docker-compose `openssh-server` fleet + the TSan job (no Docker daemon available — see the dev-environment notes).
-- **Exit criteria:** `tail -F` across 100 containers streams live with flat controller RSS; §7 targets T1–T6 met on Linux and macOS. _(Functionally implemented; the 100-container docker verification cannot run in the current environment — no Docker daemon. Tagging `v0.3.0` awaits either a Docker-capable host or an explicit decision to record the docker criterion as an environment exception.)_
+- **Exit criteria:** **open.** `tail -F` across 100 containers with flat controller RSS and §7 targets T1–T6 still need a Docker-capable Linux/macOS validation host; true lossless bounded `run` backpressure is also not implemented. Drop policies provide the current hard retained-memory bound.
 
 ### Phase 3 — Windows port (15–20 days) → `v0.4.0`  ⏸️ DEFERRED (future work)
 
@@ -740,9 +811,15 @@ Extends `docs/os_abstraction.md`, `docs/deployment.md`, `docs/testing.md`.
 ### Phase 4 — Native backplane (15–20 days) → `v0.5.0`
 Extends `docs/distributed_execution.md`, `docs/authentication.md`, `docs/security.md`; creates `docs/wire_protocol.md`.
 - [x] Spike: frame codec (TLV envelope) + `OPEN` encoding (`OpenRequest`) + OpenSSL-vs-SChannel decision → ADR-006 (TLV) / ADR-007 (OpenSSL). In `psx::transport`, bounds-checked + fuzz-style tested.
-- [ ] `os::Socket`, `os::Tls` (mTLS 1.3, SAN-URI identity, CRL file); `transport::NativeTransport` (multiplexed streams, credit windows, `PING`/`PONG` leases, `GOAWAY` drain).
-- [~] `pipeshellx node` agent: listener, job supervisor (lease expiry kills jobs), `AF_UNIX`/named-pipe local endpoint, metrics endpoint; service install for systemd/launchd/SCM. _(listener ✓, lease/fencing job supervisor ✓, **service install ✓** — `node systemd-unit` (restart + hardening: NoNewPrivileges/ProtectSystem/PrivateTmp/…) and `node launchd-plist` emit ready-to-install units built from the daemon's flags; the plist passes `plutil -lint`. **AF_UNIX local endpoint + metrics ✓** — `os::Socket::listenUnix/connectUnix`; `node --control PATH` serves a JSON metrics snapshot (`accepted_total`/`active_connections`/`active_stages`) that `node status --control PATH` reads. **Remaining:** SCM (Windows service, with Phase 3).)_
-- [~] `pipeshellx ca init|issue|revoke`; `pipeshellx node enroll` over `SshTransport`. _(ca init/issue/**revoke** done — `revoke` records the serial in `revoked.txt` and regenerates a CA-signed `crl.pem`; `os::Tls` enforces a CRL (`X509_V_FLAG_CRL_CHECK`), wired as `node --crl` / `run --transport native --crl`. Verified: a revoked peer's handshake is refused, a non-revoked peer still connects. **enrollment via CSR done** — `node keygen --san --out` generates the node's key (local, 0600) + a CSR; `ca sign --ca --csr --san --out` verifies the CSR self-signature and issues a cert with the CSR's public key and the *operator's* SAN (the request is not trusted). The private key never leaves the node or touches a command line. Verified: keygen->sign->the enrolled identity runs a live daemon + controller. **Remaining:** automating the (non-secret) CSR/cert move over `SshTransport` — the crypto is transport-agnostic and real SSH is unavailable in this env.)_
+- [x] `os::Socket`, `os::Tls` (mTLS 1.3, SAN-URI identity, CRL file); `transport::NativeTransport` (multiplexed streams, credit windows, `PING`/`PONG` leases, `GOAWAY` drain).
+- [~] `pipeshellx node` agent: listener, job supervisor (lease expiry kills jobs), `AF_UNIX`/named-pipe local endpoint, metrics endpoint; service install for systemd/launchd/SCM. _(listener ✓, lease/fencing job supervisor ✓, optional pre-spawn `node --policy FILE` ✓, **service install ✓** — `node systemd-unit` (restart + hardening: NoNewPrivileges/ProtectSystem/PrivateTmp/…) and `node launchd-plist` emit ready-to-install units from the daemon flags, including optional `--policy` and `--control`; the plist passes `plutil -lint`. **AF_UNIX local endpoint + metrics ✓** — `os::Socket::listenUnix/connectUnix`; `node --control PATH` serves a JSON metrics snapshot (`accepted_total`/`active_connections`/`active_stages`) that `node status --control PATH` reads. **Remaining:** SCM (Windows service, with Phase 3).)_
+- [~] `pipeshellx ca init|issue|revoke|sign` and manual CSR
+  enrollment. _(`revoke` records the serial and regenerates a
+  CA-signed CRL; TLS can enforce it. `node keygen` creates a local
+  private key plus CSR, and `ca sign` verifies/signs the
+  operator-approved SAN. **Remaining:** there is no `node enroll`
+  command; automating CSR/certificate movement, binary copy, and service
+  installation over SSH is deferred.)_
 - [ ] Reconnect-and-resume within the lease window; `Lost` handling in the orchestrator; fuzzers for the frame decoder (`tests/fuzz/`).
 - [~] Loopback transport for protocol tests; fault injection (drop/duplicate/delay frames, kill agent mid-stream, partition). _(Loopback `Session` pair in tests; **fault injection done** — `test_session_faults.cpp`: structured adversarial frames (DATA for unknown/closed stream, duplicate EXIT, unknown frame type, WINDOW_UPDATE for a closed stream, wrong-role OPEN) all yield clean protocol errors, plus two fuzz loops (arbitrary + mutated valid frame streams, 10k iters) that stay memory-safe under ASan/UBSan — a stand-in for the toolchain-blocked libFuzzer. kill-agent-mid-stream/partition are covered by the fencing + lease tests. **Remaining:** in-tree libFuzzer target (needs homebrew clang).)_
 - **Exit criteria:** 1 000 simulated nodes on one TLS connection each; fencing proven (no orphan after controller `kill -9`); §7 targets T7–T10. _(Fencing on disconnect: ✓ proven — `NodeFencingTest` plus a real-binary `kill -9` smoke confirm the node kills the running stage's process group when the controller connection drops, leaving no orphan (~50 ms). `~NodeStageRunner` signals the group explicitly. Silent-partition lease: ✓ done — `NativeTransport` runs a PING/PONG heartbeat (`kDefaultLease` 2 s×3); a peer that goes quiet (no FIN, no PONG) fails via `onError(Timeout)` in ~3–4 intervals. Covered by `LeaseExpiresWhenThePeerGoesSilent` + `LeaseKeepsAnIdleConnectionAlive`, and a real-binary `SIGSTOP`-the-node smoke (controller gave up in ~8 s, not 60). Remaining: node-death fencing (a hard-killed node still orphans its stage — needs a parent-death signal / `PR_SET_PDEATHSIG` / kqueue parent watch), and full 1 000-connection-over-TLS scale (CI/dedicated-host). **Scale ✓ demonstrated** — `test_scale.cpp`: one connection multiplexes 1 000 concurrent streams, and 1 000 simulated nodes each run a stage to completion (loopback, no TLS/RSA cost); `NodeServerTest.HandlesManyConcurrentControllerConnections` runs 100 concurrent mTLS connections through one NodeServer on one reactor, every stage exiting cleanly (~0.9 s). The literal 1 000-over-real-TLS run (≈2 000 RSA handshakes) is left to CI to keep the dev machine unloaded.)_
@@ -750,7 +827,7 @@ Extends `docs/distributed_execution.md`, `docs/authentication.md`, `docs/securit
   (fuzz-hardened); `Session` mux with HTTP/2-style per-stream credit flow control, real read-side backpressure, and
   distinct stdout/stderr channels; `os::{Socket(TCP+AF_UNIX),Tls}` (mTLS 1.3, SAN-URI identity, CRL); `NativeTransport`
   (PING/PONG liveness lease, GOAWAY); the `pipeshellx node` daemon (accept loop, deferred-reap teardown, stage fencing
-  on controller loss, `--control` metrics endpoint, systemd/launchd unit emitters) and `NativeController` driving
+  on controller loss, optional pre-spawn `--policy`, `--control` metrics endpoint, systemd/launchd unit emitters) and `NativeController` driving
   `run --transport native`; an offline CA (`ca init|issue|revoke|sign`, CRL, CSR enrollment via `node keygen`). Fencing
   proven (no orphan after controller `kill -9`; lease detects a silent partition); scale demonstrated (1 000-stream mux
   + 1 000 loopback nodes + 100-way concurrent mTLS fan-out). **Recorded as environment exceptions** (per the `v0.3.0`
@@ -762,12 +839,33 @@ Extends `docs/distributed_execution.md`, `docs/authentication.md`, `docs/securit
 
 ### Phase 5 — Pipelines as DAGs (10–15 days) → `v0.6.0`
 Extends `docs/system_flow.md`, `docs/pipelines.md`, `docs/architecture.md`.
-- [x] `pipeshellx pipe` with `'cmd'@placement` stages and `'|'` edges; `pipeline.yaml` for general DAGs (fan-in/fan-out, named edges); `Planner` validates acyclicity and placement. _(`pipe` (parser→Planner→run) local/all-remote/mixed/fan-in **plus `pipeline.yaml` general DAGs via `pipe --file`** — a dependency-free restricted-YAML loader (`loadPipelineYaml`) building the `Pipeline` and validating through `Planner` (acyclicity/edges/placement).)_
-- [~] Cross-node edges over `NativeTransport` (and over `SshTransport` via stdin forwarding for simple two-node cases); EOF/half-close/exit propagation; `pipefail` semantics; `--ordered` merge; `spool` sink; `--idempotent` stage flag gating retries. _(NativeTransport cross-node edges + node stdin forwarding + EOF/exit propagation + pipefail + mixed local/remote splicing (`@local`) + group fan-in (`@group`, `FanInPipeline`) + **`--ordered` merge** (`OrderedSink`, host-sorted at run end) + **`spool` sink** (`SpoolBuffer` wired into `psx::stream::Stream` — overflow spills to a temp file, lossless FIFO replay) + **`--idempotent`** retry-gating done. **Remaining:** SshTransport two-node (needs sshd, env-blocked), cross-stream backpressure.)_
-- [x] `ConsensusEngine` as a reduce sink (`diff` subcommand, `--consensus`); `--canary`, `--fail-fast`. _(`ConsensusEngine` (`psx::sink::consensus` — majority-first, outliers) + `pipeshellx diff` (exit 0 unanimous / 1 drift / 2 host failure) **plus the `--consensus` run flag** (`ConsensusSink`, human/JSON at run end), **`--canary N|N%`** staged rollout (`CanaryController`), and **`--fail-fast`** on both the SSH orchestrator and the native backplane (per-host controllers cancel siblings on the first final failure).)_
+- [x] `pipeshellx pipe` with `'cmd'@placement` stages and
+  `|` edges; restricted `pipeline.yaml` via
+  `pipe --file`; `Planner` validates identifiers, edges,
+  acyclicity, and placement. All-local files execute as true declared DAGs,
+  including fan-in/fan-out and bounded per-edge backpressure.
+- [~] Cross-node edges over `NativeTransport` with stdin forwarding,
+  EOF/half-close/exit propagation, pipefail, mixed `@local` segments,
+  and first-stage group fan-in. **Current boundary:** every graph containing a
+  remote stage must be exactly one declared chain; non-linear remote DAGs fail
+  explicitly. SSH cross-node edges and general cross-stream remote-DAG
+  backpressure remain open. `--ordered`, lossless `spool`
+  capture, and `--idempotent` retry gating exist on the `run`
+  path.
+- [x] `ConsensusEngine`, `diff`,
+  `run --consensus`, native `--canary N|N%`, and
+  `--fail-fast`. `diff` compares exact stdout only; stderr
+  is excluded, a nonzero remote exit is a host failure, and its exit contract
+  is 0 unanimous / 1 drift / 2 host or usage/configuration failure.
 - [ ] `splice()` fast path on Linux for pipe↔socket edges.
-- [ ] Tests: DAG property tests (every stage reaches a terminal state; no stream left open); end-to-end reference architectures from §5 as integration scenarios.
-- **Exit criteria:** §5.1–5.3 scenarios run from the documented command lines on all three platforms.
+- [~] Tests: local declared-edge order, fan-in/fan-out, bounded slow-consumer
+  behavior, terminal/reap lifecycle, deterministic pipefail, linear
+  local/native placement, and exact remote non-linearity rejection are covered.
+  The full §5 reference scenarios on all three platforms are not.
+- **Exit criteria:** **open**. The v0.6 implementation is validated on the
+  POSIX scope; Windows, non-linear remote DAGs, SSH cross-node edges, and the
+  complete §5.1–5.3 integration fleet remain deferred. The version is present
+  in the build, but a `v0.6.0` tag/release has not been published.
 
 ### Phase 6 — Isolation, limits, and hardening (8–12 days) → `v0.7.0`
 Extends `docs/security.md`, `docs/process_management.md`, `docs/deployment.md`.
@@ -826,12 +924,15 @@ second contributor).
 - **Regression policy:** a nightly result worse than the last tagged release by > 10 % on any
   target fails the build; numbers per platform are committed with the release tag.
 
-### 7.3 Operational metrics exported at runtime
+### 7.3 Target operational metrics (not a v0.6 CLI contract)
 
 `stages_active`, `stages_total{state}`, `handles_open`, `bytes_{in,out}{transport}`,
 `window_stalls_total`, `drops_total{policy}`, `retries_total{reason}`, `heartbeat_rtt_seconds`,
-`spawn_latency_seconds` (histogram), `run_duration_seconds`, `nodes{state}`. Exposed by
-`pipeshellx node --metrics` (Prometheus text) and in the `--json` run summary.
+`spawn_latency_seconds` (histogram), `run_duration_seconds`,
+`nodes{state}`. A future Prometheus endpoint and expanded JSON
+summary will expose these. v0.6 exposes only
+`accepted_total`/`active_connections`/`active_stages`
+through the node's local `--control` socket.
 
 ---
 
@@ -848,20 +949,35 @@ none of them stream a pipe between two remote hosts with backpressure.
 **CLI surface (authoritative form lives in `docs/pipelines.md` from Phase 2):**
 
 ```text
-pipeshellx run   [-i inventory] [-g group|-t tag] [-H h1,h2] [-c N] [--transport ssh|native]
-                 [--timeout S] [--deadline S] [--retries N] [--stream|--group|--json]
-                 [--consensus] [--fail-fast] [--canary N%] [--policy FILE] -- <command...>
-pipeshellx pipe  [selectors/options] '<cmd>'@<placement> '|' '<cmd>'@<placement> ...   # or -f pipeline.yaml
-pipeshellx diff  [selectors] -- <command...>          # consensus shortcut
-pipeshellx ping  [selectors]                          # connectivity + latency
-pipeshellx hosts add|remove|list|import clients.txt   # inventory
-pipeshellx shell                                      # REPL (today's mode)
-pipeshellx node  [--listen ADDR] [install|enroll|status]   # native agent
-pipeshellx ca    init|issue|revoke                    # offline CA
+pipeshellx run  [-i FILE] [-g GROUP|-t TAG|-H h1,h2]
+                [--stream|--group|--json|--consensus] [--ordered]
+                [-c N] [--timeout S] [--overflow P] [--ring SIZE]
+                [--policy FILE] [--reuse] [--retries N --idempotent]
+                [--fail-fast] [--shell S] [--audit-log FILE]
+                [--transport ssh|native]
+                [--cert F --key F --ca F [--crl F] [--native-port P]]
+                [--canary N|N%] -- <command...>
+pipeshellx ping  [-i FILE] [-g GROUP|-t TAG|-H h1,h2] [--timeout S]
+pipeshellx diff  [--json] [-i F] [-g G|-t T|-H h1,h2]
+                 --cert F --key F --ca F [--native-port P] -- <command...>
+pipeshellx pipe  [--check] [--file FILE | "'cmd'@place | ..."]
+                 [-i F --cert F --key F --ca F] [--native-port P]
+pipeshellx hosts [list] [-i FILE]
+pipeshellx hosts add HOST [-g GROUP] [host options] -i FILE
+pipeshellx hosts remove HOST -i FILE
+pipeshellx hosts import clients.txt -i FILE
+pipeshellx ca    init|issue|revoke|sign ...
+pipeshellx node  --cert F --key F --ca F --listen HOST:PORT
+                 [--allow SANs] [--crl F] [--policy F] [--control PATH]
+pipeshellx node  keygen|systemd-unit|launchd-plist|status ...
+pipeshellx shell [--verbose] [--log-file PATH]
 ```
 
-Inventory (INI): `[web]` / `web1.example.com user=deploy port=2222 tags=prod transport=native`.
-Config precedence: flags > env (`PIPESHELLX_*`) > project file > user file.
+Inventory (INI): `[web]` /
+`web1.example.com user=deploy port=2222 tag=prod transport=native`.
+Inventory precedence: explicit `-i` >
+`PIPESHELLX_INVENTORY` > project `inventory.ini` > project
+legacy `clients.txt` > user config `inventory.ini`.
 
 **IP & legal:** Apache-2.0 (express patent grant). Parallel SSH fan-out has decades of prior
 art and the repo is public — do not budget around patents; if a genuinely novel mechanism emerges
@@ -885,5 +1001,6 @@ bugs; 90 days — packaged in Homebrew/winget, 5+ independent write-ups; qualita
 
 ---
 
-*Maintained by Rushikesh Patil · Apache-2.0 · Baseline verified against commit `2e10869`
-on 2026-08-22. Update this plan in the same PR as any scope change.*
+*Maintained by Rushikesh Patil · Apache-2.0 · Historical baseline verified
+against commit `2e10869` on 2026-08-22; v0.6 truth audit updated
+2026-08-30. Update this plan in the same PR as any scope change.*

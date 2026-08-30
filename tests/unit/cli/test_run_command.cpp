@@ -5,6 +5,7 @@
 #include "psx/stream/bounded_buffer.hpp"
 
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 using psx::cli::parseRun;
@@ -83,6 +84,10 @@ TEST(ParseRunTest, PolicyAndRingFlags) {
     EXPECT_THROW(static_cast<void>(psx::cli::parseRun({"--overflow", "nope", "--", "id"})), std::runtime_error);
     EXPECT_THROW(static_cast<void>(psx::cli::parseRun({"--ring", "1XB", "--", "id"})), std::runtime_error);
     EXPECT_THROW(static_cast<void>(psx::cli::parseRun({"--ring", "big", "--", "id"})), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(psx::cli::parseRun({"--ring", "999999999999999999999999999999", "--", "id"})),
+                 std::runtime_error);
+    EXPECT_THROW(static_cast<void>(psx::cli::parseRun({"--ring", "18446744073709551615G", "--", "id"})),
+                 std::runtime_error);
 }
 
 TEST(ParseRunTest, ConcurrencyFlag) {
@@ -100,16 +105,50 @@ TEST(ParseRunTest, PolicyFileFlag) {
 }
 
 TEST(ParseRunTest, TransportNativeAndItsFlags) {
-    EXPECT_FALSE(psx::cli::parseRun({"--", "id"}).native);
-    EXPECT_FALSE(psx::cli::parseRun({"--transport", "ssh", "--", "id"}).native);
+    const auto defaultTransport = psx::cli::parseRun({"--", "id"});
+    EXPECT_FALSE(defaultTransport.native);
+    EXPECT_FALSE(defaultTransport.transportExplicit);
+    const auto ssh = psx::cli::parseRun({"--transport", "ssh", "--", "id"});
+    EXPECT_FALSE(ssh.native);
+    EXPECT_TRUE(ssh.transportExplicit);
     const auto n = psx::cli::parseRun(
         {"--transport", "native", "--cert", "c", "--key", "k", "--ca", "a", "--native-port", "9000", "--", "id"});
     EXPECT_TRUE(n.native);
+    EXPECT_TRUE(n.transportExplicit);
     EXPECT_EQ(n.certPath, "c");
     EXPECT_EQ(n.keyPath, "k");
     EXPECT_EQ(n.caPath, "a");
     EXPECT_EQ(n.nativePort, 9000);
     EXPECT_THROW(psx::cli::parseRun({"--transport", "bogus", "--", "id"}), psx::cli::CliError);
+}
+
+TEST(ParseRunTest, NativeRejectsSshOnlyExecutionOptions) {
+    const std::vector<std::vector<std::string>> cases = {
+        {"--transport", "native", "--reuse", "--", "id"},
+        {"--reuse", "--transport", "native", "--", "id"},
+        {"--transport", "native", "--idempotent", "--", "id"},
+        {"--transport", "native", "--retries", "0", "--", "id"},
+        {"--transport", "native", "--retries", "2", "--", "id"},
+        {"--transport", "native", "--shell", "posix", "--", "id"},
+        {"--shell", "cmd", "--transport", "native", "--", "id"},
+    };
+    for (const auto& args : cases) {
+        EXPECT_THROW(static_cast<void>(parseRun(args)), psx::cli::CliError);
+    }
+}
+
+TEST(ParseRunTest, ExplicitSshRejectsNativeOnlyExecutionOptions) {
+    const std::vector<std::vector<std::string>> cases = {
+        {"--transport", "ssh", "--canary", "1", "--", "id"},
+        {"--transport", "ssh", "--cert", "c", "--", "id"},
+        {"--transport", "ssh", "--key", "k", "--", "id"},
+        {"--transport", "ssh", "--ca", "a", "--", "id"},
+        {"--transport", "ssh", "--crl", "r", "--", "id"},
+        {"--transport", "ssh", "--native-port", "7433", "--", "id"},
+    };
+    for (const auto& args : cases) {
+        EXPECT_THROW(static_cast<void>(parseRun(args)), psx::cli::CliError);
+    }
 }
 
 TEST(ParseRunTest, ShellSelectsTheRemoteQuoting) {
@@ -152,8 +191,11 @@ TEST(ParseRunTest, LongFormSelectorsAlsoWork) {
 // ---- end-to-end: runSubcommand over a fake ssh + an inventory file ----
 
 #include "psx/cli/hosts_command.hpp"
+#include "psx/cli/selection.hpp"
 #include "test_support.hpp"
 
+#include <filesystem>
+#include <fstream>
 #include <sstream>
 
 TEST(RunSubcommandTest, RunsTheCommandOnSelectedHostsAndRendersGroup) {
@@ -181,6 +223,30 @@ TEST(RunSubcommandTest, RunsTheCommandOnSelectedHostsAndRendersGroup) {
     EXPECT_EQ(out.str().find("carol"), std::string::npos) << "db host must not run";
 }
 
+TEST(RunSubcommandTest, BufferedJsonRendersOnlyTheDropPolicyCapture) {
+    test_support::ScopedTempCwd cwd("run-bounded-json");
+    test_support::FakeSshOnPath fakeSsh;
+    {
+        std::ofstream ini("fleet.ini");
+        ini << "[all]\nh1 user=alice\n";
+    }
+
+    psx::cli::RunInvocation inv;
+    inv.inventoryPath = "fleet.ini";
+    inv.sink = psx::cli::SinkMode::Json;
+    inv.policy = psx::stream::OverflowPolicy::DropOldest;
+    inv.ringBytes = 4;
+    inv.command = {"big"};
+
+    std::ostringstream out;
+    std::ostringstream err;
+    ASSERT_EQ(psx::cli::runSubcommand(inv, out, err, false), 0) << err.str();
+    EXPECT_NE(out.str().find("\"stdout\":\"oooo\""), std::string::npos) << out.str();
+    EXPECT_NE(out.str().find("\"stderr\":\"eeee\""), std::string::npos) << out.str();
+    EXPECT_NE(out.str().find("\"dropped\":299992"), std::string::npos) << out.str();
+    EXPECT_LT(out.str().size(), 1024U) << "the buffering sink retained raw output outside the ring";
+}
+
 TEST(RunSubcommandTest, NoHostsSelectedIsExitCode3) {
     test_support::ScopedTempCwd cwd("run-none");
     test_support::FakeSshOnPath fakeSsh;
@@ -206,6 +272,130 @@ TEST(RunSubcommandTest, MissingInventoryIsExitCode2) {
     EXPECT_NE(err.str().find("no inventory"), std::string::npos) << err.str();
 }
 
+TEST(RunSubcommandTest, NativeRejectsSshOnlyOptionsBeforeInventoryLookup) {
+    psx::cli::RunInvocation inv;
+    inv.native = true;
+    inv.reuse = true;
+    inv.command = {"id"};
+
+    std::ostringstream out, err;
+    EXPECT_EQ(psx::cli::runSubcommand(inv, out, err, false), 2);
+    EXPECT_NE(err.str().find("--reuse"), std::string::npos) << err.str();
+    EXPECT_NE(err.str().find("ssh"), std::string::npos) << err.str();
+    EXPECT_EQ(err.str().find("inventory"), std::string::npos) << err.str();
+}
+
+TEST(RunSubcommandTest, InventoryTransportIsHonoredAndMixedSelectionRequiresOverride) {
+    test_support::ScopedTempCwd cwd("run-inventory-transport");
+    test_support::FakeSshOnPath fakeSsh;
+    {
+        std::ofstream inventory("native.ini");
+        inventory << "[all]\nnode-1 transport=native\n";
+    }
+    {
+        std::ofstream inventory("mixed.ini");
+        inventory << "[all]\nnode-1 transport=ssh\nnode-2 transport=native\n";
+    }
+
+    psx::cli::RunInvocation fromInventory;
+    fromInventory.inventoryPath = "native.ini";
+    fromInventory.command = {"ok"};
+    std::ostringstream nativeOut, nativeErr;
+    EXPECT_EQ(psx::cli::runSubcommand(fromInventory, nativeOut, nativeErr, false), 2);
+#if defined(PIPESHELLX_HAVE_TLS)
+    EXPECT_NE(nativeErr.str().find("requires --cert"), std::string::npos) << nativeErr.str();
+#else
+    EXPECT_NE(nativeErr.str().find("no native transport support"), std::string::npos) << nativeErr.str();
+#endif
+
+    fromInventory.inventoryPath = "mixed.ini";
+    std::ostringstream mixedOut, mixedErr;
+    EXPECT_EQ(psx::cli::runSubcommand(fromInventory, mixedOut, mixedErr, false), 2);
+    EXPECT_NE(mixedErr.str().find("mixed ssh/native"), std::string::npos) << mixedErr.str();
+    EXPECT_NE(mixedErr.str().find("--transport"), std::string::npos) << mixedErr.str();
+}
+
+TEST(RunSubcommandTest, ExplicitTransportOverridesInventoryPreference) {
+    test_support::ScopedTempCwd cwd("run-inventory-transport-override");
+    test_support::FakeSshOnPath fakeSsh;
+    {
+        std::ofstream inventory("native.ini");
+        inventory << "[all]\nnode-1 transport=native\n";
+    }
+    {
+        std::ofstream inventory("ssh.ini");
+        inventory << "[all]\nnode-1 transport=ssh\n";
+    }
+
+    psx::cli::RunInvocation forceSsh;
+    forceSsh.inventoryPath = "native.ini";
+    forceSsh.transportExplicit = true;
+    forceSsh.native = false;
+    forceSsh.command = {"ok"};
+    std::ostringstream sshOut, sshErr;
+    EXPECT_EQ(psx::cli::runSubcommand(forceSsh, sshOut, sshErr, false), 0) << sshErr.str();
+
+    psx::cli::RunInvocation forceNative;
+    forceNative.inventoryPath = "ssh.ini";
+    forceNative.transportExplicit = true;
+    forceNative.native = true;
+    forceNative.command = {"ok"};
+    std::ostringstream nativeOut, nativeErr;
+    EXPECT_EQ(psx::cli::runSubcommand(forceNative, nativeOut, nativeErr, false), 2);
+#if defined(PIPESHELLX_HAVE_TLS)
+    EXPECT_NE(nativeErr.str().find("requires --cert"), std::string::npos) << nativeErr.str();
+#else
+    EXPECT_NE(nativeErr.str().find("no native transport support"), std::string::npos) << nativeErr.str();
+#endif
+}
+
+TEST(RunSubcommandTest, InventoryDerivedNativeRejectsExplicitDefaultSshOptions) {
+    test_support::ScopedTempCwd cwd("run-inventory-native-ssh-options");
+    {
+        std::ofstream inventory("fleet.ini");
+        inventory << "[all]\nnode-1 transport=native\n";
+    }
+
+    const std::vector<std::pair<std::vector<std::string>, std::string>> cases = {
+        {{"-i", "fleet.ini", "--retries", "0", "--", "id"}, "--retries"},
+        {{"-i", "fleet.ini", "--shell", "posix", "--", "id"}, "--shell"},
+    };
+    for (const auto& [args, flag] : cases) {
+        const auto invocation = parseRun(args);
+        std::ostringstream out, err;
+        EXPECT_EQ(psx::cli::runSubcommand(invocation, out, err, false), 2) << flag;
+        EXPECT_NE(err.str().find(flag), std::string::npos) << err.str();
+        EXPECT_NE(err.str().find("transport ssh"), std::string::npos) << err.str();
+        EXPECT_EQ(err.str().find("requires --cert"), std::string::npos) << err.str();
+    }
+}
+
+TEST(RunSubcommandTest, InventoryDerivedSshRejectsNativeOnlyOptions) {
+    test_support::ScopedTempCwd cwd("run-inventory-ssh-native-options");
+    test_support::FakeSshOnPath fakeSsh;
+    {
+        std::ofstream inventory("fleet.ini");
+        inventory << "[all]\nnode-1 transport=ssh\n";
+    }
+
+    const std::vector<std::pair<std::vector<std::string>, std::string>> cases = {
+        {{"-i", "fleet.ini", "--canary", "1", "--", "ok"}, "--canary"},
+        {{"-i", "fleet.ini", "--cert", "c", "--", "ok"}, "--cert"},
+        {{"-i", "fleet.ini", "--key", "k", "--", "ok"}, "--key"},
+        {{"-i", "fleet.ini", "--ca", "a", "--", "ok"}, "--ca"},
+        {{"-i", "fleet.ini", "--crl", "r", "--", "ok"}, "--crl"},
+        {{"-i", "fleet.ini", "--native-port", "7433", "--", "ok"}, "--native-port"},
+    };
+    for (const auto& [args, flag] : cases) {
+        const auto invocation = parseRun(args);
+        std::ostringstream out, err;
+        EXPECT_EQ(psx::cli::runSubcommand(invocation, out, err, false), 2) << flag;
+        EXPECT_NE(err.str().find(flag), std::string::npos) << err.str();
+        EXPECT_NE(err.str().find("transport native"), std::string::npos) << err.str();
+        EXPECT_TRUE(out.str().empty());
+    }
+}
+
 TEST(HostsSubcommandTest, ListsHostsWithGroupsAndTags) {
     test_support::ScopedTempCwd cwd("hosts-e2e");
     {
@@ -220,6 +410,196 @@ TEST(HostsSubcommandTest, ListsHostsWithGroupsAndTags) {
     EXPECT_NE(out.str().find("web"), std::string::npos) << out.str();
     EXPECT_NE(out.str().find("db"), std::string::npos) << out.str();
     EXPECT_NE(out.str().find("canary"), std::string::npos) << out.str();
+    EXPECT_NE(out.str().find("HOST\tGROUPS\tTAGS\tTRANSPORT"), std::string::npos) << out.str();
+}
+
+TEST(InventoryResolutionTest, HonorsFlagEnvironmentProjectLegacyAndUserPrecedence) {
+    test_support::ScopedTempCwd cwd("inventory-precedence");
+    const auto userConfig = cwd.path() / "config" / "pipeshellx";
+    std::filesystem::create_directories(userConfig);
+
+    auto writeInventory = [](const std::filesystem::path& path, const std::string& host) {
+        std::ofstream file(path);
+        file << "[all]\n" << host << "\n";
+    };
+    auto resolvedHost = [](const std::string& explicitPath) {
+        std::ostringstream err;
+        const auto resolved = psx::cli::resolveHosts(explicitPath, {}, err);
+        EXPECT_TRUE(resolved.ok()) << err.str();
+        EXPECT_EQ(resolved.clients.size(), 1U) << err.str();
+        return resolved;
+    };
+
+    writeInventory(userConfig / "inventory.ini", "user-host");
+    writeInventory("inventory.ini", "project-host");
+    writeInventory("env.ini", "env-host");
+    writeInventory("flag.ini", "flag-host");
+    {
+        std::ofstream legacy("clients.txt");
+        legacy << "legacy@legacy-host\n";
+    }
+
+    test_support::ScopedEnv xdg("XDG_CONFIG_HOME", (cwd.path() / "config").string());
+    {
+        test_support::ScopedEnv env("PIPESHELLX_INVENTORY", std::string("env.ini"));
+        const auto fromFlag = resolvedHost("flag.ini");
+        EXPECT_EQ(fromFlag.inventoryPath, "flag.ini");
+        EXPECT_EQ(fromFlag.clients.front().host, "flag-host");
+
+        const auto fromEnv = resolvedHost("");
+        EXPECT_EQ(fromEnv.inventoryPath, "env.ini");
+        EXPECT_EQ(fromEnv.clients.front().host, "env-host");
+    }
+
+    test_support::ScopedEnv noEnv("PIPESHELLX_INVENTORY", std::nullopt);
+    const auto fromProject = resolvedHost("");
+    EXPECT_EQ(fromProject.inventoryPath, "inventory.ini");
+    EXPECT_EQ(fromProject.clients.front().host, "project-host");
+
+    std::filesystem::remove("inventory.ini");
+    const auto fromLegacy = resolvedHost("");
+    EXPECT_EQ(fromLegacy.inventoryPath, "clients.txt");
+    EXPECT_EQ(fromLegacy.clients.front().host, "legacy-host");
+
+    std::filesystem::remove("clients.txt");
+    const auto fromUser = resolvedHost("");
+    EXPECT_EQ(fromUser.inventoryPath, (userConfig / "inventory.ini").string());
+    EXPECT_EQ(fromUser.clients.front().host, "user-host");
+}
+
+TEST(HostsSubcommandTest, AddRequiresExplicitInventoryAndRejectsDuplicatesWithoutRewriting) {
+    test_support::ScopedTempCwd cwd("hosts-add");
+    std::ostringstream out;
+    std::ostringstream err;
+
+    EXPECT_EQ(psx::cli::hostsSubcommand(std::vector<std::string>{"add", "node-1"}, out, err), 2);
+    EXPECT_NE(err.str().find("explicit -i FILE"), std::string::npos) << err.str();
+    EXPECT_FALSE(std::filesystem::exists("inventory.ini"));
+
+    out.str({});
+    err.str({});
+    EXPECT_EQ(psx::cli::hostsSubcommand(std::vector<std::string>{"add", "alice:plaintext@node-1", "-i", "fleet.ini"},
+                                        out, err),
+              2);
+    EXPECT_NE(err.str().find("user:password"), std::string::npos) << err.str();
+    EXPECT_FALSE(std::filesystem::exists("fleet.ini"));
+
+    out.str({});
+    err.str({});
+    EXPECT_EQ(psx::cli::hostsSubcommand(std::vector<std::string>{"add", "node-1", "-i", "clients.txt"}, out, err), 2);
+    EXPECT_NE(err.str().find("legacy import source"), std::string::npos) << err.str();
+    EXPECT_FALSE(std::filesystem::exists("clients.txt"));
+
+    out.str({});
+    err.str({});
+    EXPECT_EQ(psx::cli::hostsSubcommand(std::vector<std::string>{"add", "node-1", "--group", "web", "--user", "deploy",
+                                                                 "--transport", "native", "--native-port", "7433", "-i",
+                                                                 "fleet.ini"},
+                                        out, err),
+              0)
+        << err.str();
+    const auto added = psx::inventory::Inventory::loadFromFile("fleet.ini");
+    ASSERT_EQ(added.hosts().size(), 1U);
+    EXPECT_EQ(added.hosts().front().name, "node-1");
+    EXPECT_EQ(added.hosts().front().user, "deploy");
+    EXPECT_EQ(added.hosts().front().transport, "native");
+    EXPECT_EQ(added.hosts().front().nativePort, 7433);
+    EXPECT_EQ(added.hosts().front().groups, (std::vector<std::string>{"web"}));
+
+    std::ifstream beforeFile("fleet.ini");
+    const std::string before((std::istreambuf_iterator<char>(beforeFile)), std::istreambuf_iterator<char>());
+    out.str({});
+    err.str({});
+    EXPECT_EQ(psx::cli::hostsSubcommand(std::vector<std::string>{"-i", "fleet.ini", "add", "node-1"}, out, err), 2);
+    EXPECT_NE(err.str().find("already exists"), std::string::npos) << err.str();
+    std::ifstream afterFile("fleet.ini");
+    const std::string after((std::istreambuf_iterator<char>(afterFile)), std::istreambuf_iterator<char>());
+    EXPECT_EQ(after, before);
+}
+
+TEST(HostsSubcommandTest, RemoveIsAtomicAndAMissingHostLeavesTheInventoryUnchanged) {
+    test_support::ScopedTempCwd cwd("hosts-remove");
+    {
+        std::ofstream inventory("fleet.ini");
+        inventory << "[web]\nnode-1\nnode-2 transport=native\n";
+    }
+
+    std::ostringstream out;
+    std::ostringstream err;
+    EXPECT_EQ(psx::cli::hostsSubcommand(std::vector<std::string>{"remove", "node-1", "-i", "fleet.ini"}, out, err), 0)
+        << err.str();
+    const auto remaining = psx::inventory::Inventory::loadFromFile("fleet.ini");
+    ASSERT_EQ(remaining.hosts().size(), 1U);
+    EXPECT_EQ(remaining.hosts().front().name, "node-2");
+
+    std::ifstream beforeFile("fleet.ini");
+    const std::string before((std::istreambuf_iterator<char>(beforeFile)), std::istreambuf_iterator<char>());
+    out.str({});
+    err.str({});
+    EXPECT_EQ(psx::cli::hostsSubcommand(std::vector<std::string>{"remove", "missing", "-i", "fleet.ini"}, out, err), 2);
+    EXPECT_NE(err.str().find("not found"), std::string::npos) << err.str();
+    std::ifstream afterFile("fleet.ini");
+    const std::string after((std::istreambuf_iterator<char>(afterFile)), std::istreambuf_iterator<char>());
+    EXPECT_EQ(after, before);
+}
+
+TEST(HostsSubcommandTest, ImportStripsSecretsAndRejectsDuplicatesAsOneAtomicOperation) {
+    test_support::ScopedTempCwd cwd("hosts-import");
+    {
+        std::ofstream inventory("fleet.ini");
+        inventory << "[existing]\nalready-here\n";
+    }
+    {
+        std::ofstream clients("clients.txt");
+        clients << "alice@node-1\nssh://bob@node-2:2222?password=do-not-write-me\n";
+    }
+
+    std::ostringstream out;
+    std::ostringstream err;
+    EXPECT_EQ(psx::cli::hostsSubcommand(std::vector<std::string>{"import", "clients.txt", "-i", "fleet.ini"}, out, err),
+              0)
+        << err.str();
+    std::ifstream importedFile("fleet.ini");
+    const std::string imported((std::istreambuf_iterator<char>(importedFile)), std::istreambuf_iterator<char>());
+    EXPECT_NE(imported.find("node-1"), std::string::npos) << imported;
+    EXPECT_NE(imported.find("node-2"), std::string::npos) << imported;
+    EXPECT_EQ(imported.find("password"), std::string::npos) << imported;
+    EXPECT_EQ(imported.find("do-not-write-me"), std::string::npos) << imported;
+
+    out.str({});
+    err.str({});
+    EXPECT_EQ(psx::cli::hostsSubcommand(std::vector<std::string>{"import", "clients.txt", "-i", "fleet.ini"}, out, err),
+              2);
+    EXPECT_NE(err.str().find("already exists"), std::string::npos) << err.str();
+    std::ifstream afterFile("fleet.ini");
+    const std::string after((std::istreambuf_iterator<char>(afterFile)), std::istreambuf_iterator<char>());
+    EXPECT_EQ(after, imported);
+}
+
+TEST(HostsSubcommandTest, InvalidGrammarAndUnsafeValuesReturnClearUsageErrors) {
+    test_support::ScopedTempCwd cwd("hosts-invalid");
+    struct InvalidCase {
+        std::vector<std::string> args;
+        std::string diagnostic;
+    };
+    const std::vector<InvalidCase> cases = {
+        {{"unknown"}, "unknown action"},
+        {{"list", "extra"}, "does not accept"},
+        {{"-i"}, "requires a value"},
+        {{"add", "node-1", "--transport", "telnet", "-i", "fleet.ini"}, "ssh or native"},
+        {{"add", "node-1", "password=plaintext", "-i", "fleet.ini"}, "secret option"},
+        {{"remove", "node-1", "extra", "-i", "fleet.ini"}, "exactly one HOST"},
+        {{"import", "same.ini", "-i", "same.ini"}, "different files"},
+    };
+    for (const auto& testCase : cases) {
+        std::ostringstream out;
+        std::ostringstream err;
+        EXPECT_EQ(psx::cli::hostsSubcommand(testCase.args, out, err), 2);
+        EXPECT_TRUE(out.str().empty());
+        EXPECT_NE(err.str().find(testCase.diagnostic), std::string::npos)
+            << "diagnostic for case " << testCase.diagnostic << ": " << err.str();
+    }
+    EXPECT_FALSE(std::filesystem::exists("fleet.ini"));
 }
 
 TEST(RunSubcommandTest, PolicyFileRestrictsTheCommand) {
@@ -266,6 +646,12 @@ TEST(ParseRunTest, CanaryFlagCarriesTheSpecVerbatim) {
     EXPECT_EQ(parseRun({"--canary", "10%", "--", "id"}).canary, "10%");
 }
 
+TEST(ParseRunTest, CanaryRejectsMalformedOrNonPositiveSpecs) {
+    for (const std::string& value : {"", "0", "0%", "-1", "-5%", "abc", "1.5", "10%%", "%", "2x"}) {
+        EXPECT_THROW(static_cast<void>(parseRun({"--canary", value, "--", "id"})), psx::cli::CliError) << value;
+    }
+}
+
 TEST(CanaryCountTest, CountsAndPercentagesClampIntoRange) {
     using psx::cli::canaryCount;
     // An explicit count, clamped to [1, total].
@@ -282,3 +668,183 @@ TEST(CanaryCountTest, CountsAndPercentagesClampIntoRange) {
     // No hosts -> no canaries, regardless of spec.
     EXPECT_EQ(canaryCount("50%", 0), 0U);
 }
+
+#if defined(PIPESHELLX_HAVE_TLS)
+
+#include "psx/ca/certificate_authority.hpp"
+#include "psx/os/socket.hpp"
+#include "psx/runtime/reactor.hpp"
+#include "psx/transport/node_server.hpp"
+
+#include <chrono>
+#include <csignal>
+#include <iterator>
+#include <pthread.h>
+#include <thread>
+
+namespace {
+
+class NativeRunServer {
+public:
+    NativeRunServer() {
+        auto ca = psx::ca::CertificateAuthority::create("native-run-test");
+        if (!ca.ok()) {
+            throw std::runtime_error(ca.error().message());
+        }
+        auto node = ca.value().issue("psx://node/1");
+        auto controller = ca.value().issue("psx://controller");
+        if (!node.ok() || !controller.ok()) {
+            throw std::runtime_error("could not issue native-run test identities");
+        }
+        caPem_ = ca.value().certificatePem();
+        controllerCert_ = std::move(controller.value().certificatePem);
+        controllerKey_ = std::move(controller.value().privateKeyPem);
+
+        auto listener = psx::os::Socket::listen("127.0.0.1", 0);
+        if (!listener.ok()) {
+            throw std::runtime_error(listener.error().message());
+        }
+        auto localPort = listener.value().localPort();
+        if (!localPort.ok()) {
+            throw std::runtime_error(localPort.error().message());
+        }
+        port_ = localPort.value();
+
+        auto reactor = psx::runtime::Reactor::create();
+        if (!reactor.ok()) {
+            throw std::runtime_error(reactor.error().message());
+        }
+        reactor_ = std::move(reactor.value());
+        server_ = std::make_unique<psx::transport::NodeServer>(
+            *reactor_, std::move(listener.value()),
+            psx::os::TlsConfig{.certificatePem = node.value().certificatePem,
+                               .privateKeyPem = node.value().privateKeyPem,
+                               .caPem = caPem_,
+                               .crlPem = {},
+                               .isServer = true},
+            [](std::string_view san) { return san == "psx://controller"; });
+        if (auto started = server_->start(); !started.ok()) {
+            throw std::runtime_error(started.error().message());
+        }
+
+        writeFile("controller.crt", controllerCert_);
+        writeFile("controller.key", controllerKey_);
+        writeFile("ca.crt", caPem_);
+        std::ofstream inventory("fleet.ini");
+        inventory << "[all]\n127.0.0.1 san=psx://node/1 native_port=" << port_ << "\n";
+
+        thread_ = std::thread([this] {
+            // Linux signalfd requires every pre-existing thread to block the
+            // subscribed signals. The CLI reactor blocks them on its own thread.
+            sigset_t set;
+            sigemptyset(&set);
+            sigaddset(&set, SIGINT);
+            sigaddset(&set, SIGTERM);
+            (void)::pthread_sigmask(SIG_BLOCK, &set, nullptr);
+            (void)reactor_->run();
+        });
+    }
+
+    ~NativeRunServer() {
+        reactor_->stop();
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+    psx::cli::RunInvocation invocation(std::vector<std::string> command) const {
+        psx::cli::RunInvocation value;
+        value.inventoryPath = "fleet.ini";
+        value.native = true;
+        value.transportExplicit = true;
+        value.certPath = "controller.crt";
+        value.keyPath = "controller.key";
+        value.caPath = "ca.crt";
+        value.sink = psx::cli::SinkMode::Json;
+        value.command = std::move(command);
+        return value;
+    }
+
+private:
+    static void writeFile(const char* path, const std::string& contents) {
+        std::ofstream file(path, std::ios::binary);
+        file << contents;
+    }
+
+    std::string caPem_;
+    std::string controllerCert_;
+    std::string controllerKey_;
+    std::uint16_t port_ = 0;
+    std::unique_ptr<psx::runtime::Reactor> reactor_;
+    std::unique_ptr<psx::transport::NodeServer> server_;
+    std::thread thread_;
+};
+
+std::string readTextFile(const char* path) {
+    std::ifstream file(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+}
+
+} // namespace
+
+TEST(NativeRunSubcommandTest, ReportsBoundedLossAndWritesCompleteAuditLifecycle) {
+    test_support::ScopedTempCwd cwd("native-run-audit");
+    NativeRunServer server;
+    auto invocation = server.invocation({"/bin/sh", "-c", "printf 0123456789; printf abcdef 1>&2"});
+    invocation.policy = psx::stream::OverflowPolicy::DropOldest;
+    invocation.ringBytes = 4;
+    invocation.auditPath = "audit.jsonl";
+
+    std::ostringstream out, err;
+    EXPECT_EQ(psx::cli::runSubcommand(invocation, out, err, false), 0) << err.str();
+    EXPECT_NE(out.str().find("\"dropped\":8"), std::string::npos) << out.str();
+    EXPECT_NE(out.str().find("\"stdout\":\"6789\""), std::string::npos) << out.str();
+    EXPECT_NE(out.str().find("\"stderr\":\"cdef\""), std::string::npos) << out.str();
+    EXPECT_EQ(out.str().find("0123456789"), std::string::npos) << out.str();
+
+    const std::string audit = readTextFile("audit.jsonl");
+    EXPECT_NE(audit.find("\"event\":\"run_started\""), std::string::npos) << audit;
+    EXPECT_NE(audit.find("\"event\":\"stage_finished\""), std::string::npos) << audit;
+    EXPECT_NE(audit.find("\"dropped_bytes\":8"), std::string::npos) << audit;
+    EXPECT_NE(audit.find("\"event\":\"run_finished\""), std::string::npos) << audit;
+}
+
+TEST(NativeRunSubcommandTest, TimeoutIsVisibleInSinkAndAudit) {
+    test_support::ScopedTempCwd cwd("native-run-timeout");
+    NativeRunServer server;
+    auto invocation = server.invocation({"/bin/sh", "-c", "sleep 5"});
+    invocation.timeoutSec = 1;
+    invocation.auditPath = "audit.jsonl";
+
+    std::ostringstream out, err;
+    const auto started = std::chrono::steady_clock::now();
+    EXPECT_EQ(psx::cli::runSubcommand(invocation, out, err, false), 1) << err.str();
+    EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(4));
+    EXPECT_NE(out.str().find("\"timed_out\":true"), std::string::npos) << out.str();
+
+    const std::string audit = readTextFile("audit.jsonl");
+    EXPECT_NE(audit.find("\"timed_out\":true"), std::string::npos) << audit;
+    EXPECT_NE(audit.find("\"exit_code\":1"), std::string::npos) << audit;
+}
+
+TEST(NativeRunSubcommandTest, InterruptCancelsTheRunAndReturns130) {
+    test_support::ScopedTempCwd cwd("native-run-interrupt");
+    NativeRunServer server;
+    // The native child signals its parent (this test process) only after the
+    // controller's SignalSource is live and the stage has opened.
+    auto invocation = server.invocation({"/bin/sh", "-c", "kill -INT $PPID; sleep 5"});
+    invocation.timeoutSec = 10;
+    invocation.auditPath = "audit.jsonl";
+
+    std::ostringstream out, err;
+    const auto started = std::chrono::steady_clock::now();
+    EXPECT_EQ(psx::cli::runSubcommand(invocation, out, err, false), 130) << err.str();
+    EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(4));
+    EXPECT_NE(out.str().find("\"cancelled\":true"), std::string::npos) << out.str();
+
+    const std::string audit = readTextFile("audit.jsonl");
+    EXPECT_NE(audit.find("\"cancelled\":true"), std::string::npos) << audit;
+    EXPECT_NE(audit.find("\"exit_code\":130"), std::string::npos) << audit;
+}
+
+#endif // PIPESHELLX_HAVE_TLS

@@ -5,6 +5,7 @@
 #include "psx/cli/selection.hpp"
 #include "psx/os/system.hpp"
 
+#include <algorithm>
 #include <charconv>
 
 namespace psx::cli {
@@ -82,12 +83,22 @@ int pingSubcommand(const PingInvocation& invocation, std::ostream& out, std::ost
     if (!resolved.ok()) {
         return resolved.exitCode;
     }
+    if (std::any_of(resolved.clients.begin(), resolved.clients.end(),
+                    [](const ClientEntry& client) { return client.transport == "native"; })) {
+        err << "pipeshellx ping: transport=native hosts are not supported by ping; select SSH hosts instead\n";
+        return 2;
+    }
 
     ProcessManager manager;
-    const LogContext context{
-        .pid = psx::os::currentProcessId(), .sessionId = "ping", .clientId = "-", .command = "echo connected"};
-    const auto result =
-        manager.executeRemote(resolved.clients, "echo connected", context, {.timeoutSec = invocation.timeoutSec});
+    const LogContext context{.pid = psx::os::currentProcessId(),
+                             .sessionId = "ping",
+                             .clientId = "-",
+                             .command = "echo connected",
+                             .runId = {},
+                             .stageId = {}};
+    ProcessManager::RemoteRunOptions options;
+    options.timeoutSec = invocation.timeoutSec;
+    const auto result = manager.executeRemote(resolved.clients, "echo connected", context, options);
 
     bool anyOffline = false;
     for (const auto& client : result.clientResults) {

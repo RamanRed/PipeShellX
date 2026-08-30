@@ -1,9 +1,12 @@
 #include "psx/transport/native_controller.hpp"
 
 #include "psx/os/socket.hpp"
+#include "psx/stream/spool_buffer.hpp"
 #include "psx/transport/session.hpp"
 
+#include <algorithm>
 #include <cstdint>
+#include <span>
 #include <utility>
 
 namespace psx::transport {
@@ -11,8 +14,14 @@ namespace psx::transport {
 struct NativeController::Conn : SessionHandler {
     NativeController* owner = nullptr;
     std::size_t index = 0;
+    Target target;
     Session* session = nullptr; // bound after the transport is built (for consume/open)
     HostResult result;
+    std::string stdoutRing;
+    std::string stderrRing;
+    psx::stream::SpoolBuffer stdoutSpool;
+    psx::stream::SpoolBuffer stderrSpool;
+    bool active = false;
     bool done = false;
     std::unique_ptr<NativeTransport> transport; // declared last: destroyed first
 
@@ -20,20 +29,57 @@ struct NativeController::Conn : SessionHandler {
         if (session != nullptr) {
             session->consume(id, static_cast<std::uint32_t>(data.size())); // grant credit
         }
-        result.output.append(data);
+        if (done) {
+            return;
+        }
+        std::string& ring = channel == Channel::Stderr ? stderrRing : stdoutRing;
+        psx::stream::SpoolBuffer& spool = channel == Channel::Stderr ? stderrSpool : stdoutSpool;
+        const auto& options = owner->options_;
+        const std::size_t cap = options.policy == psx::stream::OverflowPolicy::Block ? 0 : options.ringBytes;
+        if (cap == 0) {
+            ring.append(data);
+        } else if (options.policy == psx::stream::OverflowPolicy::DropNewest) {
+            const std::size_t available = cap - ring.size();
+            const std::size_t retained = std::min(available, data.size());
+            ring.append(data.data(), retained);
+            result.droppedBytes += data.size() - retained;
+        } else {
+            const std::size_t available = cap - ring.size();
+            const std::size_t overflow = data.size() > available ? data.size() - available : 0;
+            const std::size_t fromRing = std::min(overflow, ring.size());
+            const std::size_t fromData = overflow - fromRing;
+            if (options.policy == psx::stream::OverflowPolicy::Spool) {
+                if (fromRing != 0 && !spool.append(std::string_view(ring.data(), fromRing))) {
+                    result.droppedBytes += fromRing;
+                }
+                if (fromData != 0 && !spool.append(data.substr(0, fromData))) {
+                    result.droppedBytes += fromData;
+                }
+            } else {
+                result.droppedBytes += overflow;
+            }
+            ring.erase(0, fromRing);
+            ring.append(data.substr(fromData));
+        }
         if (owner->onOutput_) {
             owner->onOutput_(result.host, data, channel);
         }
     }
     void onExit(StreamId /*id*/, const psx::os::ExitStatus& status) override {
+        if (done) {
+            return;
+        }
         result.ok = true;
         result.exitCode = (status.kind == psx::os::ExitStatus::Kind::Exited) ? status.code : -1;
         finish();
     }
-    void fail(const std::string& message) {
+    void fail(const std::string& message, CancelKind kind = CancelKind::Other) {
         if (!done) {
             result.error = message;
             result.ok = false;
+            result.timedOut = kind == CancelKind::Timeout;
+            result.cancelled = kind == CancelKind::Interrupt;
+            result.aborted = kind == CancelKind::FailFast;
         }
         finish();
     }
@@ -41,6 +87,9 @@ struct NativeController::Conn : SessionHandler {
         if (done) {
             return;
         }
+        result.stdoutData = stdoutSpool.empty() ? std::move(stdoutRing) : stdoutSpool.readAll() + stdoutRing;
+        result.stderrData = stderrSpool.empty() ? std::move(stderrRing) : stderrSpool.readAll() + stderrRing;
+        result.output = result.stdoutData + result.stderrData;
         done = true;
         owner->onConnDone(index);
     }
@@ -53,14 +102,52 @@ NativeController::NativeController(psx::runtime::Reactor& reactor,
     config_.isServer = false;
 }
 
-NativeController::~NativeController() = default;
+NativeController::~NativeController() {
+    for (const auto timer : retireTimers_) {
+        reactor_.cancel(timer);
+    }
+}
 
 psx::Result<void> NativeController::start(const std::vector<Target>& targets,
                                           const std::vector<std::string>& command,
                                           std::function<void(std::vector<HostResult>)> onComplete) {
+    return start(targets, command, std::move(onComplete), Options{});
+}
+
+psx::Result<void> NativeController::start(const std::vector<Target>& targets,
+                                          const std::vector<std::string>& command,
+                                          std::function<void(std::vector<HostResult>)> onComplete,
+                                          Options options) {
+    if (started_) {
+        return psx::Error{psx::ErrorClass::InvalidArgument, 0, "native_controller.start.already_started"};
+    }
+    if (command.empty() || command.front().empty()) {
+        return psx::Error{psx::ErrorClass::InvalidArgument, 0, "native_controller.start.command"};
+    }
+    for (const auto& target : targets) {
+        if (target.host.empty() || target.port == 0) {
+            return psx::Error{psx::ErrorClass::InvalidArgument, 0, "native_controller.start.target"};
+        }
+    }
+    switch (options.policy) {
+        case psx::stream::OverflowPolicy::Block:
+        case psx::stream::OverflowPolicy::DropNewest:
+        case psx::stream::OverflowPolicy::DropOldest:
+        case psx::stream::OverflowPolicy::Spool:
+            break;
+        default:
+            return psx::Error{psx::ErrorClass::InvalidArgument, 0, "native_controller.start.overflow_policy"};
+    }
+    started_ = true;
     command_ = command;
     onComplete_ = std::move(onComplete);
+    options_ = options;
+    nextToStart_ = 0;
+    active_ = 0;
     remaining_ = targets.size();
+    filling_ = false;
+    cancelling_ = false;
+    completed_ = false;
     conns_.reserve(targets.size());
 
     if (targets.empty()) {
@@ -72,65 +159,136 @@ psx::Result<void> NativeController::start(const std::vector<Target>& targets,
     }
 
     for (std::size_t i = 0; i < targets.size(); ++i) {
-        const Target& target = targets[i];
         auto conn = std::make_unique<Conn>();
         conn->owner = this;
         conn->index = i;
-        conn->result.host = target.host;
-        Conn* raw = conn.get();
+        conn->target = targets[i];
+        conn->result.host = targets[i].host;
         conns_.push_back(std::move(conn));
-
-        auto socket = psx::os::Socket::connect(target.host, target.port);
-        if (!socket.ok()) {
-            raw->fail("connect: " + socket.error().message());
-            continue;
-        }
-        auto tls = psx::os::Tls::create(config_);
-        if (!tls.ok()) {
-            raw->fail("tls: " + tls.error().message());
-            continue;
-        }
-
-        std::function<bool(std::string_view)> authorize;
-        if (!target.expectedSan.empty()) {
-            authorize = [san = target.expectedSan](std::string_view s) { return std::string(s) == san; };
-        }
-        raw->transport = std::make_unique<NativeTransport>(
-            reactor_, std::move(socket.value()), std::move(tls.value()), Role::Controller, *raw,
-            NativeTransport::Callbacks{.authorize = std::move(authorize),
-                                       .onReady = [this, raw] { raw->session->open({.argv = command_}); },
-                                       .onError = [raw](const psx::Error& e) { raw->fail(e.message()); }},
-            kDefaultStreamWindow, kDefaultLease);
-        raw->session = &raw->transport->session();
-        if (auto started = raw->transport->start(); !started.ok()) {
-            raw->fail("start: " + started.error().message());
-        }
     }
+    fillSlots();
     return {};
 }
 
-void NativeController::cancel(const std::string& reason) {
-    for (auto& conn : conns_) {
-        if (!conn->done) {
-            conn->fail(reason);
-        }
+void NativeController::fillSlots() {
+    if (completed_ || cancelling_ || filling_) {
+        return;
+    }
+    filling_ = true;
+    const std::size_t limit = options_.concurrency == 0 ? conns_.size() : options_.concurrency;
+    while (nextToStart_ < conns_.size() && active_ < limit && !cancelling_) {
+        launch(nextToStart_++);
+    }
+    filling_ = false;
+}
+
+void NativeController::launch(std::size_t index) {
+    Conn* raw = conns_[index].get();
+    const Target& target = raw->target;
+    raw->active = true;
+    ++active_;
+
+    auto socket = psx::os::Socket::connect(target.host, target.port);
+    if (!socket.ok()) {
+        raw->fail("connect: " + socket.error().message());
+        return;
+    }
+    auto tls = psx::os::Tls::create(config_);
+    if (!tls.ok()) {
+        raw->fail("tls: " + tls.error().message());
+        return;
+    }
+
+    std::function<bool(std::string_view)> authorize;
+    if (!target.expectedSan.empty()) {
+        authorize = [san = target.expectedSan](std::string_view value) { return value == san; };
+    }
+    raw->transport = std::make_unique<NativeTransport>(
+        reactor_, std::move(socket.value()), std::move(tls.value()), Role::Controller, *raw,
+        NativeTransport::Callbacks{.authorize = std::move(authorize),
+                                   .onReady =
+                                       [this, raw] {
+                                           if (!raw->done && raw->session != nullptr) {
+                                               raw->session->open(OpenRequest{.argv = command_, .cwd = {}});
+                                           }
+                                       },
+                                   .onError = [raw](const psx::Error& error) { raw->fail(error.message()); }},
+        kDefaultStreamWindow, kDefaultLease);
+    raw->session = &raw->transport->session();
+    if (auto started = raw->transport->start(); !started.ok()) {
+        raw->fail("start: " + started.error().message());
     }
 }
 
-void NativeController::onConnDone(std::size_t /*index*/) {
+void NativeController::cancel(const std::string& reason, CancelKind kind) {
+    if (completed_) {
+        return;
+    }
+    if (kind == CancelKind::Other) {
+        if (reason == "timed out") {
+            kind = CancelKind::Timeout;
+        } else if (reason == "fail-fast") {
+            kind = CancelKind::FailFast;
+        } else if (reason == "cancelled" || reason == "interrupted") {
+            kind = CancelKind::Interrupt;
+        }
+    }
+    cancelling_ = true;
+    for (auto& conn : conns_) {
+        if (!conn->done) {
+            conn->fail(reason, kind);
+        }
+    }
+    completeIfReady();
+}
+
+void NativeController::onConnDone(std::size_t index) {
     if (remaining_ > 0) {
         --remaining_;
     }
-    if (remaining_ == 0 && !completed_) {
-        completed_ = true;
-        std::vector<HostResult> results;
-        results.reserve(conns_.size());
-        for (auto& conn : conns_) {
-            results.push_back(std::move(conn->result));
+    Conn& conn = *conns_[index];
+    if (options_.failFast && !cancelling_ &&
+        (!conn.result.ok || conn.result.exitCode != 0 || !conn.result.error.empty())) {
+        cancel("fail-fast", CancelKind::FailFast);
+    }
+
+    if (conn.active) {
+        // A NativeTransport can report completion from one of its own callbacks.
+        // Retire it on the next reactor turn so its callback stack has unwound.
+        retireTimers_.push_back(reactor_.after(std::chrono::milliseconds(0), [this, index] { retire(index); }));
+    }
+    completeIfReady();
+}
+
+void NativeController::retire(std::size_t index) {
+    Conn& conn = *conns_[index];
+    if (conn.active) {
+        conn.session = nullptr;
+        conn.transport.reset();
+        conn.active = false;
+        if (active_ > 0) {
+            --active_;
         }
-        if (onComplete_) {
-            onComplete_(std::move(results));
-        }
+    }
+    if (!cancelling_) {
+        fillSlots();
+    }
+    completeIfReady();
+}
+
+void NativeController::completeIfReady() {
+    if (remaining_ != 0 || active_ != 0 || completed_) {
+        return;
+    }
+    completed_ = true;
+    std::vector<HostResult> results;
+    results.reserve(conns_.size());
+    for (auto& conn : conns_) {
+        results.push_back(std::move(conn->result));
+    }
+    if (onComplete_) {
+        auto callback = std::move(onComplete_);
+        callback(std::move(results)); // may destroy this controller
     }
 }
 

@@ -17,6 +17,9 @@ struct ClientEntry {
     // Native backplane (psx/1) per-host options; ignored by the SSH transport.
     std::string expectedSan;     // pin the node's SAN-URI identity (empty = trust the CA only)
     std::uint16_t nativePort{0}; // node port (0 = use the run's --native-port)
+    // Resolved inventory preference. A command-line --transport override is
+    // applied by the CLI after selection; legacy clients default to SSH.
+    std::string transport{"ssh"};
 
     std::string clientId() const;
     std::string sshTarget() const;

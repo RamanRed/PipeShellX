@@ -125,6 +125,84 @@ TEST(SessionTest, GoAwayIsDelivered) {
     EXPECT_EQ(link.node.goAways, 1);
 }
 
+TEST(SessionTest, OpenIsControllerOnlyAndRejectsInvalidRequestsWithoutWriting) {
+    Recorder nodeRecorder;
+    std::string nodeWire;
+    Session node(Role::Node, [&](std::string_view bytes) { nodeWire.append(bytes); }, nodeRecorder);
+    EXPECT_EQ(node.open({.argv = {"x"}, .cwd = ""}), 0U);
+    EXPECT_TRUE(nodeWire.empty());
+
+    Recorder controllerRecorder;
+    std::string controllerWire;
+    Session controller(
+        Role::Controller, [&](std::string_view bytes) { controllerWire.append(bytes); }, controllerRecorder);
+    EXPECT_EQ(controller.open({.argv = {}, .cwd = ""}), 0U);
+    EXPECT_EQ(controller.open({.argv = {""}, .cwd = ""}), 0U);
+    EXPECT_EQ(controller.open({.argv = {std::string("x\0y", 3)}, .cwd = ""}), 0U);
+    EXPECT_TRUE(controllerWire.empty());
+}
+
+TEST(SessionTest, SentOrReceivedGoAwayPreventsNewLocalOpens) {
+    Recorder recorder;
+    std::string wire;
+    Session afterPeerGoAway(Role::Controller, [&](std::string_view bytes) { wire.append(bytes); }, recorder);
+    ASSERT_TRUE(
+        afterPeerGoAway.receive(encodeFrame({.type = FrameType::GoAway, .flags = 0, .streamId = 0, .payload = {}}))
+            .ok());
+    EXPECT_EQ(afterPeerGoAway.open({.argv = {"x"}, .cwd = ""}), 0U);
+    EXPECT_TRUE(wire.empty());
+
+    Session afterLocalGoAway(Role::Controller, [&](std::string_view bytes) { wire.append(bytes); }, recorder);
+    afterLocalGoAway.goAway();
+    ASSERT_FALSE(wire.empty());
+    wire.clear();
+    EXPECT_EQ(afterLocalGoAway.open({.argv = {"x"}, .cwd = ""}), 0U);
+    EXPECT_TRUE(wire.empty());
+}
+
+TEST(SessionTest, ReceivedGoAwayStillLetsExistingStreamsDrain) {
+    Recorder recorder;
+    std::string wire;
+    Session controller(Role::Controller, [&](std::string_view bytes) { wire.append(bytes); }, recorder);
+    const StreamId id = controller.open({.argv = {"cat"}, .cwd = ""});
+    ASSERT_NE(id, 0U);
+    wire.clear();
+    ASSERT_TRUE(
+        controller.receive(encodeFrame({.type = FrameType::GoAway, .flags = 0, .streamId = 0, .payload = {}})).ok());
+
+    controller.sendData(id, "last stdin", /*endStream=*/true);
+    EXPECT_FALSE(wire.empty());
+    EXPECT_EQ(controller.open({.argv = {"late"}, .cwd = ""}), 0U);
+}
+
+TEST(SessionTest, LocalHalfCloseSuppressesAllLaterData) {
+    Recorder recorder;
+    std::string wire;
+    Session controller(Role::Controller, [&](std::string_view bytes) { wire.append(bytes); }, recorder);
+    const StreamId id = controller.open({.argv = {"cat"}, .cwd = ""});
+    wire.clear();
+
+    controller.sendData(id, "first", /*endStream=*/true);
+    ASSERT_FALSE(wire.empty());
+    wire.clear();
+    controller.sendData(id, "late", /*endStream=*/false);
+    controller.sendData(id, {}, /*endStream=*/true);
+    EXPECT_TRUE(wire.empty());
+}
+
+TEST(SessionTest, InvalidLocalStreamDirectionsWriteNoFrames) {
+    Recorder recorder;
+    std::string wire;
+    Session controller(Role::Controller, [&](std::string_view bytes) { wire.append(bytes); }, recorder);
+    const StreamId id = controller.open({.argv = {"x"}, .cwd = ""});
+    wire.clear();
+
+    controller.sendData(id, "not-stdin", /*endStream=*/false, Channel::Stderr);
+    controller.sendExit(id, {ExitStatus::Kind::Exited, 0});
+    EXPECT_TRUE(wire.empty());
+    EXPECT_EQ(controller.openStreamCount(), 1U);
+}
+
 // --- Protocol validation: a malformed / illegal frame ends the connection ---
 
 TEST(SessionTest, DataForAnUnknownStreamIsAProtocolError) {

@@ -48,9 +48,8 @@ public:
 // are handed to receive(). Two Sessions wired write→receive form an in-memory
 // loopback for protocol tests. Not thread-safe.
 //
-// Stream lifecycle in this slice: Controller open() -> OPEN; either side may
-// sendData(); the Node's sendExit() is terminal (removes the stream on both
-// sides). Credit-window flow control is layered on next.
+// Stream lifecycle: Controller open() -> OPEN; either side may sendData(); the
+// Node's sendExit() is terminal (removes the stream on both sides).
 class Session {
 public:
     using WriteFn = std::function<void(std::string_view)>;
@@ -62,11 +61,13 @@ public:
     Role role() const noexcept { return role_; }
     std::size_t openStreamCount() const noexcept { return streams_.size(); }
 
-    // Controller only: open a stream to run `request`; returns the new stream id.
+    // Controller only: open a stream to run `request`; returns the new stream id,
+    // or zero without writing when the request/state/role is invalid.
     StreamId open(const OpenRequest& request);
     // Send stream payload on `channel`; `endStream` half-closes this side's send
     // direction. Channels share the stream's one credit window and their emission
-    // order is preserved on the wire.
+    // order is preserved on the wire. Invalid roles/streams and writes after a
+    // local half-close are ignored without emitting a frame.
     void sendData(StreamId id, std::string_view bytes, bool endStream, Channel channel = Channel::Stdout);
     // Node only: report the stage's exit; terminal for the stream.
     void sendExit(StreamId id, const psx::os::ExitStatus& status);
@@ -85,9 +86,9 @@ public:
     void goAway();
 
     // Feed received bytes. Dispatches complete frames to the handler. Returns a
-    // protocol error (poisoning the underlying decoder) on a malformed frame or a
-    // protocol violation (e.g. a frame for an unknown stream); the caller then
-    // tears down the connection.
+    // protocol error (poisoning this Session) on a malformed frame or protocol
+    // violation (e.g. a frame for an unknown stream); the caller then tears down
+    // the connection.
     psx::Result<void> receive(std::string_view bytes);
 
 private:
@@ -103,11 +104,20 @@ private:
         std::size_t sendBytes = 0;        // total bytes across sendQueue (for the high-water mark)
         bool sendEndPending = false;      // an endStream queued behind buffered bytes
         bool exitPending = false;         // an EXIT queued behind still-buffered DATA
+        bool localDataClosed = false;     // this endpoint has requested/sent END_STREAM
+        bool peerDataClosed = false;      // peer DATA with END_STREAM was received
         psx::os::ExitStatus exitStatus{}; // the deferred EXIT's status
+    };
+
+    struct LocallyClosedStream {
+        // A peer DATA already carried END_STREAM before (or while crossing) our
+        // locally sent EXIT. More DATA can no longer be a valid close race.
+        bool peerDataClosed = false;
     };
 
     void send(const Frame& frame);
     void flushStream(StreamId id, Stream& stream);
+    void closeLocally(StreamId id, bool peerDataClosed);
     psx::Result<void> dispatch(Frame&& frame);
 
     Role role_;
@@ -115,11 +125,14 @@ private:
     SessionHandler& handler_;
     FrameDecoder decoder_;
     std::unordered_map<StreamId, Stream> streams_;
+    std::unordered_map<StreamId, LocallyClosedStream> locallyClosedStreams_;
     StreamId nextStreamId_ = 1;
-    StreamId highestStream_ = 0; // highest id ever opened; DATA below it may race a close
+    StreamId nextPeerStreamId_ = 1;
     std::uint32_t initialWindow_;
     std::function<void(StreamId)> streamWritable_;
-    bool goneAway_ = false;
+    bool sentGoAway_ = false;
+    bool receivedGoAway_ = false;
+    bool protocolFailed_ = false;
 };
 
 } // namespace psx::transport

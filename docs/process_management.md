@@ -76,9 +76,11 @@ When the deadline timer fires, every incomplete worker receives
 `Process::signal(StopSignal::Kill)`: `SIGKILL` to the **process group**,
 which still works after the group leader exited and was reaped — a
 `sh -c 'sleep 30 & exit 0'` dies together with its backgrounded `sleep`.
-`StopSignal::Graceful` sends `SIGTERM` the same way; Phase 2 wires the
-TERM → KILL grace into operator cancellation (first Ctrl-C graceful, second
-hard).
+`StopSignal::Graceful` sends `SIGTERM` the same way. The one-shot `run` and
+`pipe` paths register interrupt handling with the reactor: Ctrl-C cancels
+owned work, reaps it, and returns `130`. Native-controller cancellation uses
+the same outcome vocabulary (`timedOut`, `cancelled`, and `aborted`) while the
+node owns and reaps the remote process group.
 
 After the kill a 2-second drain grace collects remaining output; a holder
 outside the process group (e.g. a `setsid` daemon) cannot stall the run
@@ -86,9 +88,12 @@ beyond that.
 
 ## Safety Properties
 
-Current process management explicitly guarantees:
+For processes spawned directly through this layer, process management
+explicitly guarantees:
 
-- no shell on the execution path (`posix_spawn` with an argument vector)
+- argv is passed to `posix_spawn`/`exec` without an implicitly inserted local
+  shell; a caller may still explicitly launch a shell, and SSH execution is
+  serialized for the target's remote shell
 - no descriptor other than 0–2 (plus explicitly granted extra handles) is
   visible to any child
 - no zombie: every child is reaped by its owner, and a `Process` still
@@ -100,6 +105,8 @@ Current process management explicitly guarantees:
 ## Remaining Gaps
 
 - Resource limits are still hardcoded for local commands (Phase 6).
-- Operator cancellation (Ctrl-C) is not wired yet (Phase 2; the
-  `SignalSource` that delivers it already exists).
+- Configurable per-stage limits, sandboxing, and privilege separation are not
+  implemented.
+- Native reconnect/resume is not implemented; connection loss is terminal and
+  fences the affected node stages.
 - Windows process creation (`CreateProcessW` + Job Objects) is Phase 3.

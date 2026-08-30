@@ -33,6 +33,11 @@ class Sink {
 public:
     virtual ~Sink() = default;
 
+    // Live sinks consume output as it arrives and do not retain it. Buffering
+    // sinks return false so the runner can apply its capture policy first and
+    // replay only the retained bytes at stage completion.
+    virtual bool streamsLive() const noexcept { return true; }
+
     // Called at the start of each attempt for a stage (so more than once when a
     // stage is retried). A buffering sink should reset this stage's buffer here
     // so only the last attempt's output is retained — matching the captured

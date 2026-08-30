@@ -41,8 +41,8 @@ LocalRunner::~LocalRunner() {
     }
 }
 
-psx::Result<void> LocalRunner::run(const std::vector<Stage>& stages, std::function<void(Outcome)> onComplete,
-                                   bool externalStdin) {
+psx::Result<void>
+LocalRunner::run(const std::vector<Stage>& stages, std::function<void(Outcome)> onComplete, bool externalStdin) {
     if (stages.empty()) {
         return psx::Error{psx::ErrorClass::InvalidArgument, 0, "empty pipeline"};
     }
@@ -190,10 +190,46 @@ void LocalRunner::closeStdin() {
     stdinEndPending_ = true;
     drainStdin();
 }
+void LocalRunner::cancel() {
+    if (done_) {
+        return;
+    }
+    if (stdinToken_ != 0) {
+        (void)reactor_.unwatch(stdinToken_);
+        stdinToken_ = 0;
+    }
+    stdinWriter_.close();
+    stdinOpen_ = false;
+    stdinBuffer_.clear();
+
+    // Signal before closing the output reader. Closing it first races SIGPIPE
+    // against our explicit fence and makes the reported status nondeterministic
+    // (141 or 137 depending on scheduling).
+    for (Child& child : children_) {
+        if (child.exited) {
+            continue;
+        }
+        (void)reactor_.unwatchChild(child.process.id());
+        (void)child.process.signal(psx::os::StopSignal::Kill);
+        ExitStatus status{ExitStatus::Kind::Signaled, 9};
+        if (auto reaped = child.process.wait(); reaped.ok()) {
+            status = reaped.value();
+        }
+        child.exitCode = toExitCode(status);
+        child.exited = true;
+        ++exitedCount_;
+    }
+    if (finalToken_ != 0) {
+        (void)reactor_.unwatch(finalToken_);
+        finalToken_ = 0;
+    }
+    finalReader_.close();
+    finalClosed_ = true;
+    finishIfDone(); // may destroy this; touch nothing afterwards
+}
 void LocalRunner::drainStdin() {
     while (stdinOpen_ && !stdinBuffer_.empty()) {
-        auto wrote =
-            psx::os::write(stdinWriter_, std::span<const char>(stdinBuffer_.data(), stdinBuffer_.size()));
+        auto wrote = psx::os::write(stdinWriter_, std::span<const char>(stdinBuffer_.data(), stdinBuffer_.size()));
         if (wrote.ok() && wrote.value() > 0) {
             stdinBuffer_.erase(0, wrote.value());
         } else if (wrote.ok() || wrote.error().cls == psx::ErrorClass::WouldBlock) {

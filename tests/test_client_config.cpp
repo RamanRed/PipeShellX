@@ -23,6 +23,18 @@ TEST(ClientConfigTest, SerializeOmitsInMemoryPassword) {
     EXPECT_EQ(entry.serialize(), "admin@server.example.com");
 }
 
+TEST(ClientConfigTest, HostOnlyTargetsDoNotGainAnEmptyUserSeparator) {
+    ClientEntry entry;
+    entry.host = "server.example.com";
+
+    EXPECT_EQ(entry.sshTarget(), "server.example.com");
+    EXPECT_EQ(entry.clientId(), "server.example.com");
+
+    entry.port = 2222;
+    EXPECT_EQ(entry.sshTarget(), "server.example.com");
+    EXPECT_EQ(entry.clientId(), "server.example.com:2222");
+}
+
 TEST(ClientConfigTest, ParsesLegacyAndUrlEntries) {
     const auto legacy = ClientConfig::parseEntry("admin@server.example.com");
     EXPECT_EQ(legacy.user, "admin");

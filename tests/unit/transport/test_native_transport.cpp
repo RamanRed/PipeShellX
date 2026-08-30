@@ -29,6 +29,12 @@ using psx::os::Tls;
 using psx::runtime::Reactor;
 using namespace psx::transport;
 
+namespace psx::transport {
+struct NodeServerLifecycleProbe {
+    static void scheduleDeferredReap(NodeServer& server) { server.dropConnection(999); }
+};
+} // namespace psx::transport
+
 namespace {
 
 Socket acceptWithin(Socket& listener) {
@@ -465,6 +471,29 @@ TEST(NodeServerTest, DropsAnUnauthorizedConnectionAndReapsIt) {
     EXPECT_EQ(server.connectionCount(), 0U) << "the unauthorized connection must be reaped";
 }
 
+TEST(NodeServerTest, DestructorCancelsDeferredReapBeforeReactorContinues) {
+    auto reactor = Reactor::create();
+    ASSERT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+    auto listener = Socket::listen("127.0.0.1", 0);
+    ASSERT_TRUE(listener.ok());
+
+    {
+        NodeServer server(r, std::move(listener.value()), psx::os::TlsConfig{});
+        psx::transport::NodeServerLifecycleProbe::scheduleDeferredReap(server);
+        ASSERT_EQ(r.pendingTimers(), 1U);
+    }
+    ASSERT_EQ(r.pendingTimers(), 0U) << "destruction must remove callbacks that capture the server";
+
+    bool continued = false;
+    r.after(std::chrono::milliseconds(0), [&] {
+        continued = true;
+        r.stop();
+    });
+    ASSERT_TRUE(r.run().ok());
+    EXPECT_TRUE(continued);
+}
+
 namespace {
 // Stands up a NodeServer on a fresh listener; returns {server-owning-reactor use}.
 struct Fleet {
@@ -551,6 +580,280 @@ TEST(NativeControllerTest, ReportsAnErrorForAnUnreachableNode) {
     ASSERT_EQ(results.size(), 1U);
     EXPECT_FALSE(results[0].ok);
     EXPECT_FALSE(results[0].error.empty());
+}
+
+TEST(NativeControllerTest, RejectsInvalidAndRepeatedStartCalls) {
+    auto reactor = Reactor::create();
+    ASSERT_TRUE(reactor.ok());
+    NativeController controller(
+        *reactor.value(), {.certificatePem = {}, .privateKeyPem = {}, .caPem = {}, .crlPem = {}, .isServer = false});
+    auto invalid = controller.start({}, {}, [](std::vector<NativeController::HostResult>) {});
+    EXPECT_FALSE(invalid.ok());
+    EXPECT_EQ(invalid.error().cls, psx::ErrorClass::InvalidArgument);
+
+    bool completed = false;
+    EXPECT_TRUE(controller
+                    .start({}, {"true"},
+                           [&](std::vector<NativeController::HostResult> results) {
+                               EXPECT_TRUE(results.empty());
+                               completed = true;
+                           })
+                    .ok());
+    EXPECT_TRUE(completed);
+
+    auto repeated = controller.start({}, {"true"}, [](std::vector<NativeController::HostResult>) {});
+    EXPECT_FALSE(repeated.ok());
+    EXPECT_EQ(repeated.error().cls, psx::ErrorClass::InvalidArgument);
+}
+
+namespace {
+
+std::vector<NativeController::HostResult> runCapturedCommand(psx::stream::OverflowPolicy policy,
+                                                             std::size_t ringBytes) {
+    Fleet fleet = makeFleet();
+    auto listener = Socket::listen("127.0.0.1", 0);
+    EXPECT_TRUE(listener.ok());
+    if (!listener.ok()) {
+        return {};
+    }
+    const std::uint16_t port = listener.value().localPort().value();
+
+    auto reactor = Reactor::create();
+    EXPECT_TRUE(reactor.ok());
+    if (!reactor.ok()) {
+        return {};
+    }
+    Reactor& r = *reactor.value();
+    NodeServer server(r, std::move(listener.value()),
+                      {.certificatePem = fleet.nodeId.certificatePem,
+                       .privateKeyPem = fleet.nodeId.privateKeyPem,
+                       .caPem = fleet.caCert,
+                       .crlPem = {},
+                       .isServer = true},
+                      [](std::string_view san) { return san == "psx://controller"; });
+    EXPECT_TRUE(server.start().ok());
+
+    NativeController controller(r, {.certificatePem = fleet.ctlId.certificatePem,
+                                    .privateKeyPem = fleet.ctlId.privateKeyPem,
+                                    .caPem = fleet.caCert,
+                                    .crlPem = {},
+                                    .isServer = false});
+    std::vector<NativeController::HostResult> results;
+    EXPECT_TRUE(controller
+                    .start({{.host = "127.0.0.1", .port = port, .expectedSan = "psx://node/1"}},
+                           {"/bin/sh", "-c", "printf 0123456789; printf abcdef 1>&2"},
+                           [&](std::vector<NativeController::HostResult> value) {
+                               results = std::move(value);
+                               r.stop();
+                           },
+                           {.concurrency = 1, .policy = policy, .ringBytes = ringBytes, .failFast = false})
+                    .ok());
+    r.after(std::chrono::seconds(5), [&] { r.stop(); });
+    EXPECT_TRUE(r.run().ok());
+    return results;
+}
+
+} // namespace
+
+TEST(NativeControllerTest, DropOldestBoundsEachOutputChannelAndCountsLoss) {
+    const auto results = runCapturedCommand(psx::stream::OverflowPolicy::DropOldest, 4);
+    ASSERT_EQ(results.size(), 1U);
+    EXPECT_EQ(results[0].stdoutData, "6789");
+    EXPECT_EQ(results[0].stderrData, "cdef");
+    EXPECT_EQ(results[0].output, "6789cdef");
+    EXPECT_EQ(results[0].droppedBytes, 8U);
+}
+
+TEST(NativeControllerTest, DropNewestBoundsEachOutputChannelAndCountsLoss) {
+    const auto results = runCapturedCommand(psx::stream::OverflowPolicy::DropNewest, 4);
+    ASSERT_EQ(results.size(), 1U);
+    EXPECT_EQ(results[0].stdoutData, "0123");
+    EXPECT_EQ(results[0].stderrData, "abcd");
+    EXPECT_EQ(results[0].output, "0123abcd");
+    EXPECT_EQ(results[0].droppedBytes, 8U);
+}
+
+TEST(NativeControllerTest, SpoolKeepsLosslessOutputWithBoundedMemoryRing) {
+    const auto results = runCapturedCommand(psx::stream::OverflowPolicy::Spool, 4);
+    ASSERT_EQ(results.size(), 1U);
+    EXPECT_EQ(results[0].stdoutData, "0123456789");
+    EXPECT_EQ(results[0].stderrData, "abcdef");
+    EXPECT_EQ(results[0].output, "0123456789abcdef");
+    EXPECT_EQ(results[0].droppedBytes, 0U);
+}
+
+TEST(NativeControllerTest, TimeoutCancellationIsClassified) {
+    Fleet fleet = makeFleet();
+    auto listener = Socket::listen("127.0.0.1", 0);
+    ASSERT_TRUE(listener.ok());
+    const std::uint16_t port = listener.value().localPort().value();
+    auto reactor = Reactor::create();
+    ASSERT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+    NodeServer server(r, std::move(listener.value()),
+                      {.certificatePem = fleet.nodeId.certificatePem,
+                       .privateKeyPem = fleet.nodeId.privateKeyPem,
+                       .caPem = fleet.caCert,
+                       .crlPem = {},
+                       .isServer = true},
+                      [](std::string_view san) { return san == "psx://controller"; });
+    ASSERT_TRUE(server.start().ok());
+    NativeController controller(r, {.certificatePem = fleet.ctlId.certificatePem,
+                                    .privateKeyPem = fleet.ctlId.privateKeyPem,
+                                    .caPem = fleet.caCert,
+                                    .crlPem = {},
+                                    .isServer = false});
+
+    std::vector<NativeController::HostResult> results;
+    ASSERT_TRUE(controller
+                    .start({{.host = "127.0.0.1", .port = port, .expectedSan = "psx://node/1"}},
+                           {"/bin/sh", "-c", "sleep 5"},
+                           [&](std::vector<NativeController::HostResult> value) {
+                               results = std::move(value);
+                               r.stop();
+                           })
+                    .ok());
+    r.after(std::chrono::milliseconds(100),
+            [&] { controller.cancel("timed out", NativeController::CancelKind::Timeout); });
+    r.after(std::chrono::seconds(3), [&] { r.stop(); });
+    ASSERT_TRUE(r.run().ok());
+
+    ASSERT_EQ(results.size(), 1U);
+    EXPECT_TRUE(results[0].timedOut);
+    EXPECT_FALSE(results[0].cancelled);
+    EXPECT_FALSE(results[0].aborted);
+    EXPECT_EQ(results[0].error, "timed out");
+}
+
+TEST(NativeControllerTest, ConcurrencyOptionSerializesConnections) {
+    Fleet fleet = makeFleet();
+    auto listener = Socket::listen("127.0.0.1", 0);
+    ASSERT_TRUE(listener.ok());
+    const std::uint16_t port = listener.value().localPort().value();
+    auto reactor = Reactor::create();
+    ASSERT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+    NodeServer server(r, std::move(listener.value()),
+                      {.certificatePem = fleet.nodeId.certificatePem,
+                       .privateKeyPem = fleet.nodeId.privateKeyPem,
+                       .caPem = fleet.caCert,
+                       .crlPem = {},
+                       .isServer = true},
+                      [](std::string_view san) { return san == "psx://controller"; });
+    ASSERT_TRUE(server.start().ok());
+    NativeController controller(r, {.certificatePem = fleet.ctlId.certificatePem,
+                                    .privateKeyPem = fleet.ctlId.privateKeyPem,
+                                    .caPem = fleet.caCert,
+                                    .crlPem = {},
+                                    .isServer = false});
+    const std::vector<NativeController::Target> targets(
+        3, {.host = "127.0.0.1", .port = port, .expectedSan = "psx://node/1"});
+
+    std::vector<NativeController::HostResult> results;
+    const auto startedAt = std::chrono::steady_clock::now();
+    ASSERT_TRUE(
+        controller
+            .start(targets, {"/bin/sh", "-c", "sleep 0.1; printf done"},
+                   [&](std::vector<NativeController::HostResult> value) {
+                       results = std::move(value);
+                       r.stop();
+                   },
+                   {.concurrency = 1, .policy = psx::stream::OverflowPolicy::Block, .ringBytes = 0, .failFast = false})
+            .ok());
+    r.after(std::chrono::seconds(5), [&] { r.stop(); });
+    ASSERT_TRUE(r.run().ok());
+    const auto elapsed = std::chrono::steady_clock::now() - startedAt;
+
+    ASSERT_EQ(results.size(), 3U);
+    EXPECT_GE(elapsed, std::chrono::milliseconds(250));
+    EXPECT_EQ(server.metrics().acceptedTotal, 3U);
+}
+
+TEST(NativeControllerTest, FailFastCancelsPendingTargetsWithoutConnectingThem) {
+    Fleet fleet = makeFleet();
+    auto listener = Socket::listen("127.0.0.1", 0);
+    ASSERT_TRUE(listener.ok());
+    const std::uint16_t port = listener.value().localPort().value();
+    auto reactor = Reactor::create();
+    ASSERT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+    NodeServer server(r, std::move(listener.value()),
+                      {.certificatePem = fleet.nodeId.certificatePem,
+                       .privateKeyPem = fleet.nodeId.privateKeyPem,
+                       .caPem = fleet.caCert,
+                       .crlPem = {},
+                       .isServer = true},
+                      [](std::string_view san) { return san == "psx://controller"; });
+    ASSERT_TRUE(server.start().ok());
+    NativeController controller(r, {.certificatePem = fleet.ctlId.certificatePem,
+                                    .privateKeyPem = fleet.ctlId.privateKeyPem,
+                                    .caPem = fleet.caCert,
+                                    .crlPem = {},
+                                    .isServer = false});
+    const std::vector<NativeController::Target> targets(
+        3, {.host = "127.0.0.1", .port = port, .expectedSan = "psx://node/1"});
+
+    std::vector<NativeController::HostResult> results;
+    ASSERT_TRUE(
+        controller
+            .start(targets, {"/bin/sh", "-c", "exit 7"},
+                   [&](std::vector<NativeController::HostResult> value) {
+                       results = std::move(value);
+                       r.stop();
+                   },
+                   {.concurrency = 1, .policy = psx::stream::OverflowPolicy::Block, .ringBytes = 0, .failFast = true})
+            .ok());
+    r.after(std::chrono::seconds(5), [&] { r.stop(); });
+    ASSERT_TRUE(r.run().ok());
+
+    ASSERT_EQ(results.size(), 3U);
+    EXPECT_TRUE(results[0].ok);
+    EXPECT_EQ(results[0].exitCode, 7);
+    EXPECT_FALSE(results[0].aborted);
+    for (std::size_t i = 1; i < results.size(); ++i) {
+        EXPECT_TRUE(results[i].aborted);
+        EXPECT_EQ(results[i].error, "fail-fast");
+    }
+    EXPECT_EQ(server.metrics().acceptedTotal, 1U);
+}
+
+TEST(NativeControllerTest, CompletionCallbackMayDestroyTheController) {
+    Fleet fleet = makeFleet();
+    auto listener = Socket::listen("127.0.0.1", 0);
+    ASSERT_TRUE(listener.ok());
+    const std::uint16_t port = listener.value().localPort().value();
+    auto reactor = Reactor::create();
+    ASSERT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+    NodeServer server(r, std::move(listener.value()),
+                      {.certificatePem = fleet.nodeId.certificatePem,
+                       .privateKeyPem = fleet.nodeId.privateKeyPem,
+                       .caPem = fleet.caCert,
+                       .crlPem = {},
+                       .isServer = true},
+                      [](std::string_view san) { return san == "psx://controller"; });
+    ASSERT_TRUE(server.start().ok());
+
+    std::unique_ptr<NativeController> controller =
+        std::make_unique<NativeController>(r, psx::os::TlsConfig{.certificatePem = fleet.ctlId.certificatePem,
+                                                                 .privateKeyPem = fleet.ctlId.privateKeyPem,
+                                                                 .caPem = fleet.caCert,
+                                                                 .crlPem = {},
+                                                                 .isServer = false});
+    bool completed = false;
+    ASSERT_TRUE(controller
+                    ->start({{.host = "127.0.0.1", .port = port, .expectedSan = "psx://node/1"}}, {"/bin/true"},
+                            [&](std::vector<NativeController::HostResult> results) {
+                                EXPECT_EQ(results.size(), 1U);
+                                completed = true;
+                                controller.reset();
+                                r.stop();
+                            })
+                    .ok());
+    r.after(std::chrono::seconds(5), [&] { r.stop(); });
+    ASSERT_TRUE(r.run().ok());
+    EXPECT_TRUE(completed);
+    EXPECT_EQ(controller, nullptr);
 }
 
 // Lease / silent-partition fencing: a peer that completes the handshake and then
@@ -1133,13 +1436,22 @@ TEST(DistributedRunnerTest, FirstStageStdinIsClosedSoAReaderDoesNotHang) {
     EXPECT_EQ(result.outcome.exitCode, 0);
 }
 
-// An infinite upstream must not hang the pipeline: when the downstream exits, the
-// run completes (and the upstream is fenced on teardown).
+// An infinite upstream must not hang the pipeline. It is explicitly fenced and
+// accounted as a known non-zero termination when the downstream exits.
 TEST(DistributedRunnerTest, InfiniteUpstreamCompletesWhenDownstreamExits) {
     auto result = runRemotePipeline({{"yes"}, {"head", "-n", "3"}}, /*timeoutSeconds=*/10);
     ASSERT_TRUE(result.completed) << "an infinite upstream hung the pipeline";
     EXPECT_EQ(result.output, "y\ny\ny\n");
-    EXPECT_EQ(result.outcome.exitCode, 0);
+    EXPECT_EQ(result.outcome.stageExitCodes, (std::vector<int>{137, 0}));
+    EXPECT_EQ(result.outcome.exitCode, 137);
+}
+
+TEST(DistributedRunnerTest, RightmostKnownFailureWinsAfterUpstreamIsFenced) {
+    auto result = runRemotePipeline({{"yes"}, {"sh", "-c", "head -n 1 >/dev/null; exit 4"}},
+                                    /*timeoutSeconds=*/10);
+    ASSERT_TRUE(result.completed) << "a failing early consumer hung";
+    EXPECT_EQ(result.outcome.stageExitCodes, (std::vector<int>{137, 4}));
+    EXPECT_EQ(result.outcome.exitCode, 4);
 }
 
 TEST(DistributedRunnerTest, FeedsExternalStdinToTheFirstRemoteStage) {
@@ -1164,6 +1476,7 @@ struct SegStage {
 struct SegResult {
     std::string output;
     int exitCode = -1;
+    std::vector<int> stageExitCodes;
     bool completed = false;
     std::string error;
 };
@@ -1216,6 +1529,7 @@ SegResult runSegmented(const std::vector<SegStage>& stages, int timeoutSeconds) 
                     ->run(resolved,
                           [&](SegmentedPipeline::Outcome outcome) {
                               result.exitCode = outcome.exitCode;
+                              result.stageExitCodes = std::move(outcome.stageExitCodes);
                               result.error = outcome.error;
                               result.completed = true;
                               r.stop();
@@ -1249,6 +1563,22 @@ TEST(SegmentedPipelineTest, LocalRemoteLocalThreeSegments) {
     ASSERT_TRUE(result.completed) << result.error;
     EXPECT_EQ(result.output, "A\nB\nC\n");
     EXPECT_EQ(result.exitCode, 0);
+}
+
+TEST(SegmentedPipelineTest, EarlyRemoteConsumerFencesAndAccountsInfiniteLocalUpstream) {
+    auto result = runSegmented({{{"yes"}, /*local=*/true}, {{"head", "-n", "3"}, /*local=*/false}}, 10);
+    ASSERT_TRUE(result.completed) << "an infinite local segment hung: " << result.error;
+    EXPECT_EQ(result.output, "y\ny\ny\n");
+    EXPECT_EQ(result.stageExitCodes, (std::vector<int>{137, 0}));
+    EXPECT_EQ(result.exitCode, 137);
+}
+
+TEST(SegmentedPipelineTest, EarlyLocalConsumerFencesAndAccountsInfiniteRemoteUpstream) {
+    auto result = runSegmented({{{"yes"}, /*local=*/false}, {{"head", "-n", "3"}, /*local=*/true}}, 10);
+    ASSERT_TRUE(result.completed) << "an infinite remote segment hung: " << result.error;
+    EXPECT_EQ(result.output, "y\ny\ny\n");
+    EXPECT_EQ(result.stageExitCodes, (std::vector<int>{137, 0}));
+    EXPECT_EQ(result.exitCode, 137);
 }
 
 // Dual-stack hostname: `localhost` resolves to ::1 (first) and 127.0.0.1. With
@@ -1432,6 +1762,25 @@ TEST(FanInPipelineTest, MergesSourcesIntoALocalDownstream) {
     ASSERT_TRUE(result.completed) << result.error;
     EXPECT_NE(result.output.find("3"), std::string::npos) << "wc -l should count 3 merged lines";
     EXPECT_EQ(result.exitCode, 0);
+}
+
+TEST(FanInPipelineTest, EarlyDownstreamExitWaitsForAndAccountsSourceCancellation) {
+    std::vector<psx::pipeline::ResolvedStage> downstream = {
+        {.argv = {"head", "-n", "3"}, .host = "", .port = 0, .expectedSan = ""}};
+    auto result = runFanIn({"yes"}, /*fanHosts=*/2, downstream, 10);
+    ASSERT_TRUE(result.completed) << "infinite fan-in sources hung: " << result.error;
+    EXPECT_EQ(result.output, "y\ny\ny\n");
+    EXPECT_TRUE(result.error.empty()) << result.error;
+    EXPECT_EQ(result.exitCode, 137);
+}
+
+TEST(FanInPipelineTest, RightmostDownstreamFailureWinsAfterSourceCancellation) {
+    std::vector<psx::pipeline::ResolvedStage> downstream = {
+        {.argv = {"sh", "-c", "head -n 1 >/dev/null; exit 4"}, .host = "", .port = 0, .expectedSan = ""}};
+    auto result = runFanIn({"yes"}, /*fanHosts=*/2, downstream, 10);
+    ASSERT_TRUE(result.completed) << "failing fan-in consumer hung: " << result.error;
+    EXPECT_TRUE(result.error.empty()) << result.error;
+    EXPECT_EQ(result.exitCode, 4);
 }
 
 namespace {

@@ -109,6 +109,16 @@ TEST(SshAuthTest, PortAndIdentityAreForwarded) {
     EXPECT_FALSE(contains(defaultArgs, "-i"));
 }
 
+TEST(SshAuthTest, HostOnlyTargetIsPassedToSshWithoutAnAtPrefix) {
+    ClientEntry client;
+    client.host = "server.example.com";
+
+    const auto args = buildSshBaseArguments(client);
+    ASSERT_FALSE(args.empty());
+    EXPECT_EQ(args.back(), "server.example.com");
+    EXPECT_FALSE(contains(args, "@server.example.com"));
+}
+
 TEST(SshAuthTest, PasswordIsPassedThroughFileDescriptorNeverArgv) {
     const auto client = passwordClient();
     const auto args = buildSshCommandArguments(client, "hostname", 7);

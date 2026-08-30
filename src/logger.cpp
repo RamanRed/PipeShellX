@@ -123,7 +123,14 @@ void Logger::log(LogLevel level, const std::string& msg) {
     if (!enabled(level)) {
         return;
     }
-    log(level, LogContext{.pid = psx::os::currentProcessId(), .sessionId = "-", .clientId = "-", .command = "-"}, msg);
+    log(level,
+        LogContext{.pid = psx::os::currentProcessId(),
+                   .sessionId = "-",
+                   .clientId = "-",
+                   .command = "-",
+                   .runId = {},
+                   .stageId = {}},
+        msg);
 }
 
 void Logger::log(LogLevel level, const LogContext& context, const std::string& msg) {

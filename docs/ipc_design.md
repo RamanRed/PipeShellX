@@ -50,11 +50,12 @@ The L2 stream primitives now exist (`include/psx/stream/`): `BoundedBuffer`
 `LineFramer` (whole-line framing, CRLF, length cap), `CreditWindow`
 (HTTP/2-style flow control for the backplane) and `Stream` (the
 `Open→HalfClosed→Closed` state machine whose `writable()` is the backpressure
-signal). Wiring them into `ProcessManager` — deregistering read interest when
-a `Block` buffer fills, so the kernel pipe fills and the producer blocks
-instead of the controller's memory growing — lands with the live `--stream`
-sink, since backpressure is only meaningful once a sink drains the buffer.
-Until then the per-worker `std::string` still grows with the output.
+signal). The `run` capture path exposes retained drop/spool limits through
+`--ring` and `--overflow`; its `block` capture remains lossless and unbounded.
+Live `--stream` rendering is implemented. Native transport adds protocol credit,
+and local DAG edges pause a producer when their bounded edge buffer is full.
+The default capture remains unbounded when no ring size is requested, while
+grouped and JSON output necessarily retain completed stage content.
 
 ## Child Exit and Timeouts
 
@@ -100,7 +101,10 @@ client ID and command context.
 
 ## Current Limitations
 
-- Output is still delivered to the terminal after the run completes; live
-  `--stream` rendering is a Phase 2 deliverable on top of the same reactor.
-- Per-worker output buffers are unbounded until the L2 `Stream` lands.
+- Default/`block` run capture is unbounded. A nonzero ring is a hard retained
+  per-channel bound only with `drop-oldest` or `drop-newest`; spool bounds its
+  in-memory tail but reconstructs the full result at completion.
+- General non-linear DAG execution is local-only; remote graphs must be a
+  declared chain.
+- Native reconnect/resume is not implemented.
 - Interactive stdin (a TTY for the child) is not a supported use case.

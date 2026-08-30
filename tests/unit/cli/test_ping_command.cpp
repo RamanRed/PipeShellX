@@ -92,3 +92,19 @@ TEST(PingSubcommandTest, NoHostsIsExitCode3AndMissingInventoryIsExitCode2) {
     std::ostringstream out2, err2;
     EXPECT_EQ(pingSubcommand(noinv, out2, err2), 2);
 }
+
+TEST(PingSubcommandTest, RejectsNativeInventoryHostsInsteadOfSilentlyUsingSsh) {
+    test_support::ScopedTempCwd cwd("ping-native");
+    {
+        std::ofstream ini("fleet.ini");
+        ini << "[native]\nnode-1 transport=native\n";
+    }
+
+    PingInvocation invocation;
+    invocation.inventoryPath = "fleet.ini";
+    std::ostringstream out;
+    std::ostringstream err;
+    EXPECT_EQ(pingSubcommand(invocation, out, err), 2);
+    EXPECT_TRUE(out.str().empty());
+    EXPECT_NE(err.str().find("transport=native"), std::string::npos) << err.str();
+}

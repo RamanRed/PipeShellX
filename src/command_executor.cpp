@@ -202,7 +202,12 @@ CommandResult CommandExecutor::executeRemoteCommand(const std::string& command,
                                                     const std::string& sessionId,
                                                     OutputCallback streamCallback,
                                                     int timeoutSec) {
-    LogContext context{.pid = psx::os::currentProcessId(), .sessionId = sessionId, .clientId = "-", .command = command};
+    LogContext context{.pid = psx::os::currentProcessId(),
+                       .sessionId = sessionId,
+                       .clientId = "-",
+                       .command = command,
+                       .runId = {},
+                       .stageId = {}};
     Logger::getInstance().log(LogLevel::INFO, context, "Received command for execution");
 
     auto args = parseCommand(command);
@@ -222,7 +227,9 @@ CommandResult CommandExecutor::executeRemoteCommand(const std::vector<std::strin
 
     ProcessManager pm;
     Logger::getInstance().log(LogLevel::INFO, context, "Starting distributed SSH execution");
-    auto result = pm.executeRemote(clients, remoteCommand, context, {.timeoutSec = timeoutSec});
+    ProcessManager::RemoteRunOptions options;
+    options.timeoutSec = timeoutSec;
+    auto result = pm.executeRemote(clients, remoteCommand, context, options);
 
     if (streamCallback) {
         for (const auto& clientResult : result.clientResults) {
@@ -265,7 +272,12 @@ CommandResult CommandExecutor::execute(const std::string& command,
                                        const std::string& sessionId,
                                        OutputCallback streamCallback,
                                        int timeoutSec) {
-    LogContext context{.pid = psx::os::currentProcessId(), .sessionId = sessionId, .clientId = "-", .command = command};
+    LogContext context{.pid = psx::os::currentProcessId(),
+                       .sessionId = sessionId,
+                       .clientId = "-",
+                       .command = command,
+                       .runId = {},
+                       .stageId = {}};
     Logger::getInstance().log(LogLevel::INFO, context, "Received command for execution");
 
     auto args = parseCommand(command);

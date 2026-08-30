@@ -18,6 +18,7 @@ else()
         pipeline/parser.cpp
         pipeline/pipeline_yaml.cpp
         pipeline/local_runner.cpp
+        pipeline/dag_runner.cpp
     )
     set(PIPESHELLX_POLICY_SOURCES
         policy/policy.cpp
@@ -62,7 +63,7 @@ endif()
 
 # Core library
 set(PIPESHELLX_TLS_SOURCES "")
-if(PIPESHELLX_NATIVE_TRANSPORT AND OpenSSL_FOUND)
+if(PIPESHELLX_NATIVE_TRANSPORT)
     set(PIPESHELLX_TLS_SOURCES os/tls.cpp transport/tls_stream.cpp transport/native_transport.cpp
         ca/certificate_authority.cpp
         transport/node_server.cpp
@@ -73,7 +74,6 @@ if(PIPESHELLX_NATIVE_TRANSPORT AND OpenSSL_FOUND)
         pipeline/distributed_runner.cpp
         pipeline/segmented_pipeline.cpp
         pipeline/fanin_pipeline.cpp)
-    message(STATUS "PipeShellX: native transport enabled (OpenSSL ${OPENSSL_VERSION})")
 endif()
 
 add_library(pipeshellx_lib
@@ -107,32 +107,48 @@ add_library(pipeshellx_lib
 )
 add_library(pipeshellx::lib ALIAS pipeshellx_lib)
 
+target_compile_features(pipeshellx_lib PUBLIC cxx_std_20)
 target_include_directories(pipeshellx_lib PUBLIC
-    ${PROJECT_SOURCE_DIR}/include
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 target_link_libraries(pipeshellx_lib
     PUBLIC Threads::Threads
-    PRIVATE pipeshellx_warnings
 )
-target_compile_definitions(pipeshellx_lib PUBLIC
+get_target_property(_pipeshellx_warning_options pipeshellx_warnings INTERFACE_COMPILE_OPTIONS)
+target_compile_options(pipeshellx_lib PRIVATE ${_pipeshellx_warning_options})
+target_compile_definitions(pipeshellx_lib PRIVATE
     PIPESHELLX_VERSION="${PROJECT_VERSION}"
 )
-if(PIPESHELLX_NATIVE_TRANSPORT AND OpenSSL_FOUND)
+if(PIPESHELLX_NATIVE_TRANSPORT)
     target_link_libraries(pipeshellx_lib PUBLIC OpenSSL::SSL OpenSSL::Crypto)
     target_compile_definitions(pipeshellx_lib PUBLIC PIPESHELLX_HAVE_TLS=1)
 endif()
+set_target_properties(pipeshellx_lib PROPERTIES
+    OUTPUT_NAME pipeshellx
+    EXPORT_NAME lib
+    VERSION ${PROJECT_VERSION}
+    SOVERSION ${PROJECT_VERSION_MAJOR})
 
 # Interactive executable
-add_executable(pipeshellx_app
+add_executable(pipeshellx
     main.cpp
     terminal_client.cpp
 )
-set_target_properties(pipeshellx_app PROPERTIES OUTPUT_NAME PipeShellX)
-target_link_libraries(pipeshellx_app PRIVATE pipeshellx_lib pipeshellx_warnings)
+target_link_libraries(pipeshellx PRIVATE pipeshellx_lib pipeshellx_warnings)
 
 # Install rules
-install(TARGETS pipeshellx_app pipeshellx_lib
-    RUNTIME DESTINATION bin
-    LIBRARY DESTINATION lib
-    ARCHIVE DESTINATION lib
+install(TARGETS pipeshellx
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    COMPONENT Runtime)
+install(TARGETS pipeshellx_lib
+    EXPORT pipeshellxTargets
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT Runtime
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT Runtime NAMELINK_COMPONENT Development
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT Development)
+install(EXPORT pipeshellxTargets
+    FILE pipeshellxTargets.cmake
+    NAMESPACE pipeshellx::
+    DESTINATION ${PIPESHELLX_INSTALL_CMAKEDIR}
+    COMPONENT Development
 )

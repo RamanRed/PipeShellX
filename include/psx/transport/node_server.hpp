@@ -16,6 +16,8 @@
 
 namespace psx::transport {
 
+struct NodeServerLifecycleProbe;
+
 // The psx/1 node daemon: accepts mTLS connections on a listening socket and, per
 // connection, runs a NativeTransport(Role::Node) + NodeStageRunner so a
 // controller can execute stages. All on one reactor; not thread-safe.
@@ -26,7 +28,8 @@ public:
     NodeServer(psx::runtime::Reactor& reactor,
                psx::os::Socket listener,
                psx::os::TlsConfig serverConfig,
-               std::function<bool(std::string_view)> authorize = {});
+               std::function<bool(std::string_view)> authorize = {},
+               NodeStageRunner::CommandValidator validateCommand = {});
     ~NodeServer();
     NodeServer(const NodeServer&) = delete;
     NodeServer& operator=(const NodeServer&) = delete;
@@ -45,6 +48,8 @@ public:
     Metrics metrics() const;
 
 private:
+    friend struct NodeServerLifecycleProbe;
+
     struct Connection {
         std::unique_ptr<NodeStageRunner> runner;
         std::unique_ptr<NativeTransport> transport; // references runner; destroyed first
@@ -59,9 +64,12 @@ private:
     psx::os::Socket listener_;
     psx::os::TlsConfig serverConfig_;
     std::function<bool(std::string_view)> authorize_;
+    NodeStageRunner::CommandValidator validateCommand_;
     psx::runtime::Token listenerToken_ = 0;
     std::unordered_map<std::uint64_t, Connection> connections_;
     std::vector<std::uint64_t> pendingRemoval_;
+    psx::runtime::TimerId reapTimer_ = 0;
+    std::shared_ptr<void> lifetime_ = std::make_shared<int>(0);
     std::uint64_t nextConnId_ = 1;
     std::uint64_t acceptedTotal_ = 0;
     bool reapScheduled_ = false;

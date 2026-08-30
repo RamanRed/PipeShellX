@@ -171,14 +171,37 @@ TEST(InventoryTest, ImportsLegacyClientsTxt) {
 # clients.txt
 alice@w1.example.com
 ssh://bob@w2.example.com:2222
+ssh://carol@w3.example.com?identity=/keys/carol&san=spiffe://psx/node/w3&native_port=7443
 )");
-    EXPECT_EQ(inv.hosts().size(), 2U);
+    EXPECT_EQ(inv.hosts().size(), 3U);
     EXPECT_EQ(find(inv, "w1.example.com").user, "alice");
     const Host& w2 = find(inv, "w2.example.com");
     EXPECT_EQ(w2.user, "bob");
     EXPECT_EQ(w2.port, 2222);
+    const Host& w3 = find(inv, "w3.example.com");
+    EXPECT_EQ(w3.identity, "/keys/carol");
+    EXPECT_EQ(w3.san, "spiffe://psx/node/w3");
+    EXPECT_EQ(w3.nativePort, 7443);
+    const auto roundTrip = Inventory::parse(inv.serialize());
+    EXPECT_EQ(find(roundTrip, "w3.example.com").identity, "/keys/carol");
     // Imported hosts all belong to a single implicit group.
     EXPECT_FALSE(inv.selectGroup("all").empty());
+}
+
+TEST(InventoryTest, LegacyImportRejectsCredentialsAndDuplicateHosts) {
+    EXPECT_THROW(static_cast<void>(Inventory::importClientsTxt("alice:plaintext@node-1\n")), std::runtime_error);
+    EXPECT_THROW(static_cast<void>(Inventory::importClientsTxt("alice@node-1\nbob@node-1\n")), std::runtime_error);
+}
+
+TEST(InventoryTest, LegacyImportDiscardsSecretQueriesButKeepsSafeMetadata) {
+    const auto imported =
+        Inventory::importClientsTxt("ssh://alice@node-1?identity=/keys/alice&password=do-not-persist\n");
+    ASSERT_EQ(imported.hosts().size(), 1U);
+    EXPECT_EQ(imported.hosts().front().identity, "/keys/alice");
+    const std::string serialized = imported.serialize();
+    EXPECT_NE(serialized.find("identity=/keys/alice"), std::string::npos) << serialized;
+    EXPECT_EQ(serialized.find("password"), std::string::npos) << serialized;
+    EXPECT_EQ(serialized.find("do-not-persist"), std::string::npos) << serialized;
 }
 
 TEST(InventoryTest, DefaultsSectionRejectsUnknownKeys) {
@@ -197,4 +220,33 @@ node-2
     const Host& plain = find(inv, "node-2");
     EXPECT_TRUE(plain.san.empty());
     EXPECT_EQ(plain.nativePort, 0); // falls back to the run's --native-port
+}
+
+TEST(InventoryTest, ParsesAndSerializesPerHostTransport) {
+    const auto inv = Inventory::parse(R"(
+[fleet]
+ssh-node transport=ssh
+native-node transport=native san=spiffe://psx/node/native
+)");
+
+    EXPECT_EQ(find(inv, "ssh-node").transport, "ssh");
+    EXPECT_EQ(find(inv, "native-node").transport, "native");
+
+    const std::string serialized = inv.serialize();
+    EXPECT_NE(serialized.find("ssh-node transport=ssh"), std::string::npos) << serialized;
+    EXPECT_NE(serialized.find("native-node transport=native"), std::string::npos) << serialized;
+
+    const auto roundTrip = Inventory::parse(serialized);
+    EXPECT_EQ(find(roundTrip, "ssh-node").transport, "ssh");
+    EXPECT_EQ(find(roundTrip, "native-node").transport, "native");
+}
+
+TEST(InventoryTest, RejectsUnknownPerHostTransportWithALineDiagnostic) {
+    try {
+        static_cast<void>(Inventory::parse("[fleet]\nnode-1 transport=telnet\n"));
+        FAIL() << "an unsupported transport must be rejected";
+    } catch (const std::exception& ex) {
+        EXPECT_NE(std::string(ex.what()).find("line 2"), std::string::npos) << ex.what();
+        EXPECT_NE(std::string(ex.what()).find("ssh or native"), std::string::npos) << ex.what();
+    }
 }

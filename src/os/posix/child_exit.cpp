@@ -52,7 +52,7 @@ void onSigChld(int) {
     for (auto& writer : gWriters) {
         const int fd = writer.load(std::memory_order_relaxed);
         if (fd >= 0) {
-            (void)::write(fd, &byte, 1);
+            [[maybe_unused]] const ssize_t written = ::write(fd, &byte, 1);
         }
     }
     errno = savedErrno;
@@ -105,7 +105,7 @@ public:
         watched_.insert(pid);
         if (exited) {
             const char byte = 1; // already a zombie: make the handle readable now
-            (void)::write(static_cast<int>(Backend::native(pipe_.writer)), &byte, 1);
+            [[maybe_unused]] const ssize_t written = ::write(static_cast<int>(Backend::native(pipe_.writer)), &byte, 1);
         }
         return {};
     }

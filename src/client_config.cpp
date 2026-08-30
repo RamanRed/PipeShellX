@@ -183,14 +183,15 @@ void validateEntryFields(const ClientEntry& entry) {
 } // namespace
 
 std::string ClientEntry::clientId() const {
+    const std::string target = sshTarget();
     if (port == 22) {
-        return user + "@" + host;
+        return target;
     }
-    return user + "@" + host + ":" + std::to_string(port);
+    return target + ":" + std::to_string(port);
 }
 
 std::string ClientEntry::sshTarget() const {
-    return user + "@" + host;
+    return user.empty() ? host : user + "@" + host;
 }
 
 std::string ClientEntry::serialize() const {

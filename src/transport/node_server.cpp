@@ -11,13 +11,19 @@ using psx::os::Readiness;
 NodeServer::NodeServer(psx::runtime::Reactor& reactor,
                        psx::os::Socket listener,
                        psx::os::TlsConfig serverConfig,
-                       std::function<bool(std::string_view)> authorize)
+                       std::function<bool(std::string_view)> authorize,
+                       NodeStageRunner::CommandValidator validateCommand)
     : reactor_(reactor), listener_(std::move(listener)), serverConfig_(std::move(serverConfig)),
-      authorize_(std::move(authorize)) {
+      authorize_(std::move(authorize)), validateCommand_(std::move(validateCommand)) {
     serverConfig_.isServer = true;
 }
 
 NodeServer::~NodeServer() {
+    lifetime_.reset();
+    if (reapTimer_ != 0) {
+        (void)reactor_.cancel(reapTimer_);
+        reapTimer_ = 0;
+    }
     if (listenerToken_ != 0) {
         (void)reactor_.unwatch(listenerToken_);
     }
@@ -48,11 +54,11 @@ void NodeServer::acceptOne(psx::os::Socket socket) {
         return; // cannot secure this connection; the socket closes on scope exit
     }
     const std::uint64_t id = nextConnId_++;
-    auto runner = std::make_unique<NodeStageRunner>(reactor_);
+    auto runner = std::make_unique<NodeStageRunner>(reactor_, validateCommand_);
     auto transport = std::make_unique<NativeTransport>(
         reactor_, std::move(socket), std::move(tls.value()), Role::Node, *runner,
-        NativeTransport::Callbacks{.authorize = authorize_,
-                                   .onError = [this, id](const psx::Error&) { dropConnection(id); }},
+        NativeTransport::Callbacks{
+            .authorize = authorize_, .onReady = {}, .onError = [this, id](const psx::Error&) { dropConnection(id); }},
         kDefaultStreamWindow, kDefaultLease);
     runner->bind(transport->session());
     if (auto started = transport->start(); !started.ok()) {
@@ -80,11 +86,17 @@ void NodeServer::dropConnection(std::uint64_t id) {
     pendingRemoval_.push_back(id);
     if (!reapScheduled_) {
         reapScheduled_ = true;
-        reactor_.after(std::chrono::milliseconds(0), [this] { reap(); });
+        std::weak_ptr<void> lifetime = lifetime_;
+        reapTimer_ = reactor_.after(std::chrono::milliseconds(0), [this, lifetime] {
+            if (lifetime.lock()) {
+                reap();
+            }
+        });
     }
 }
 
 void NodeServer::reap() {
+    reapTimer_ = 0;
     reapScheduled_ = false;
     for (const std::uint64_t id : pendingRemoval_) {
         connections_.erase(id);

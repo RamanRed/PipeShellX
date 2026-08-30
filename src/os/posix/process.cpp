@@ -300,7 +300,7 @@ Result<pid_t> spawnViaPosixSpawn(const SpawnSpec& spec, Argv& argv, const std::v
 
 #if defined(__linux__)
 Result<void> applyLimits(pid_t pid, const Limits& limits) {
-    auto apply = [&](int resource, std::uint64_t value, const char* op) -> Result<void> {
+    auto apply = [&](decltype(RLIMIT_CPU) resource, std::uint64_t value, const char* op) -> Result<void> {
         const rlimit limit{static_cast<rlim_t>(value), static_cast<rlim_t>(value)};
         if (::prlimit(pid, resource, &limit, nullptr) == -1) {
             return posix::fromErrno(op, errno);
@@ -326,7 +326,7 @@ Result<void> applyLimits(pid_t pid, const Limits& limits) {
 // limits on Darwin, chdir on old glibc). Everything between fork() and exec
 // is async-signal-safe: no allocation, no C++ exceptions.
 [[noreturn]] void childFail(int errorFd, int err) noexcept {
-    (void)::write(errorFd, &err, sizeof(err));
+    [[maybe_unused]] const ssize_t written = ::write(errorFd, &err, sizeof(err));
     ::_exit(127);
 }
 

@@ -17,6 +17,7 @@ class StreamSink : public Sink {
 public:
     StreamSink(std::ostream& out, std::ostream& err, bool colour) : out_(out), err_(err), colour_(colour) {}
 
+    bool streamsLive() const noexcept override { return true; }
     void line(std::string_view stage, Channel channel, std::string_view text) override;
     void runFinished(const RunSummary& summary) override;
 

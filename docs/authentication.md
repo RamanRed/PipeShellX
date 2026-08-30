@@ -1,237 +1,226 @@
-# Authentication Guide
+# Authentication and Inventory
 
-## Overview
+PipeShellX has two remote transports:
 
-PipeShellX uses the system OpenSSH client for remote execution.
+- SSH delegates identity, host trust, and target-shell behavior to the system
+  OpenSSH client.
+- The optional psx/1 native backplane uses mutual TLS 1.3 with a fleet CA.
 
-Depending on the client and the current session state, authentication is handled in one of two ways:
+Transport authentication proves who may connect. It does not make commands
+safe or sandbox them; see [Security](security.md).
 
-- plain `ssh` for OpenSSH-managed authentication (keys, agent, certificates, `~/.ssh/config`)
-- `sshpass -d <fd> ssh ...` for password-backed clients added interactively
+## Inventory
 
-PipeShellX does not implement its own SSH protocol stack or credential exchange (see
-[ADR-002](adr/ADR-002-system-openssh-as-agentless-transport.md)).
-
-## The `ssh` invocation
-
-Every remote worker runs `ssh` resolved from `PATH` (OpenSSH ≥ 7.6 is required for
-`accept-new`) with these options (`src/ssh_auth.cpp`; each one is pinned by
-`tests/test_ssh_auth.cpp`):
-
-```text
-ssh -o StrictHostKeyChecking=accept-new \
-    -o UserKnownHostsFile=<inventory>.known_hosts \
-    -o BatchMode=yes \            # omitted for password-backed clients
-    -o ConnectTimeout=5 \
-    -o ServerAliveInterval=15 \
-    [-p <port>] [-i <identity>] user@host 'command'
-```
-
-| Option | Why |
-|---|---|
-| `StrictHostKeyChecking=accept-new` | unknown hosts are recorded on first contact; a host whose key **changes** is refused — this is what protects against man-in-the-middle after the first connection |
-| `UserKnownHostsFile="<inventory>.known_hosts"` | one trust store per inventory file (`clients.txt.known_hosts` next to `clients.txt`), so fleet keys stay out of `~/.ssh/known_hosts` and can be shipped with the inventory. The value is double-quoted with `%` doubled because OpenSSH parses `-o` values like config lines. Entries that were not loaded from an inventory (hand-built `ClientEntry` objects, e.g. the bench harness) carry no path and use OpenSSH's default `~/.ssh/known_hosts` |
-| `BatchMode=yes` | no interactive prompt can ever be answered, so a misconfigured host fails fast instead of hanging a worker; it is dropped only when `sshpass` has to answer a password prompt |
-| `ConnectTimeout=5` | unreachable hosts are reported within seconds |
-| `ServerAliveInterval=15` | a hung network is detected instead of waiting forever |
-
-### Host key changes
-
-When a recorded key no longer matches, OpenSSH prints its
-`REMOTE HOST IDENTIFICATION HAS CHANGED!` banner and exits. PipeShellX reports:
-
-```text
-CLIENT user@host
-ERROR: host key verification failed
-```
-
-Inspect the fingerprints, and if the change is legitimate remove the stale line
-from `<inventory>.known_hosts` (for example `ssh-keygen -R host -f clients.txt.known_hosts`).
-To pre-seed a trust store, run `ssh-keyscan` against the hosts, verify the
-fingerprints out of band, and save the output as `<inventory>.known_hosts`.
-
-## Supported Authentication Methods
-
-### Key-Based Authentication
-
-Key-based authentication works through the local OpenSSH client. If the remote
-host accepts the user's SSH keys, PipeShellX simply executes the `ssh` command
-above. This covers:
-
-- default private keys in `~/.ssh/`
-- explicit identity files stored in client configuration (`ssh://user@host?identity=/path/to/key`)
-- host-specific key selection configured by OpenSSH
-
-### Password Authentication
-
-Password authentication is supported through `sshpass`, but the password must be
-supplied through the interactive shell:
-
-```text
-PipeShell > add-client user@192.168.1.10
-Password required? (y/n) y
-Enter password:
-```
-
-After the password is captured, each remote worker child:
-
-1. creates a pipe and writes the password (plus a newline) into it;
-2. leaves only the read end open across `exec`;
-3. runs `sshpass -d <fd> ssh ... user@host 'command'`.
-
-The password is therefore never part of a command line, never visible in `ps`,
-never written to `clients.txt`, and never written to the log. It is kept in
-memory only for the lifetime of the running PipeShellX process. Passwords of
-4 KiB or more are rejected.
-
-Password authentication is a compatibility feature; keys, agents, or
-certificates are recommended and the password path is scheduled for removal in
-1.0 (`PLAN.md` §3.6).
-
-### ssh-agent Authentication
-
-If the user has a running `ssh-agent` and the correct key is loaded, PipeShellX
-works without any additional application-side configuration. OpenSSH discovers
-and uses the agent automatically when the worker runs `ssh`.
-
-### ~/.ssh/config Support
-
-PipeShellX also inherits OpenSSH behavior from `~/.ssh/config`, so the following
-can be managed outside the application:
-
-- per-host usernames
-- identity files
-- proxy or jump-host rules
-- agent preferences
-- host aliases
-- other OpenSSH connection settings
-
-If `~/.ssh/config` already allows a host to be reached with `ssh my-host`,
-PipeShellX benefits from the same OpenSSH resolution and authentication
-behavior when it invokes `ssh`.
-
-## Client Configuration Behavior
-
-Persistent client configuration in `clients.txt` supports:
-
-- `user@host`
-- `ssh://user@host`
-- `ssh://user@host:port?identity=/path/to/key`
-
-Passwords are intentionally not allowed in `clients.txt`. If a configuration
-entry contains `password=...`, the loader rejects it. This prevents password
-persistence on disk. The `known_hosts` location is derived from the inventory
-path at load time and is never written to the file.
-
-## Verification and Status Checks
-
-When a client is added, PipeShellX verifies connectivity using the same
-authentication method currently attached to that client:
-
-- key / agent / SSH config: plain `ssh`
-- interactive password: `sshpass -d <fd>` + `ssh`
-
-The verification command is `echo connected`. If stdout contains `connected`,
-the client is marked `ONLINE`; otherwise it is marked `OFFLINE` with the
-normalized error. The `status` command uses the same client-scoped path.
-
-## Failure Reporting
-
-SSH failures are normalized to one of:
-
-```text
-ERROR: unreachable host
-ERROR: connection failed
-ERROR: host key verification failed
-ERROR: authentication failed
-ERROR: command timed out
-ERROR: command failed with exit code N
-```
-
-This applies to both connection verification and remote command execution.
-
-## Security Notes
-
-Current security properties:
-
-- host keys are verified on every connection after the first (`accept-new`)
-- `ssh` is resolved from `PATH`, never a hard-coded path
-- passwords entered interactively are stored in memory only
-- passwords are passed to `sshpass` over a pipe, never on argv
-- passwords are not written to `clients.txt`, the terminal, or the log
-
-Remaining limitations:
-
-- the first connection to a host trusts whatever key it presents (TOFU) unless
-  `<inventory>.known_hosts` is pre-seeded
-- in-memory passwords live in ordinary `std::string` storage; `SecureString`
-  (`mlock`, zeroisation) arrives in Phase 6
-
-## Native backplane identity (`--transport native`)
-
-The psx/1 backplane authenticates with mutual TLS 1.3, not SSH host keys. Each
-peer presents an X.509 certificate issued by the fleet CA (`pipeshellx ca`); the
-identity is the certificate's SAN URI (e.g. `spiffe://psx/node/n1`). Both ends
-require and verify a peer certificate against the CA (`SSL_VERIFY_PEER |
-SSL_VERIFY_FAIL_IF_NO_PEER_CERT`), so an unsigned or self-signed peer never
-completes the handshake.
-
-CA trust alone proves a peer is *some* node the CA vouched for, not that it is
-*this* host. Pin the expected identity per host in the inventory so a
-mis-issued or swapped certificate is rejected:
+The current INI format groups hosts and carries transport-specific metadata:
 
 ```ini
-[fleet]
-node-1 san=spiffe://psx/node/n1 native_port=7433
-node-2 san=spiffe://psx/node/n2
+[defaults]
+user = deploy
+port = 22
+identity = /home/operator/.ssh/fleet_ed25519
+
+[web]
+web-01 tag=prod,blue transport=ssh
+web-02 user=release port=2222 transport=ssh
+
+[native]
+node-01 transport=native san=spiffe://psx/node/node-01 native_port=7433
 ```
 
-- `san=<uri>` — the controller admits the connection only if the node's
-  certificate SAN URI matches exactly; a mismatch fails with
-  `peer SAN-URI not authorized`. Omit it to trust any CA-signed peer.
-- `native_port=<port>` — the node's backplane port for this host; falls back to
-  the run's `--native-port` (default 7433) when unset.
+Supported per-host keys are `user`, `port`,
+`identity`, `tag`, `transport`,
+`san`, and `native_port`. Transport is strictly
+`ssh` or `native`; another value is a configuration error.
+`port` and `native_port` must be in `1..65535`.
 
-On the node side, `pipeshellx node --allow <SANs>` restricts which controller
-identities may connect; with no `--allow` list the node admits any CA-signed
-peer (and logs a warning).
+### Resolution precedence
 
-### Revocation (CRL)
+Commands that use normal inventory resolution choose the first candidate in
+this order:
 
-Compromised or retired identities are revoked with a CRL:
+1. explicit `-i FILE` / `--inventory FILE`;
+2. non-empty `PIPESHELLX_INVENTORY`;
+3. `./inventory.ini`;
+4. legacy `./clients.txt`;
+5. `$XDG_CONFIG_HOME/pipeshellx/inventory.ini`, or
+   `$HOME/.config/pipeshellx/inventory.ini` when XDG is unset.
+
+This precedence is used by `run`, `ping`, and
+`hosts list`. Native `diff` accepts the same resolver even
+though its usage normally supplies `-i`. A remote
+`pipe` requires its explicit `-i FILE`.
+
+Selectors `-g GROUP`, `-t TAG`, and
+`-H h1,h2` are mutually exclusive. With no selector,
+`run` and `ping` select every inventory host.
+
+### Per-host transport routing
+
+`run` honors the inventory's per-host `transport`:
+
+- without `--transport`, all selected hosts must have the same
+  transport;
+- a mixed SSH/native selection exits `2` and asks for an explicit
+  override;
+- `--transport ssh` or `--transport native` overrides every
+  selected host for that invocation.
+
+Transport-specific options are rejected with the other transport. For example,
+`--reuse`, `--retries`, and `--shell` are SSH
+options; certificates, CRL, native port, and canary are native options.
+
+`ping` currently probes SSH only and rejects any selected native host.
+`diff` and remote `pipe` use the native transport.
+
+### Safe host administration
+
+Listing may use normal precedence:
 
 ```bash
-pipeshellx ca revoke --ca ca --cert node-7.crt   # or: --serial <HEX>
+pipeshellx hosts list -i fleet.ini
 ```
 
-`ca revoke` records the serial in `ca/revoked.txt` and regenerates `ca/crl.pem`
-(signed by the CA, which carries `cRLSign`; valid 30 days — re-run to refresh).
-Distribute the CRL and enforce it on either end:
+The output columns are `HOST`, `GROUPS`, `TAGS`,
+and `TRANSPORT`.
+
+Mutations require an explicit INI target:
 
 ```bash
-pipeshellx node --cert n.crt --key n.key --ca ca.crt --listen H:P --crl ca/crl.pem
-pipeshellx run  --transport native --cert c.crt --key c.key --ca ca.crt --crl ca/crl.pem ...
+pipeshellx hosts add web-03 -i fleet.ini --group web \
+  --user deploy --transport ssh --identity /home/operator/.ssh/fleet_ed25519
+
+pipeshellx hosts add node-02 -i fleet.ini --group native \
+  --transport native --san spiffe://psx/node/node-02 --native-port 7433
+
+pipeshellx hosts remove web-03 -i fleet.ini
+pipeshellx hosts import clients.txt -i fleet.ini
 ```
 
-With `--crl` set, a peer whose certificate the CRL lists fails the handshake and
-the connection is refused; certificates absent from the CRL are unaffected.
+Add/import rejects duplicate hosts. Add rejects embedded URLs, query strings,
+`user:password@host`, and secret option names. Import preserves
+supported legacy connection metadata such as
+`ssh://deploy@host:2222?identity=/path/to/key` while discarding
+recognized legacy secret query values. No secret is serialized.
 
-### Enrollment (CSR)
+Mutations refuse an INI target whose basename is `clients.txt`,
+because that name always invokes legacy parsing. Rewrites use a same-directory
+temporary file plus atomic rename; existing permissions are preserved and a
+new POSIX target is created private.
 
-A node need not have its private key minted on the CA machine. It generates the
-key locally and sends only a CSR — the private key never leaves the host:
+## SSH authentication
+
+PipeShellX does not embed an SSH stack
+([ADR-002](adr/ADR-002-system-openssh-as-agentless-transport.md)). Each worker
+starts `ssh` resolved from `PATH` with the selected user,
+port, identity file, and these defaults:
+
+```text
+-o StrictHostKeyChecking=accept-new
+-o UserKnownHostsFile=<inventory>.known_hosts
+-o BatchMode=yes
+-o ConnectTimeout=5
+-o ServerAliveInterval=15
+```
+
+This supports keys, certificates, `ssh-agent`,
+`~/.ssh/config`, host aliases, and jump/proxy rules implemented by
+OpenSSH. `run` has no password option; unattended use should use
+keys, agents, or SSH certificates.
+
+`accept-new` is trust on first use: an unknown host is recorded, but a
+changed key is rejected. For stronger first-contact trust, pre-seed
+`<inventory>.known_hosts` with fingerprints verified out of band.
+When rotation is legitimate, inspect it before removing the stale entry, for
+example:
 
 ```bash
-# on the node: key stays here, CSR is safe to send anywhere
-pipeshellx node keygen --san spiffe://psx/node/n1 --out /etc/pipeshellx/tls
-
-# on the CA machine: the operator authorises the SAN (the CSR's request is not
-# trusted) and signs
-pipeshellx ca sign --ca ca --csr tls.csr --san spiffe://psx/node/n1 --out tls.crt
+ssh-keygen -R web-01 -f fleet.ini.known_hosts
 ```
 
-`ca sign` verifies the CSR self-signature (proof the requester holds the key),
-then issues a certificate carrying the CSR's public key and the operator's SAN.
-Copy `tls.crt` and `ca.crt` back to the node; the private key was never
-transmitted and never appeared on a command line. Any channel moves the CSR and
-cert (they are not secret) — SSH, configuration management, or a shared file.
+The legacy interactive shell can keep a password in memory for its session and
+passes it to `sshpass -d <fd>` over a pipe, never on argv. That
+compatibility path does not persist the password and does not change the
+recommended noninteractive model. Its ordinary string storage is not locked or
+guaranteed to be zeroed.
+
+SSH argv is serialized for the target remote shell. Choose
+`--shell posix|cmd|powershell` to match the target. OpenSSH then
+invokes that shell; PipeShellX does not claim shell-free remote execution.
+
+## Native mTLS identity
+
+Native mode requires a controller certificate, private key, and CA:
+
+```bash
+pipeshellx run -i fleet.ini -g native --transport native \
+  --cert controller.crt --key controller.key --ca ca/ca.crt -- uname -a
+```
+
+Both peers require and verify a CA-signed certificate. Identity is the
+certificate's SAN URI:
+
+- inventory `san=<uri>` pins the expected node identity exactly;
+- node `--allow SAN[,SAN...]` restricts controller identities;
+- omitting the inventory SAN trusts any CA-signed node;
+- omitting node `--allow` admits any CA-signed controller and logs a
+  warning.
+
+Start a node with an explicit controller allowlist:
+
+```bash
+pipeshellx node --listen 0.0.0.0:7433 \
+  --cert node.crt --key node.key --ca ca/ca.crt \
+  --allow spiffe://psx/controller/ops --policy /etc/pipeshellx/node.policy
+```
+
+`--policy` is optional node-side defense in depth. It rejects
+disallowed argv before process creation with stage exit `126`.
+Without it, an identity admitted by the CA/allowlist may request arbitrary
+argv.
+
+### Revocation
+
+Revoke a certificate or serial and distribute the regenerated CRL:
+
+```bash
+pipeshellx ca revoke --ca ca --cert node-07.crt
+
+pipeshellx node --listen 0.0.0.0:7433 \
+  --cert node.crt --key node.key --ca ca/ca.crt --crl ca/crl.pem
+
+pipeshellx run -i fleet.ini -g native --transport native \
+  --cert controller.crt --key controller.key --ca ca/ca.crt \
+  --crl ca/crl.pem -- uptime
+```
+
+CRL checking is opt-in on each endpoint. Operational distribution and refresh
+are the administrator's responsibility.
+
+### Node-generated keys and CSR enrollment
+
+Keep the private key on the node:
+
+```bash
+# Node: writes PREFIX.key and PREFIX.csr
+pipeshellx node keygen --san spiffe://psx/node/node-01 \
+  --out /etc/pipeshellx/node
+
+# CA host: verifies the CSR signature and applies the operator-approved SAN
+pipeshellx ca sign --ca ca --csr node.csr \
+  --san spiffe://psx/node/node-01 --out node.crt
+```
+
+Only the CSR and issued certificate need to move. The repository does not yet
+automate that transfer over SSH.
+
+## Native build and protocol limits
+
+Native support requires OpenSSL 3. Configure an SSH-only build with
+`-DPIPESHELLX_NATIVE_TRANSPORT=OFF`; that build reports a clear
+configuration error for `node`, `ca`, `diff`,
+native `run`, and remote `pipe` features.
+
+psx/1 has credit flow control, distinct stdout/stderr channels, leases, drain,
+and connection-loss fencing. It has no reconnect/resume, and native Windows
+controller/node support is not implemented. See
+[the wire protocol](wire_protocol.md) and [Windows](windows.md).

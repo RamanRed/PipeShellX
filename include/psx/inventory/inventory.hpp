@@ -20,6 +20,7 @@ struct Host {
     std::string host; // the address to connect to (defaults to name)
     std::uint16_t port = 22;
     std::string identity;            // identity file, if any
+    std::string transport = "ssh";   // per-host execution transport: ssh or native
     std::string san;                 // native transport: pinned SAN-URI identity (empty = trust the CA only)
     std::uint16_t nativePort = 0;    // native transport: node port (0 = use the run's --native-port)
     std::vector<std::string> groups; // groups this host belongs to, in file order
@@ -32,6 +33,13 @@ public:
     // a malformed section, unknown key, or bad value.
     static Inventory parse(std::string_view iniText, const std::string& sourcePath = {});
     static Inventory loadFromFile(const std::string& path);
+
+    // Resolves the inventory path with product precedence: an explicit CLI
+    // path, $PIPESHELLX_INVENTORY, ./inventory.ini, the legacy
+    // ./clients.txt, then the per-user config inventory. Returns an empty
+    // string when no candidate exists. An explicit or environment path is
+    // returned even when missing so loadFromFile() reports that exact error.
+    static std::string resolvePath(const std::string& explicitPath = {});
 
     // Imports a legacy clients.txt (one `user@host` / `ssh://…` per line) as a
     // single implicit group "all".
@@ -48,6 +56,14 @@ public:
 
     std::vector<std::string> groups() const;
     std::vector<std::string> tags() const;
+
+    // Canonical, secret-free INI used by the `hosts` mutation commands.
+    std::string serialize() const;
+
+    // Adds/removes whole host records. add() rejects duplicate names or
+    // addresses; remove() returns false when no matching host exists.
+    void add(Host host);
+    bool remove(std::string_view name);
 
 private:
     Host& upsert(const std::string& name); // find-or-create by name

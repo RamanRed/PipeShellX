@@ -14,7 +14,7 @@ jobs:
   baseline:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Enable ssh to localhost
         run: |
@@ -31,7 +31,7 @@ jobs:
 
       - name: Configure and build (Release)
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DPIPESHELLX_BUILD_TESTS=OFF
           cmake --build build --parallel --target pipeshellx_bench_baseline
 
       - name: Run baseline
@@ -39,7 +39,7 @@ jobs:
           ulimit -n 4096
           ./build/bin/pipeshellx_bench_baseline --spawn 2000 --fanout 50,100 | tee baseline.md
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: baseline-${{ github.run_id }}
           path: baseline.md

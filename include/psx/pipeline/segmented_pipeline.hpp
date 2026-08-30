@@ -67,10 +67,13 @@ private:
         bool done = false;
         void writeStdin(std::string_view bytes);
         void closeStdin();
+        void cancel();
     };
 
     void routeOutput(std::size_t index, std::string_view data);
     void onSegmentDone(std::size_t index, std::vector<int> exitCodes, const std::string& error);
+    void cancelUnfinishedUpstream();
+    void finishIfAllDone();
     void finish(Outcome outcome);
 
     psx::runtime::Reactor& reactor_;
@@ -80,6 +83,8 @@ private:
     std::function<void(Outcome)> onComplete_;
     std::vector<Segment> segments_;
     bool externalStdin_ = false;
+    bool finalSegmentDone_ = false;
+    bool cancellingUpstream_ = false;
     bool done_ = false;
 };
 

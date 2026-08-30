@@ -387,30 +387,11 @@ private:
                 endOfStream = true;
                 break;
             }
-            data.append(buffer, chunk.value());
-            if (sink_ != nullptr) {
+            capture(worker, isStdout, std::string_view(buffer, chunk.value()));
+            if (sink_ != nullptr && sink_->streamsLive()) {
                 framerFor(worker, isStdout)
                     .push(std::span<const char>(buffer, chunk.value()),
                           [&](std::string_view lineText, bool) { emitLine(worker, isStdout, lineText); });
-            }
-        }
-
-        if (outputCap_ != 0 && data.size() > outputCap_) {
-            const std::size_t over = data.size() - outputCap_;
-            if (outputPolicy_ == psx::stream::OverflowPolicy::Spool) {
-                // Spill the oldest bytes to disk (no loss) and keep the newest
-                // ring in memory. A spill failure degrades to drop-oldest.
-                psx::stream::SpoolBuffer& spool = isStdout ? worker.stdoutSpool : worker.stderrSpool;
-                if (!spool.append(std::string_view(data.data(), over))) {
-                    worker.droppedBytes += over;
-                }
-                data.erase(0, over);
-            } else if (outputPolicy_ == psx::stream::OverflowPolicy::DropOldest) {
-                data.erase(0, over); // keep the newest ring
-                worker.droppedBytes += over;
-            } else {
-                data.resize(outputCap_); // DropNewest: keep the oldest ring
-                worker.droppedBytes += over;
             }
         }
 
@@ -420,7 +401,7 @@ private:
                                           (isStdout ? " bytes from child stdout" : " bytes from child stderr"));
         }
         if (endOfStream) {
-            if (sink_ != nullptr) {
+            if (sink_ != nullptr && sink_->streamsLive()) {
                 framerFor(worker, isStdout).flush([&](std::string_view lineText, bool) {
                     emitLine(worker, isStdout, lineText);
                 });
@@ -432,6 +413,40 @@ private:
 
     psx::stream::LineFramer& framerFor(Worker& worker, bool isStdout) noexcept {
         return isStdout ? worker.stdoutFramer : worker.stderrFramer;
+    }
+
+    void capture(Worker& worker, bool isStdout, std::string_view chunk) {
+        std::string& ring = isStdout ? worker.stdoutData : worker.stderrData;
+        if (outputCap_ == 0) {
+            ring.append(chunk);
+            return;
+        }
+
+        if (outputPolicy_ == psx::stream::OverflowPolicy::DropNewest) {
+            const std::size_t available = outputCap_ - ring.size();
+            const std::size_t retained = std::min(available, chunk.size());
+            ring.append(chunk.data(), retained);
+            worker.droppedBytes += chunk.size() - retained;
+            return;
+        }
+
+        const std::size_t available = outputCap_ - ring.size();
+        const std::size_t overflow = chunk.size() > available ? chunk.size() - available : 0;
+        const std::size_t fromRing = std::min(overflow, ring.size());
+        const std::size_t fromChunk = overflow - fromRing;
+        if (outputPolicy_ == psx::stream::OverflowPolicy::Spool) {
+            psx::stream::SpoolBuffer& spool = isStdout ? worker.stdoutSpool : worker.stderrSpool;
+            if (fromRing != 0 && !spool.append(std::string_view(ring.data(), fromRing))) {
+                worker.droppedBytes += fromRing;
+            }
+            if (fromChunk != 0 && !spool.append(chunk.substr(0, fromChunk))) {
+                worker.droppedBytes += fromChunk;
+            }
+        } else {
+            worker.droppedBytes += overflow;
+        }
+        ring.erase(0, fromRing);
+        ring.append(chunk.substr(fromChunk));
     }
 
     void emitLine(const Worker& worker, bool isStdout, std::string_view lineText) {
@@ -721,7 +736,9 @@ ProcessManager::Result ProcessManager::execute(const std::vector<std::string>& a
                                       LogContext{.pid = worker.process.id(),
                                                  .sessionId = context.sessionId,
                                                  .clientId = context.clientId,
-                                                 .command = context.command},
+                                                 .command = context.command,
+                                                 .runId = context.runId,
+                                                 .stageId = context.stageId},
                                       "Child process created");
         }
     };
@@ -842,6 +859,18 @@ ProcessManager::Result ProcessManager::executeRemote(const std::vector<ClientEnt
             const bool ok = clientResult.exitCode == 0 && !clientResult.timedOut && clientResult.errorMessage.empty();
             succeeded += ok ? 1 : 0;
             totalDropped += clientResult.droppedBytes;
+            if (!options.sink->streamsLive()) {
+                const auto replay = [&](psx::sink::Channel channel, std::string_view bytes) {
+                    psx::stream::LineFramer framer;
+                    const auto emit = [&](std::string_view line, bool) {
+                        options.sink->line(clientResult.clientId, channel, line);
+                    };
+                    framer.push(std::span<const char>(bytes.data(), bytes.size()), emit);
+                    framer.flush(emit);
+                };
+                replay(psx::sink::Channel::Stdout, clientResult.stdoutData);
+                replay(psx::sink::Channel::Stderr, clientResult.stderrData);
+            }
             options.sink->stageFinished(clientResult.clientId,
                                         psx::sink::StageResult{clientResult.exitCode, clientResult.timedOut,
                                                                clientResult.errorMessage, clientResult.droppedBytes});

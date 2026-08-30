@@ -5,6 +5,8 @@
 #include "psx/runtime/reactor.hpp"
 #include "psx/transport/session.hpp"
 
+#include <functional>
+#include <optional>
 #include <string>
 #include <unordered_map>
 
@@ -15,15 +17,18 @@ namespace psx::transport {
 // EXIT frame when it finishes. Stage stdout/stderr are read on the reactor.
 // Not thread-safe (single reactor thread).
 //
-// Backpressure note: this slice does not yet gate reads on the send window — if
-// the controller withholds credit, the Session buffers the stage's output in
-// memory. A follow-up will deregister a stage's read interest when its stream's
-// send window is exhausted and resume on WINDOW_UPDATE.
+// When the controller withholds stream credit, stage pipe reads are suspended;
+// kernel pipe backpressure then blocks the producer until WINDOW_UPDATE makes
+// the stream writable again.
 class NodeStageRunner : public SessionHandler {
 public:
+    // A daemon-side authorization hook. Returning a reason rejects the OPEN
+    // before any pipes or process are created.
+    using CommandValidator = std::function<std::optional<std::string>(const OpenRequest&)>;
+
     // The Session this runner sends stage output/exit on must be bound() before
     // any stream is opened (it is the Session that dispatches onOpen to us).
-    explicit NodeStageRunner(psx::runtime::Reactor& reactor);
+    explicit NodeStageRunner(psx::runtime::Reactor& reactor, CommandValidator validator = {});
     void bind(Session& session) {
         session_ = &session;
         session_->onStreamWritable([this](StreamId id) { resumeReads(id); });
@@ -70,6 +75,7 @@ private:
     void finishIfDone(StreamId id);
 
     psx::runtime::Reactor& reactor_;
+    CommandValidator validator_;
     Session* session_ = nullptr;
     std::unordered_map<StreamId, Stage> stages_;
 };

@@ -1,13 +1,16 @@
 #include "psx/cli/ca_command.hpp"
 
 #include "psx/ca/certificate_authority.hpp"
+#include "psx/os/paths.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <optional>
 #include <sstream>
+#include <string_view>
+#include <unordered_set>
 #include <vector>
 
 namespace psx::cli {
@@ -24,7 +27,47 @@ std::optional<std::string> flag(const std::vector<std::string>& args, std::size_
     return std::nullopt;
 }
 
+bool validateFlags(const std::vector<std::string>& args,
+                   std::size_t from,
+                   std::initializer_list<std::string_view> allowed,
+                   std::ostream& err) {
+    std::unordered_set<std::string> allowedSet;
+    for (const auto option : allowed) {
+        allowedSet.emplace(option);
+    }
+    std::unordered_set<std::string> seen;
+    for (std::size_t i = from; i < args.size();) {
+        const std::string& option = args[i];
+        if (option.rfind("--", 0) != 0) {
+            err << "pipeshellx ca: unexpected argument '" << option << "'\n";
+            return false;
+        }
+        if (allowedSet.count(option) == 0) {
+            err << "pipeshellx ca: unknown option '" << option << "'\n";
+            return false;
+        }
+        if (!seen.insert(option).second) {
+            err << "pipeshellx ca: " << option << " may only be specified once\n";
+            return false;
+        }
+        if (i + 1 >= args.size() || args[i + 1].rfind("--", 0) == 0) {
+            err << "pipeshellx ca: " << option << " requires a value\n";
+            return false;
+        }
+        i += 2;
+    }
+    return true;
+}
+
 bool writeFile(const std::filesystem::path& path, const std::string& content, bool secret, std::ostream& err) {
+    if (secret) {
+        const auto written = psx::os::atomicWritePrivateFile(path.string(), content);
+        if (!written.ok()) {
+            err << "pipeshellx ca: cannot write " << path << ": " << written.error().message() << "\n";
+            return false;
+        }
+        return true;
+    }
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     if (!out) {
         err << "pipeshellx ca: cannot write " << path << "\n";
@@ -35,11 +78,6 @@ bool writeFile(const std::filesystem::path& path, const std::string& content, bo
     if (!out) {
         err << "pipeshellx ca: failed writing " << path << "\n";
         return false;
-    }
-    if (secret) {
-        std::error_code ec;
-        std::filesystem::permissions(path, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-                                     std::filesystem::perm_options::replace, ec);
     }
     return true;
 }
@@ -111,14 +149,49 @@ std::optional<std::string> slurp(const std::filesystem::path& path) {
     return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 }
 
+std::optional<std::string> canonicalSerialHex(std::string_view value) {
+    if (value.empty()) {
+        return std::nullopt;
+    }
+    std::string canonical;
+    canonical.reserve(value.size());
+    for (const char character : value) {
+        if (character >= '0' && character <= '9') {
+            canonical.push_back(character);
+        } else if (character >= 'A' && character <= 'F') {
+            canonical.push_back(character);
+        } else if (character >= 'a' && character <= 'f') {
+            canonical.push_back(static_cast<char>(character - 'a' + 'A'));
+        } else {
+            return std::nullopt;
+        }
+    }
+    const std::size_t firstSignificant = canonical.find_first_not_of('0');
+    return firstSignificant == std::string::npos ? std::string("0") : canonical.substr(firstSignificant);
+}
+
 int caRevoke(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
     const auto caDir = flag(args, 1, "--ca");
     const auto certPath = flag(args, 1, "--cert");
     const auto serialArg = flag(args, 1, "--serial");
-    if (!caDir || (!certPath && !serialArg)) {
-        err << "pipeshellx ca revoke: --ca DIR and one of --cert FILE / --serial HEX are required\n";
+    if (!caDir || certPath.has_value() == serialArg.has_value()) {
+        err << "pipeshellx ca revoke: --ca DIR and exactly one of --cert or --serial are required\n";
         return 2;
     }
+
+    // Validate operator-provided serials before reading or mutating any CA
+    // revocation state. OpenSSL's BN_hex2bn accepts a valid prefix, so relying
+    // on CRL construction alone would silently accept values such as 01ZZ.
+    std::string serial;
+    if (serialArg) {
+        const auto canonical = canonicalSerialHex(*serialArg);
+        if (!canonical) {
+            err << "pipeshellx ca revoke: --serial must be non-empty hexadecimal\n";
+            return 2;
+        }
+        serial = *canonical;
+    }
+
     const std::filesystem::path caBase(*caDir);
     const auto caKey = slurp(caBase / "ca.key");
     const auto caCert = slurp(caBase / "ca.crt");
@@ -133,10 +206,7 @@ int caRevoke(const std::vector<std::string>& args, std::ostream& out, std::ostre
     }
 
     // The serial to revoke: given directly, or read from the leaf certificate.
-    std::string serial;
-    if (serialArg) {
-        serial = *serialArg;
-    } else {
+    if (!serialArg) {
         const auto certPem = slurp(*certPath);
         if (!certPem) {
             err << "pipeshellx ca revoke: cannot read --cert " << *certPath << "\n";
@@ -147,10 +217,12 @@ int caRevoke(const std::vector<std::string>& args, std::ostream& out, std::ostre
             err << "pipeshellx ca revoke: " << s.error().message() << "\n";
             return 2;
         }
-        serial = s.value();
-    }
-    for (char& c : serial) {
-        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c))); // match serialHex's casing
+        const auto canonical = canonicalSerialHex(s.value());
+        if (!canonical) {
+            err << "pipeshellx ca revoke: certificate returned an invalid serial\n";
+            return 2;
+        }
+        serial = *canonical;
     }
 
     // Maintain the CA's revocation list, then regenerate the CRL from all of it.
@@ -163,7 +235,14 @@ int caRevoke(const std::vector<std::string>& args, std::ostream& out, std::ostre
                 line.pop_back();
             }
             if (!line.empty()) {
-                serials.push_back(line);
+                const auto canonical = canonicalSerialHex(line);
+                if (!canonical) {
+                    err << "pipeshellx ca revoke: revoked.txt contains a non-hexadecimal serial\n";
+                    return 2;
+                }
+                if (std::find(serials.begin(), serials.end(), *canonical) == serials.end()) {
+                    serials.push_back(*canonical);
+                }
             }
         }
     }
@@ -238,15 +317,27 @@ int caSubcommand(const std::vector<std::string>& args, std::ostream& out, std::o
         return 2;
     }
     if (args[0] == "init") {
+        if (!validateFlags(args, 1, {"--cn", "--dir"}, err)) {
+            return 2;
+        }
         return caInit(args, out, err);
     }
     if (args[0] == "issue") {
+        if (!validateFlags(args, 1, {"--san", "--ca", "--out"}, err)) {
+            return 2;
+        }
         return caIssue(args, out, err);
     }
     if (args[0] == "revoke") {
+        if (!validateFlags(args, 1, {"--ca", "--cert", "--serial"}, err)) {
+            return 2;
+        }
         return caRevoke(args, out, err);
     }
     if (args[0] == "sign") {
+        if (!validateFlags(args, 1, {"--ca", "--csr", "--san", "--out"}, err)) {
+            return 2;
+        }
         return caSign(args, out, err);
     }
     err << "pipeshellx ca: unknown action '" << args[0] << "' (expected init|issue|revoke|sign)\n";

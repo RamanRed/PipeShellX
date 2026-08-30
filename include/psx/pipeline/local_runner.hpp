@@ -47,6 +47,11 @@ public:
     void writeStdin(std::string_view bytes);
     void closeStdin();
 
+    // Stops every unfinished child, reaps it, and completes with the actual
+    // per-stage termination codes. Safe to call when an external downstream
+    // has already exited and this segment's remaining output is no longer used.
+    void cancel();
+
 private:
     struct Child {
         psx::os::Process process;

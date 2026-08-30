@@ -20,7 +20,6 @@
 #include "psx/os/tls.hpp"
 #include "psx/runtime/reactor.hpp"
 #include "psx/stream/line_framer.hpp"
-#include "psx/transport/canary_controller.hpp"
 #include "psx/transport/native_controller.hpp"
 
 #include <algorithm>
@@ -32,6 +31,7 @@
 
 #include <charconv>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <system_error>
 
@@ -119,7 +119,10 @@ std::size_t parseSize(const std::string& value) {
     }
     std::size_t count = 0;
     const auto* digitsEnd = value.data() + i;
-    (void)std::from_chars(value.data(), digitsEnd, count);
+    const auto [ptr, ec] = std::from_chars(value.data(), digitsEnd, count);
+    if (ec != std::errc{} || ptr != digitsEnd) {
+        throw CliError("--ring size is out of range: '" + value + "'");
+    }
     std::string suffix = value.substr(i);
     std::size_t multiplier = 1;
     if (suffix.empty() || suffix == "B") {
@@ -133,7 +136,21 @@ std::size_t parseSize(const std::string& value) {
     } else {
         throw CliError("--ring: unknown size suffix '" + suffix + "'");
     }
+    if (count > std::numeric_limits<std::size_t>::max() / multiplier) {
+        throw CliError("--ring size is out of range: '" + value + "'");
+    }
     return count * multiplier;
+}
+
+void validateCanarySpec(const std::string& value) {
+    const bool percent = !value.empty() && value.back() == '%';
+    const std::string_view digits(value.data(), value.size() - (percent ? 1U : 0U));
+    std::uint64_t parsed = 0;
+    const auto* end = digits.data() + digits.size();
+    const auto [ptr, ec] = std::from_chars(digits.data(), end, parsed);
+    if (digits.empty() || ec != std::errc{} || ptr != end || parsed == 0) {
+        throw CliError("--canary expects a positive integer or positive integer percentage, got '" + value + "'");
+    }
 }
 
 void setSink(RunInvocation& invocation, SinkMode mode, bool& sinkSet) {
@@ -151,18 +168,26 @@ std::size_t canaryCount(const std::string& spec, std::size_t total) {
         return 0;
     }
     const bool percent = !spec.empty() && spec.back() == '%';
-    const std::string number = percent ? spec.substr(0, spec.size() - 1) : spec;
-    long long value = 1;
-    try {
-        value = std::stoll(number);
-    } catch (const std::exception&) {
-        value = 1; // a malformed spec falls back to a single canary host
+    const std::string_view number(spec.data(), spec.size() - (percent ? 1U : 0U));
+    std::uint64_t value = 1;
+    const auto* end = number.data() + number.size();
+    const auto [ptr, ec] = std::from_chars(number.data(), end, value);
+    if (number.empty() || ec != std::errc{} || ptr != end || value == 0) {
+        value = 1; // direct callers still get a conservative one-host fallback
     }
-    if (value < 0) {
-        value = 1;
+    std::size_t count = 0;
+    if (percent) {
+        if (value >= 100) {
+            count = total;
+        } else {
+            // Overflow-safe ceil(total * value / 100), with value in [1, 99].
+            count = (total / 100) * static_cast<std::size_t>(value);
+            const std::size_t remainder = (total % 100) * static_cast<std::size_t>(value);
+            count += remainder / 100 + (remainder % 100 == 0 ? 0 : 1);
+        }
+    } else {
+        count = value >= total ? total : static_cast<std::size_t>(value);
     }
-    std::size_t count = percent ? static_cast<std::size_t>((value * static_cast<long long>(total) + 99) / 100)
-                                : static_cast<std::size_t>(value);
     count = std::clamp<std::size_t>(count, 1, total);
     return count;
 }
@@ -227,33 +252,45 @@ RunInvocation parseRun(const std::vector<std::string>& args) {
         } else if (arg == "--reuse") {
             invocation.reuse = true;
         } else if (arg == "--retries") {
+            invocation.retriesExplicit = true;
             invocation.retries = parseIntArg(valueFor(i, arg), "--retries");
         } else if (arg == "--fail-fast") {
             invocation.failFast = true;
         } else if (arg == "--idempotent") {
             invocation.idempotent = true;
         } else if (arg == "--canary") {
+            invocation.canaryExplicit = true;
             invocation.canary = valueFor(i, arg);
+            validateCanarySpec(invocation.canary);
         } else if (arg == "--shell") {
+            invocation.shellExplicit = true;
             invocation.shell = parseShell(valueFor(i, arg));
         } else if (arg == "--audit-log") {
             invocation.auditPath = valueFor(i, arg);
         } else if (arg == "--transport") {
+            invocation.transportExplicit = true;
             const std::string value = valueFor(i, arg);
             if (value == "native") {
                 invocation.native = true;
-            } else if (value != "ssh") {
+            } else if (value == "ssh") {
+                invocation.native = false;
+            } else {
                 throw CliError("--transport must be ssh or native, got '" + value + "'");
             }
         } else if (arg == "--cert") {
+            invocation.certExplicit = true;
             invocation.certPath = valueFor(i, arg);
         } else if (arg == "--key") {
+            invocation.keyExplicit = true;
             invocation.keyPath = valueFor(i, arg);
         } else if (arg == "--ca") {
+            invocation.caExplicit = true;
             invocation.caPath = valueFor(i, arg);
         } else if (arg == "--crl") {
+            invocation.crlExplicit = true;
             invocation.crlPath = valueFor(i, arg);
         } else if (arg == "--native-port") {
+            invocation.nativePortExplicit = true;
             invocation.nativePort = parseIntArg(valueFor(i, arg), "--native-port");
         } else if (arg == "--no-color" || arg == "--no-colour") {
             invocation.colour = false;
@@ -270,6 +307,42 @@ RunInvocation parseRun(const std::vector<std::string>& args) {
     }
     if (invocation.command.empty()) {
         throw CliError("no command given after `--`");
+    }
+    if (invocation.native) {
+        if (invocation.nativePort <= 0 || invocation.nativePort > 65535) {
+            throw CliError("--native-port must be in the range 1..65535");
+        }
+        if (invocation.reuse) {
+            throw CliError("--reuse is only supported with --transport ssh");
+        }
+        if (invocation.idempotent) {
+            throw CliError("--idempotent is only supported with --transport ssh");
+        }
+        if (invocation.retriesExplicit) {
+            throw CliError("--retries is only supported with --transport ssh");
+        }
+        if (invocation.shellExplicit) {
+            throw CliError("--shell is only supported with --transport ssh");
+        }
+    } else if (invocation.transportExplicit) {
+        if (invocation.canaryExplicit) {
+            throw CliError("--canary is only supported with --transport native");
+        }
+        if (invocation.certExplicit) {
+            throw CliError("--cert is only supported with --transport native");
+        }
+        if (invocation.keyExplicit) {
+            throw CliError("--key is only supported with --transport native");
+        }
+        if (invocation.caExplicit) {
+            throw CliError("--ca is only supported with --transport native");
+        }
+        if (invocation.crlExplicit) {
+            throw CliError("--crl is only supported with --transport native");
+        }
+        if (invocation.nativePortExplicit) {
+            throw CliError("--native-port is only supported with --transport native");
+        }
     }
     return invocation;
 }
@@ -341,7 +414,9 @@ int runNative(const RunInvocation& invocation,
         crl = *pem;
     }
 
-    auto reactor = psx::runtime::Reactor::create();
+    auto reactor = psx::runtime::Reactor::create({.backend = psx::os::Poller::Backend::Auto,
+                                                  .childExit = psx::os::ChildExitMode::Auto,
+                                                  .signals = {psx::os::Signal::Interrupt, psx::os::Signal::Terminate}});
     if (!reactor.ok()) {
         err << "pipeshellx run: " << reactor.error().message() << "\n";
         return 2;
@@ -355,13 +430,17 @@ int runNative(const RunInvocation& invocation,
         psx::stream::LineFramer err;
     };
     auto framers = std::make_shared<std::unordered_map<std::string, HostFramers>>();
+    const bool streamLive = sink != nullptr && sink->streamsLive();
     auto emit = [sink](const std::string& host, psx::sink::Channel channel, std::string_view line) {
         if (sink != nullptr) {
             sink->line(host, channel, line);
         }
     };
     psx::transport::NativeController::OnOutput onOutput =
-        [framers, emit](const std::string& host, std::string_view bytes, psx::transport::Channel channel) {
+        [framers, emit, streamLive](const std::string& host, std::string_view bytes, psx::transport::Channel channel) {
+            if (!streamLive) {
+                return;
+            }
             const bool err = channel == psx::transport::Channel::Stderr;
             HostFramers& hf = (*framers)[host];
             const auto sinkChannel = err ? psx::sink::Channel::Stderr : psx::sink::Channel::Stdout;
@@ -382,111 +461,211 @@ int runNative(const RunInvocation& invocation,
         }
     }
 
-    int exitCode = 0;
+    const std::string runId = psx::runtime::newRunId();
+    std::unique_ptr<psx::audit::AuditLog> audit;
+    if (!invocation.auditPath.empty()) {
+        audit = std::make_unique<psx::audit::AuditLog>(invocation.auditPath);
+        if (!audit->ok()) {
+            err << "pipeshellx run: warning: cannot open audit log " << invocation.auditPath << "\n";
+            audit.reset();
+        } else {
+            audit->runStarted(runId, quoteRemoteCommand(invocation.command, RemoteShell::Posix), clients.size());
+        }
+    }
+
+    enum class StopCause { None, Timeout, Interrupt };
+    StopCause stopCause = StopCause::None;
+    bool finalized = false;
+    int exitCode = 1;
+    psx::transport::NativeController* activeController = nullptr;
+
     auto finishResults = [&](std::vector<psx::transport::NativeController::HostResult> results) {
+        if (finalized) {
+            return;
+        }
+        finalized = true;
         std::size_t succeeded = 0;
-        for (auto& res : results) {
-            HostFramers& hf = (*framers)[res.host];
-            hf.out.flush([&](std::string_view line, bool) { emit(res.host, psx::sink::Channel::Stdout, line); });
-            hf.err.flush([&](std::string_view line, bool) { emit(res.host, psx::sink::Channel::Stderr, line); });
-            const bool ok = res.ok && res.exitCode == 0 && res.error.empty();
-            succeeded += ok ? 1 : 0;
-            if (!ok && exitCode == 0) {
-                exitCode = 1;
+        std::uint64_t droppedBytes = 0;
+        bool anyCancelled = stopCause == StopCause::Interrupt;
+        for (std::size_t i = 0; i < results.size(); ++i) {
+            auto& res = results[i];
+            if (streamLive) {
+                HostFramers& hf = (*framers)[res.host];
+                hf.out.flush([&](std::string_view line, bool) { emit(res.host, psx::sink::Channel::Stdout, line); });
+                hf.err.flush([&](std::string_view line, bool) { emit(res.host, psx::sink::Channel::Stderr, line); });
+            } else if (sink != nullptr) {
+                const auto replay = [&](psx::sink::Channel channel, std::string_view bytes) {
+                    psx::stream::LineFramer framer;
+                    const auto emitLine = [&](std::string_view line, bool) { emit(res.host, channel, line); };
+                    framer.push(std::span<const char>(bytes.data(), bytes.size()), emitLine);
+                    framer.flush(emitLine);
+                };
+                replay(psx::sink::Channel::Stdout, res.stdoutData);
+                replay(psx::sink::Channel::Stderr, res.stderrData);
             }
+            const bool ok =
+                res.ok && res.exitCode == 0 && res.error.empty() && !res.timedOut && !res.cancelled && !res.aborted;
+            succeeded += ok ? 1 : 0;
+            droppedBytes += res.droppedBytes;
+            anyCancelled = anyCancelled || res.cancelled;
             if (sink != nullptr) {
                 sink->stageFinished(res.host, psx::sink::StageResult{.exitCode = res.exitCode,
-                                                                     .timedOut = false,
+                                                                     .timedOut = res.timedOut,
                                                                      .errorMessage = res.error,
-                                                                     .droppedBytes = 0});
+                                                                     .droppedBytes = res.droppedBytes});
+            }
+            if (audit) {
+                audit->stageFinished(runId, psx::audit::StageRecord{.host = res.host,
+                                                                    .stageId = "s" + std::to_string(i),
+                                                                    .exitCode = res.exitCode,
+                                                                    .attempts = 1,
+                                                                    .timedOut = res.timedOut,
+                                                                    .cancelled = res.cancelled,
+                                                                    .aborted = res.aborted,
+                                                                    .droppedBytes = res.droppedBytes,
+                                                                    .error = res.error});
             }
         }
+        exitCode = anyCancelled ? kExitCancelled : (succeeded == results.size() ? 0 : 1);
         if (sink != nullptr) {
-            sink->runFinished(psx::sink::RunSummary{results.size(), succeeded, results.size() - succeeded, 0, false});
+            sink->runFinished(psx::sink::RunSummary{.stages = results.size(),
+                                                    .succeeded = succeeded,
+                                                    .failed = results.size() - succeeded,
+                                                    .droppedBytes = droppedBytes,
+                                                    .cancelled = anyCancelled});
+        }
+        if (audit) {
+            audit->runFinished(runId, psx::audit::RunRecord{.total = results.size(),
+                                                            .succeeded = succeeded,
+                                                            .failed = results.size() - succeeded,
+                                                            .cancelled = anyCancelled,
+                                                            .exitCode = exitCode});
         }
         r.stop();
     };
-    auto onComplete = [&](std::vector<psx::transport::NativeController::HostResult> results) {
-        finishResults(std::move(results));
+
+    auto cancellationResult = [&](const psx::transport::NativeController::Target& target, std::string message,
+                                  bool aborted) {
+        psx::transport::NativeController::HostResult result;
+        result.host = target.host;
+        result.error = std::move(message);
+        result.timedOut = stopCause == StopCause::Timeout;
+        result.cancelled = stopCause == StopCause::Interrupt;
+        result.aborted = aborted && stopCause == StopCause::None;
+        return result;
     };
 
-    const psx::os::TlsConfig tlsConfig{.certificatePem = *cert, .privateKeyPem = *key, .caPem = *ca, .crlPem = crl};
-    if (!invocation.canary.empty()) {
-        // Staged rollout: run the first `canaryCount` hosts and only continue to
-        // the rest if every canary host exits cleanly (ok && exit 0 && no error).
-        const std::size_t count = canaryCount(invocation.canary, targets.size());
-        psx::transport::CanaryController controller(r, tlsConfig, onOutput);
-        (void)controller.start(targets, count, invocation.command, onComplete);
-        if (invocation.timeoutSec > 0) {
-            r.after(std::chrono::seconds(invocation.timeoutSec), [&] { controller.cancel("timed out"); });
-        }
-        (void)r.run();
-    } else if (invocation.failFast) {
-        // One controller per host exposes each final result so a failed host
-        // can cancel its siblings before the fleet-wide callback.
-        std::vector<std::unique_ptr<psx::transport::NativeController>> controllers;
-        controllers.reserve(targets.size());
-        for (std::size_t i = 0; i < targets.size(); ++i) {
-            controllers.push_back(std::make_unique<psx::transport::NativeController>(r, tlsConfig, onOutput));
-        }
+    const psx::os::TlsConfig tlsConfig{
+        .certificatePem = *cert, .privateKeyPem = *key, .caPem = *ca, .crlPem = crl, .isServer = false};
+    const psx::transport::NativeController::Options controllerOptions{
+        .concurrency = static_cast<std::size_t>(invocation.concurrency),
+        .policy = invocation.policy,
+        .ringBytes = invocation.ringBytes,
+        .failFast = invocation.failFast};
 
-        std::vector<psx::transport::NativeController::HostResult> results(targets.size());
-        std::vector<bool> received(targets.size(), false);
-        std::size_t completed = 0;
-        bool failed = false;
-        auto completeOne = [&](std::size_t index,
-                               std::vector<psx::transport::NativeController::HostResult> hostResults) {
-            if (received[index]) {
+    auto signalRegistration = r.onSignal([&](psx::os::Signal) {
+        if (finalized || stopCause == StopCause::Interrupt) {
+            return;
+        }
+        stopCause = StopCause::Interrupt;
+        if (activeController != nullptr) {
+            activeController->cancel("cancelled", psx::transport::NativeController::CancelKind::Interrupt);
+        }
+    });
+    if (!signalRegistration.ok()) {
+        err << "pipeshellx run: cannot register interrupt handling: " << signalRegistration.error().message() << "\n";
+        return 2;
+    }
+
+    std::unique_ptr<psx::transport::NativeController> firstController;
+    std::unique_ptr<psx::transport::NativeController> restController;
+    std::vector<psx::transport::NativeController::Target> canaryTargets;
+    std::vector<psx::transport::NativeController::Target> restTargets;
+    if (!invocation.canary.empty()) {
+        const std::size_t count = canaryCount(invocation.canary, targets.size());
+        canaryTargets.assign(targets.begin(), targets.begin() + static_cast<std::ptrdiff_t>(count));
+        restTargets.assign(targets.begin() + static_cast<std::ptrdiff_t>(count), targets.end());
+        firstController = std::make_unique<psx::transport::NativeController>(r, tlsConfig, onOutput);
+        activeController = firstController.get();
+        auto started = firstController->start(
+            canaryTargets, invocation.command,
+            [&](std::vector<psx::transport::NativeController::HostResult> canaryResults) {
+                const bool allOk = std::all_of(canaryResults.begin(), canaryResults.end(), [](const auto& result) {
+                    return result.ok && result.exitCode == 0 && result.error.empty() && !result.timedOut &&
+                           !result.cancelled && !result.aborted;
+                });
+                if (!allOk || restTargets.empty() || stopCause != StopCause::None) {
+                    const std::string message =
+                        stopCause == StopCause::Timeout
+                            ? "timed out"
+                            : (stopCause == StopCause::Interrupt ? "cancelled" : "skipped: canary failed");
+                    for (const auto& target : restTargets) {
+                        canaryResults.push_back(cancellationResult(target, message, true));
+                    }
+                    finishResults(std::move(canaryResults));
+                    return;
+                }
+                restController = std::make_unique<psx::transport::NativeController>(r, tlsConfig, onOutput);
+                activeController = restController.get();
+                auto combined = std::make_shared<std::vector<psx::transport::NativeController::HostResult>>(
+                    std::move(canaryResults));
+                auto restStarted = restController->start(
+                    restTargets, invocation.command,
+                    [&, combined](std::vector<psx::transport::NativeController::HostResult> restResults) mutable {
+                        combined->insert(combined->end(), std::make_move_iterator(restResults.begin()),
+                                         std::make_move_iterator(restResults.end()));
+                        finishResults(std::move(*combined));
+                    },
+                    controllerOptions);
+                if (!restStarted.ok()) {
+                    for (const auto& target : restTargets) {
+                        combined->push_back(cancellationResult(target, restStarted.error().message(), false));
+                    }
+                    finishResults(std::move(*combined));
+                }
+            },
+            controllerOptions);
+        if (!started.ok()) {
+            std::vector<psx::transport::NativeController::HostResult> results;
+            results.reserve(targets.size());
+            for (const auto& target : targets) {
+                results.push_back(cancellationResult(target, started.error().message(), false));
+            }
+            finishResults(std::move(results));
+        }
+    } else {
+        firstController = std::make_unique<psx::transport::NativeController>(r, tlsConfig, onOutput);
+        activeController = firstController.get();
+        auto started = firstController->start(
+            targets, invocation.command,
+            [&](std::vector<psx::transport::NativeController::HostResult> results) {
+                finishResults(std::move(results));
+            },
+            controllerOptions);
+        if (!started.ok()) {
+            std::vector<psx::transport::NativeController::HostResult> results;
+            results.reserve(targets.size());
+            for (const auto& target : targets) {
+                results.push_back(cancellationResult(target, started.error().message(), false));
+            }
+            finishResults(std::move(results));
+        }
+    }
+
+    if (invocation.timeoutSec > 0) {
+        r.after(std::chrono::seconds(invocation.timeoutSec), [&] {
+            if (finalized || stopCause != StopCause::None) {
                 return;
             }
-            received[index] = true;
-            ++completed;
-            results[index] = std::move(hostResults.front());
-            const auto& result = results[index];
-            const bool ok = result.ok && result.exitCode == 0 && result.error.empty();
-            if (!ok && !failed) {
-                failed = true;
-                for (auto& controller : controllers) {
-                    controller->cancel("fail-fast");
-                }
+            stopCause = StopCause::Timeout;
+            if (activeController != nullptr) {
+                activeController->cancel("timed out", psx::transport::NativeController::CancelKind::Timeout);
             }
-            if (completed == targets.size()) {
-                finishResults(std::move(results));
-            }
-        };
-
-        for (std::size_t i = 0; i < targets.size(); ++i) {
-            auto started =
-                controllers[i]->start({targets[i]}, invocation.command,
-                                      [&, i](std::vector<psx::transport::NativeController::HostResult> hostResults) {
-                                          completeOne(i, std::move(hostResults));
-                                      });
-            if (!started.ok() && !received[i]) {
-                completeOne(i, {psx::transport::NativeController::HostResult{.host = targets[i].host,
-                                                                             .ok = false,
-                                                                             .exitCode = -1,
-                                                                             .error = started.error().message(),
-                                                                             .output = {}}});
-            }
-            if (failed) {
-                controllers[i]->cancel("fail-fast");
-            }
-        }
-        if (invocation.timeoutSec > 0) {
-            r.after(std::chrono::seconds(invocation.timeoutSec), [&] {
-                for (auto& controller : controllers) {
-                    controller->cancel("timed out");
-                }
-            });
-        }
-        (void)r.run();
-    } else {
-        psx::transport::NativeController controller(r, tlsConfig, onOutput);
-        (void)controller.start(targets, invocation.command, onComplete);
-        if (invocation.timeoutSec > 0) {
-            r.after(std::chrono::seconds(invocation.timeoutSec), [&] { controller.cancel("timed out"); });
-        }
-        (void)r.run();
+        });
+    }
+    if (auto ran = r.run(); !ran.ok() && !finalized) {
+        err << "pipeshellx run: " << ran.error().message() << "\n";
+        return 2;
     }
     return exitCode;
 }
@@ -495,6 +674,61 @@ int runNative(const RunInvocation& invocation,
 #endif // PIPESHELLX_HAVE_TLS
 
 int runSubcommand(const RunInvocation& invocation, std::ostream& out, std::ostream& err, bool colourTty) {
+    if (invocation.command.empty() || invocation.command.front().empty()) {
+        err << "pipeshellx run: no command given\n";
+        return 2;
+    }
+    auto validateNativeOptions = [&]() {
+        const char* unsupported = nullptr;
+        if (invocation.reuse) {
+            unsupported = "--reuse";
+        } else if (invocation.idempotent) {
+            unsupported = "--idempotent";
+        } else if (invocation.retriesExplicit || invocation.retries != 0) {
+            unsupported = "--retries";
+        } else if (invocation.shellExplicit || invocation.shell != RemoteShell::Posix) {
+            unsupported = "--shell";
+        }
+        if (unsupported != nullptr) {
+            err << "pipeshellx run: " << unsupported << " is only supported with --transport ssh\n";
+            return false;
+        }
+        if (invocation.nativePort <= 0 || invocation.nativePort > 65535) {
+            err << "pipeshellx run: --native-port must be in the range 1..65535\n";
+            return false;
+        }
+        return true;
+    };
+    auto validateSshOptions = [&]() {
+        const char* unsupported = nullptr;
+        if (invocation.canaryExplicit || !invocation.canary.empty()) {
+            unsupported = "--canary";
+        } else if (invocation.certExplicit || !invocation.certPath.empty()) {
+            unsupported = "--cert";
+        } else if (invocation.keyExplicit || !invocation.keyPath.empty()) {
+            unsupported = "--key";
+        } else if (invocation.caExplicit || !invocation.caPath.empty()) {
+            unsupported = "--ca";
+        } else if (invocation.crlExplicit || !invocation.crlPath.empty()) {
+            unsupported = "--crl";
+        } else if (invocation.nativePortExplicit) {
+            unsupported = "--native-port";
+        }
+        if (unsupported != nullptr) {
+            err << "pipeshellx run: " << unsupported << " is only supported with --transport native\n";
+            return false;
+        }
+        return true;
+    };
+    // Preserve the direct RunInvocation API: native=true is itself an explicit
+    // native request even when an older caller did not know transportExplicit.
+    if (invocation.native && !validateNativeOptions()) {
+        return 2;
+    }
+    if (invocation.transportExplicit && !invocation.native && !validateSshOptions()) {
+        return 2;
+    }
+
     if (!invocation.policyPath.empty()) {
         try {
             const auto policy = psx::policy::Policy::loadFromFile(invocation.policyPath);
@@ -514,7 +748,28 @@ int runSubcommand(const RunInvocation& invocation, std::ostream& out, std::ostre
     }
     const std::vector<ClientEntry>& clients = resolved.clients;
 
-    if (invocation.native) {
+    const bool hasTransportOverride = invocation.transportExplicit || invocation.native;
+    bool useNative = invocation.native;
+    if (!hasTransportOverride) {
+        const std::string& selectedTransport = clients.front().transport;
+        for (const auto& client : clients) {
+            if (client.transport != selectedTransport) {
+                err << "pipeshellx run: selected inventory contains mixed ssh/native transports; "
+                       "pass --transport ssh or --transport native to override\n";
+                return 2;
+            }
+        }
+        useNative = selectedTransport == "native";
+    }
+    if (useNative) {
+        if (!invocation.native && !validateNativeOptions()) {
+            return 2;
+        }
+    } else if (!validateSshOptions()) {
+        return 2;
+    }
+
+    if (useNative) {
 #if defined(PIPESHELLX_HAVE_TLS)
         auto nativeSink = makeSink(invocation, out, err, colourTty);
         return runNative(invocation, clients, nativeSink.get(), err);

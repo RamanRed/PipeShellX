@@ -15,7 +15,8 @@ using psx::os::Pipe;
 using psx::os::Readiness;
 using psx::os::SpawnSpec;
 
-NodeStageRunner::NodeStageRunner(psx::runtime::Reactor& reactor) : reactor_(reactor) {}
+NodeStageRunner::NodeStageRunner(psx::runtime::Reactor& reactor, CommandValidator validator)
+    : reactor_(reactor), validator_(std::move(validator)) {}
 
 NodeStageRunner::~NodeStageRunner() {
     // Fencing: the controller connection dropping (peer close, kill -9, or a
@@ -44,6 +45,14 @@ void NodeStageRunner::onOpen(StreamId id, const OpenRequest& request) {
     if (request.argv.empty()) {
         session_->sendExit(id, {ExitStatus::Kind::Exited, 127});
         return;
+    }
+    if (validator_) {
+        if (const auto rejection = validator_(request)) {
+            const std::string diagnostic = "pipeshellx node: command rejected by policy: " + *rejection + "\n";
+            session_->sendData(id, diagnostic, /*endStream=*/false, Channel::Stderr);
+            session_->sendExit(id, {ExitStatus::Kind::Exited, 126});
+            return;
+        }
     }
 
     auto stdoutPipe = Pipe::create();

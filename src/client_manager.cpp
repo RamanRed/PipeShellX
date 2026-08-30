@@ -88,7 +88,9 @@ void ClientManager::addClient(const std::string& specification, const std::optio
     const LogContext addContext{.pid = psx::os::currentProcessId(),
                                 .sessionId = "client-manager",
                                 .clientId = entry.clientId(),
-                                .command = "add-client " + entry.serialize()};
+                                .command = "add-client " + entry.serialize(),
+                                .runId = {},
+                                .stageId = {}};
     Logger::getInstance().log(LogLevel::INFO, addContext, "Adding client");
 
     clients_.push_back(ManagedClient{
@@ -113,7 +115,9 @@ bool ClientManager::removeClient(const std::string& identifier) {
     const LogContext removeContext{.pid = psx::os::currentProcessId(),
                                    .sessionId = "client-manager",
                                    .clientId = it->entry.clientId(),
-                                   .command = "remove-client " + identifier};
+                                   .command = "remove-client " + identifier,
+                                   .runId = {},
+                                   .stageId = {}};
     Logger::getInstance().log(LogLevel::INFO, removeContext, "Removing client");
 
     clients_.erase(it);
@@ -131,7 +135,9 @@ bool ClientManager::removeClient(int id) {
     const LogContext removeContext{.pid = psx::os::currentProcessId(),
                                    .sessionId = "client-manager",
                                    .clientId = it->entry.clientId(),
-                                   .command = "remove-client " + std::to_string(id)};
+                                   .command = "remove-client " + std::to_string(id),
+                                   .runId = {},
+                                   .stageId = {}};
     Logger::getInstance().log(LogLevel::INFO, removeContext, "Removing client");
 
     clients_.erase(it);
@@ -209,12 +215,16 @@ void ClientManager::verifyClientConnectivity(ManagedClient& client) {
     const LogContext context{.pid = psx::os::currentProcessId(),
                              .sessionId = sessionId,
                              .clientId = client.entry.clientId(),
-                             .command = "ssh " + client.entry.clientId() + " " + remoteCommand};
+                             .command = "ssh " + client.entry.clientId() + " " + remoteCommand,
+                             .runId = {},
+                             .stageId = {}};
 
     Logger::getInstance().log(LogLevel::INFO, context, "Verifying SSH connectivity");
 
     ProcessManager processManager;
-    const auto result = processManager.executeRemote({client.entry}, remoteCommand, context, {.timeoutSec = 10});
+    ProcessManager::RemoteRunOptions options;
+    options.timeoutSec = 10;
+    const auto result = processManager.executeRemote({client.entry}, remoteCommand, context, options);
     const auto& clientResult = result.clientResults.front();
     const bool connected = clientResult.exitCode == 0 && !clientResult.timedOut &&
                            clientResult.stdoutData.find("connected") != std::string::npos;

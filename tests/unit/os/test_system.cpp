@@ -5,7 +5,10 @@
 #include "psx/os/system.hpp"
 #include "test_support.hpp"
 
+#include <filesystem>
+#include <fstream>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 TEST(OsSystemTest, CurrentProcessIdMatchesTheKernel) {
@@ -78,4 +81,53 @@ TEST(OsPathsTest, HomeDirectoryComesFromTheEnvironmentFirst) {
     test_support::ScopedEnv none("HOME", std::nullopt);
     // Falls back to the account database; never empty for a real user.
     EXPECT_FALSE(psx::os::homeDirectory().empty());
+}
+
+TEST(OsPathsTest, AtomicRewriteReplacesWholeFileAndCleansItsTemporary) {
+    test_support::ScopedTempCwd cwd("atomic-rewrite");
+    {
+        std::ofstream original("inventory.ini");
+        original << "old contents\n";
+    }
+
+    const auto rewritten = psx::os::atomicRewriteFile("inventory.ini", "new contents\n");
+    ASSERT_TRUE(rewritten.ok()) << rewritten.error().message();
+    std::ifstream input("inventory.ini");
+    EXPECT_EQ(std::string((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>()), "new contents\n");
+    for (const auto& entry : std::filesystem::directory_iterator(".")) {
+        EXPECT_EQ(entry.path().filename().string().find(".inventory.ini.tmp."), std::string::npos) << entry.path();
+    }
+}
+
+TEST(OsPathsTest, AtomicRewriteFailureDoesNotLeaveATemporaryFile) {
+    test_support::ScopedTempCwd cwd("atomic-rewrite-fail");
+    const auto rewritten = psx::os::atomicRewriteFile("missing/inventory.ini", "contents\n");
+    EXPECT_FALSE(rewritten.ok());
+    EXPECT_FALSE(std::filesystem::exists("missing/inventory.ini"));
+    EXPECT_TRUE(std::filesystem::is_empty("."));
+}
+
+TEST(OsPathsTest, AtomicPrivateWriteIsPrivateAndDoesNotFollowDestinationSymlinks) {
+    test_support::ScopedTempCwd cwd("atomic-private-write");
+    {
+        std::ofstream victim("victim.txt");
+        victim << "must survive\n";
+    }
+    ASSERT_EQ(::symlink("victim.txt", "secret.key"), 0);
+
+    const mode_t oldMask = ::umask(0);
+    const auto written = psx::os::atomicWritePrivateFile("secret.key", "private bytes\n");
+    (void)::umask(oldMask);
+    ASSERT_TRUE(written.ok()) << written.error().message();
+
+    struct stat status{};
+    ASSERT_EQ(::lstat("secret.key", &status), 0);
+    EXPECT_TRUE(S_ISREG(status.st_mode));
+    EXPECT_EQ(status.st_mode & 0777, 0600);
+    std::ifstream secret("secret.key");
+    EXPECT_EQ(std::string((std::istreambuf_iterator<char>(secret)), std::istreambuf_iterator<char>()),
+              "private bytes\n");
+    std::ifstream victim("victim.txt");
+    EXPECT_EQ(std::string((std::istreambuf_iterator<char>(victim)), std::istreambuf_iterator<char>()),
+              "must survive\n");
 }

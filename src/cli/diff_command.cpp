@@ -11,10 +11,13 @@
 #include "psx/sink/consensus.hpp"
 #include "psx/transport/native_controller.hpp"
 
+#include <charconv>
 #include <cstdint>
 #include <fstream>
 #include <optional>
+#include <stdexcept>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #endif
 
@@ -22,6 +25,102 @@ namespace psx::cli {
 
 #if defined(PIPESHELLX_HAVE_TLS)
 namespace {
+struct DiffInvocation {
+    std::string inventoryPath;
+    std::string certPath;
+    std::string keyPath;
+    std::string caPath;
+    int nativePort = 7433;
+    bool json = false;
+    Selector selector;
+    std::vector<std::string> command;
+};
+
+bool isOption(std::string_view value) {
+    return value == "-i" || value == "--inventory" || value == "--cert" || value == "--key" || value == "--ca" ||
+           value == "--native-port" || value == "-g" || value == "--group-name" || value == "-t" || value == "--tag" ||
+           value == "-H" || value == "--hosts" || value == "--json";
+}
+
+std::string valueFor(const std::vector<std::string>& args, std::size_t& index, const std::string& option) {
+    if (index + 1 >= args.size() || args[index + 1] == "--" || isOption(args[index + 1])) {
+        throw std::invalid_argument(option + " requires a value");
+    }
+    return args[++index];
+}
+
+std::vector<std::string> splitCsv(const std::string& value) {
+    std::vector<std::string> items;
+    std::size_t start = 0;
+    while (start <= value.size()) {
+        const std::size_t comma = value.find(',', start);
+        const std::string item = value.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+        if (!item.empty()) {
+            items.push_back(item);
+        }
+        if (comma == std::string::npos) {
+            break;
+        }
+        start = comma + 1;
+    }
+    return items;
+}
+
+void setSelector(Selector& selector, SelectorKind kind, const std::string& value) {
+    if (selector.kind != SelectorKind::All) {
+        throw std::invalid_argument("selectors -g/-t/-H are mutually exclusive");
+    }
+    selector.kind = kind;
+    if (kind == SelectorKind::Hosts) {
+        selector.hosts = splitCsv(value);
+    } else {
+        selector.value = value;
+    }
+}
+
+int parseNativePort(const std::string& value) {
+    int port = 0;
+    const char* end = value.data() + value.size();
+    const auto [ptr, ec] = std::from_chars(value.data(), end, port);
+    if (value.empty() || ec != std::errc{} || ptr != end || port < 1 || port > 65535) {
+        throw std::invalid_argument("--native-port must be 1..65535");
+    }
+    return port;
+}
+
+DiffInvocation parseDiff(const std::vector<std::string>& args) {
+    DiffInvocation invocation;
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        const std::string& arg = args[i];
+        if (arg == "--") {
+            invocation.command.assign(args.begin() + static_cast<std::ptrdiff_t>(i + 1), args.end());
+            break;
+        }
+        if (arg == "-i" || arg == "--inventory") {
+            invocation.inventoryPath = valueFor(args, i, arg);
+        } else if (arg == "--cert") {
+            invocation.certPath = valueFor(args, i, arg);
+        } else if (arg == "--key") {
+            invocation.keyPath = valueFor(args, i, arg);
+        } else if (arg == "--ca") {
+            invocation.caPath = valueFor(args, i, arg);
+        } else if (arg == "--native-port") {
+            invocation.nativePort = parseNativePort(valueFor(args, i, arg));
+        } else if (arg == "-g" || arg == "--group-name") {
+            setSelector(invocation.selector, SelectorKind::Group, valueFor(args, i, arg));
+        } else if (arg == "-t" || arg == "--tag") {
+            setSelector(invocation.selector, SelectorKind::Tag, valueFor(args, i, arg));
+        } else if (arg == "-H" || arg == "--hosts") {
+            setSelector(invocation.selector, SelectorKind::Hosts, valueFor(args, i, arg));
+        } else if (arg == "--json") {
+            invocation.json = true;
+        } else {
+            throw std::invalid_argument("unknown argument: " + arg);
+        }
+    }
+    return invocation;
+}
+
 std::optional<std::string> slurp(const std::string& path) {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
@@ -32,67 +131,31 @@ std::optional<std::string> slurp(const std::string& path) {
 } // namespace
 
 int diffSubcommand(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
-    std::string inventoryPath;
-    std::string certPath;
-    std::string keyPath;
-    std::string caPath;
-    int nativePort = 7433;
-    bool json = false;
-    Selector selector;
-    std::vector<std::string> command;
-
-    for (std::size_t i = 0; i < args.size(); ++i) {
-        const std::string& arg = args[i];
-        auto value = [&](std::string& dest) {
-            if (i + 1 < args.size()) {
-                dest = args[++i];
-            }
-        };
-        if (arg == "--") {
-            command.assign(args.begin() + static_cast<long>(i) + 1, args.end());
-            break;
-        } else if (arg == "-i") {
-            value(inventoryPath);
-        } else if (arg == "--cert") {
-            value(certPath);
-        } else if (arg == "--key") {
-            value(keyPath);
-        } else if (arg == "--ca") {
-            value(caPath);
-        } else if (arg == "--native-port") {
-            std::string v;
-            value(v);
-            nativePort = v.empty() ? nativePort : std::atoi(v.c_str());
-        } else if (arg == "-g") {
-            std::string v;
-            value(v);
-            selector = {.kind = SelectorKind::Group, .value = v, .hosts = {}};
-        } else if (arg == "--json") {
-            json = true;
-        } else if (arg == "-t") {
-            std::string v;
-            value(v);
-            selector = {.kind = SelectorKind::Tag, .value = v, .hosts = {}};
-        }
+    DiffInvocation invocation;
+    try {
+        invocation = parseDiff(args);
+    } catch (const std::invalid_argument& ex) {
+        err << "pipeshellx diff: " << ex.what() << "\n";
+        return 2;
     }
 
-    if (command.empty()) {
+    if (invocation.command.empty()) {
         err << "Usage: pipeshellx diff -i FILE -g GROUP --cert F --key F --ca F -- <command>\n";
         return 2;
     }
-    if (certPath.empty() || keyPath.empty() || caPath.empty()) {
+    if (invocation.certPath.empty() || invocation.keyPath.empty() || invocation.caPath.empty()) {
         err << "pipeshellx diff: --cert F --key F --ca F (the controller identity) are required\n";
         return 2;
     }
-    const auto cert = slurp(certPath);
-    const auto key = slurp(keyPath);
-    const auto ca = slurp(caPath);
+    const auto cert = slurp(invocation.certPath);
+    const auto key = slurp(invocation.keyPath);
+    const auto ca = slurp(invocation.caPath);
     if (!cert || !key || !ca) {
         err << "pipeshellx diff: cannot read --cert/--key/--ca\n";
         return 2;
     }
 
-    const ResolvedHosts resolved = resolveHosts(inventoryPath, selector, err);
+    const ResolvedHosts resolved = resolveHosts(invocation.inventoryPath, invocation.selector, err);
     if (!resolved.ok()) {
         return resolved.exitCode;
     }
@@ -107,18 +170,20 @@ int diffSubcommand(const std::vector<std::string>& args, std::ostream& out, std:
     std::vector<psx::transport::NativeController::Target> targets;
     targets.reserve(resolved.clients.size());
     for (const auto& client : resolved.clients) {
-        targets.push_back({.host = client.host,
-                           .port = static_cast<std::uint16_t>(client.nativePort != 0 ? client.nativePort : nativePort),
-                           .expectedSan = client.expectedSan});
+        targets.push_back(
+            {.host = client.host,
+             .port = static_cast<std::uint16_t>(client.nativePort != 0 ? client.nativePort : invocation.nativePort),
+             .expectedSan = client.expectedSan});
     }
 
-    psx::transport::NativeController controller(r, {.certificatePem = *cert, .privateKeyPem = *key, .caPem = *ca});
+    psx::transport::NativeController controller(
+        r, {.certificatePem = *cert, .privateKeyPem = *key, .caPem = *ca, .crlPem = {}, .isServer = false});
     std::vector<psx::transport::NativeController::HostResult> results;
-    auto started =
-        controller.start(targets, command, [&](std::vector<psx::transport::NativeController::HostResult> hostResults) {
-            results = std::move(hostResults);
-            r.stop();
-        });
+    auto started = controller.start(targets, invocation.command,
+                                    [&](std::vector<psx::transport::NativeController::HostResult> hostResults) {
+                                        results = std::move(hostResults);
+                                        r.stop();
+                                    });
     if (!started.ok()) {
         err << "pipeshellx diff: " << started.error().message() << "\n";
         return 2;
@@ -131,15 +196,16 @@ int diffSubcommand(const std::vector<std::string>& args, std::ostream& out, std:
     std::vector<std::pair<std::string, std::string>> hostOutputs;
     std::vector<std::string> failed;
     for (const auto& result : results) {
-        if (result.ok && result.error.empty()) {
-            hostOutputs.emplace_back(result.host, result.output);
+        if (result.ok && result.error.empty() && result.exitCode == 0) {
+            hostOutputs.emplace_back(result.host, result.stdoutData);
         } else {
-            failed.push_back(result.host + " (" + (result.error.empty() ? "non-zero exit" : result.error) + ")");
+            const std::string reason = !result.error.empty() ? result.error : "exit " + std::to_string(result.exitCode);
+            failed.push_back(result.host + " (" + reason + ")");
         }
     }
 
     const psx::sink::ConsensusReport report = psx::sink::consensus(hostOutputs);
-    if (json) {
+    if (invocation.json) {
         psx::sink::renderConsensusJson(report, out);
     } else {
         psx::sink::renderConsensus(report, out);

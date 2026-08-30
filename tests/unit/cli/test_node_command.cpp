@@ -57,12 +57,43 @@ TEST(NodeCommandTest, RejectsMissingRequiredFlags) {
     EXPECT_EQ(nodeSubcommand({"run", "--key", "k", "--ca", "a", "--listen", "x"}, out, err), 2); // no --cert
 }
 
+TEST(NodeCommandTest, RejectsUnknownMissingAndDuplicateOptions) {
+    std::ostringstream out, err;
+    EXPECT_EQ(nodeSubcommand({"--bogus", "value"}, out, err), 2);
+    EXPECT_NE(err.str().find("unknown option '--bogus'"), std::string::npos);
+
+    out.str({});
+    err.str({});
+    EXPECT_EQ(nodeSubcommand({"--cert"}, out, err), 2);
+    EXPECT_NE(err.str().find("--cert requires a value"), std::string::npos);
+
+    out.str({});
+    err.str({});
+    EXPECT_EQ(nodeSubcommand({"keygen", "--san", "psx://node/one", "--san", "psx://node/two", "--out", "n"}, out, err),
+              2);
+    EXPECT_NE(err.str().find("--san may only be specified once"), std::string::npos);
+
+    out.str({});
+    err.str({});
+    EXPECT_EQ(nodeSubcommand({"status", "--control", "/tmp/control", "--bogus", "x"}, out, err), 2);
+    EXPECT_NE(err.str().find("unknown option '--bogus'"), std::string::npos);
+}
+
 TEST(NodeCommandTest, RejectsUnreadableFiles) {
     std::ostringstream out, err;
     EXPECT_EQ(nodeSubcommand({"--cert", "/no/such/cert", "--key", "/no/such/key", "--ca", "/no/such/ca", "--listen",
                               "127.0.0.1:17999"},
                              out, err),
               2);
+}
+
+TEST(NodeCommandTest, RejectsAnUnreadablePolicyBeforeStarting) {
+    std::ostringstream out, err;
+    EXPECT_EQ(nodeSubcommand({"--cert", "c", "--key", "k", "--ca", "a", "--listen", "127.0.0.1:17999", "--policy",
+                              "/no/such/pipeshellx.policy"},
+                             out, err),
+              2);
+    EXPECT_NE(err.str().find("cannot open '/no/such/pipeshellx.policy'"), std::string::npos);
 }
 
 TEST(NodeCommandTest, RejectsABadListenAddress) {
@@ -117,17 +148,62 @@ TEST(NodeCommandTest, EnrollmentViaKeygenThenCaSignProducesAWorkingIdentity) {
 TEST(NodeCommandTest, SystemdUnitHasExecStartAndHardening) {
     std::ostringstream out, err;
     ASSERT_EQ(nodeSubcommand({"systemd-unit", "--cert", "/c", "--key", "/k", "--ca", "/a", "--listen", "0.0.0.0:7433",
-                              "--allow", "spiffe://x", "--exec", "/usr/bin/pipeshellx"},
+                              "--allow", "spiffe://x", "--policy", "/etc/pipeshellx/node.policy", "--exec",
+                              "/usr/bin/pipeshellx"},
                              out, err),
               0)
         << err.str();
     const std::string u = out.str();
-    EXPECT_NE(u.find("ExecStart=/usr/bin/pipeshellx node --cert /c --key /k --ca /a --listen 0.0.0.0:7433 "
-                     "--allow spiffe://x"),
+    EXPECT_NE(u.find("ExecStart=\"/usr/bin/pipeshellx\" \"node\" \"--cert\" \"/c\" \"--key\" \"/k\" \"--ca\" "
+                     "\"/a\" \"--listen\" \"0.0.0.0:7433\" \"--allow\" \"spiffe://x\" \"--policy\" "
+                     "\"/etc/pipeshellx/node.policy\""),
               std::string::npos);
     EXPECT_NE(u.find("Restart=on-failure"), std::string::npos);
     EXPECT_NE(u.find("NoNewPrivileges=yes"), std::string::npos);
+    EXPECT_NE(u.find("RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX"), std::string::npos);
     EXPECT_NE(u.find("WantedBy=multi-user.target"), std::string::npos);
+}
+
+TEST(NodeCommandTest, ServiceGeneratorsEscapeSystemdAndXmlValuesAndPreserveControl) {
+    std::ostringstream out, err;
+    ASSERT_EQ(nodeSubcommand({"systemd-unit", "--cert", "/path/a b", "--key", "/k", "--ca", "/a", "--listen",
+                              "0.0.0.0:7433", "--allow", "spiffe://controller/%n$HOME", "--control",
+                              "/run/pipeshellx/node.ctl", "--exec", "/opt/Pipe Shell/pipeshellx"},
+                             out, err),
+              0)
+        << err.str();
+    EXPECT_NE(out.str().find("\"/opt/Pipe Shell/pipeshellx\""), std::string::npos);
+    EXPECT_NE(out.str().find("\"/path/a b\""), std::string::npos);
+    EXPECT_NE(out.str().find("spiffe://controller/%%n$$HOME"), std::string::npos);
+    EXPECT_NE(out.str().find("\"--control\" \"/run/pipeshellx/node.ctl\""), std::string::npos);
+    EXPECT_NE(out.str().find("RuntimeDirectory=pipeshellx\n"), std::string::npos);
+    EXPECT_NE(out.str().find("RuntimeDirectoryMode=0750\n"), std::string::npos);
+    EXPECT_NE(out.str().find("ReadWritePaths=/run/pipeshellx\n"), std::string::npos);
+    EXPECT_NE(out.str().find("UMask=0077\n"), std::string::npos);
+
+    out.str({});
+    err.str({});
+    ASSERT_EQ(nodeSubcommand({"launchd-plist", "--cert", "/c&<", "--key", "/k", "--ca", "/a", "--listen",
+                              "127.0.0.1:7433", "--label", "com.example.<node>&", "--exec", "/opt/a&b"},
+                             out, err),
+              0)
+        << err.str();
+    EXPECT_NE(out.str().find("com.example.&lt;node&gt;&amp;"), std::string::npos);
+    EXPECT_NE(out.str().find("/opt/a&amp;b"), std::string::npos);
+    EXPECT_NE(out.str().find("/c&amp;&lt;"), std::string::npos);
+}
+
+TEST(NodeCommandTest, SystemdControlSocketMustUseTheManagedRuntimeDirectory) {
+    for (const std::string& path :
+         {"/tmp/node.ctl", "/run/node.ctl", "/run/pipeshellx/../node.ctl", "relative/node.ctl"}) {
+        std::ostringstream out, err;
+        EXPECT_EQ(nodeSubcommand({"systemd-unit", "--cert", "/c", "--key", "/k", "--ca", "/a", "--listen",
+                                  "127.0.0.1:7433", "--control", path},
+                                 out, err),
+                  2)
+            << path;
+        EXPECT_NE(err.str().find("/run/pipeshellx/FILE"), std::string::npos) << path << ": " << err.str();
+    }
 }
 
 TEST(NodeCommandTest, LaunchdPlistListsProgramArguments) {

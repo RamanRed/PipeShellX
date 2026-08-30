@@ -84,6 +84,69 @@ TEST(CaCommandTest, ReportsUsageErrors) {
     EXPECT_EQ(caSubcommand({"revoke", "--ca", "x"}, out, err), 2); // missing --cert/--serial
 }
 
+TEST(CaCommandTest, RejectsUnknownMissingDuplicateAndConflictingOptions) {
+    std::ostringstream out, err;
+    EXPECT_EQ(caSubcommand({"init", "--bogus", "x"}, out, err), 2);
+    EXPECT_NE(err.str().find("unknown option '--bogus'"), std::string::npos);
+
+    out.str({});
+    err.str({});
+    EXPECT_EQ(caSubcommand({"init", "--cn"}, out, err), 2);
+    EXPECT_NE(err.str().find("--cn requires a value"), std::string::npos);
+
+    out.str({});
+    err.str({});
+    EXPECT_EQ(caSubcommand({"init", "--cn", "one", "--cn", "two", "--dir", "ca"}, out, err), 2);
+    EXPECT_NE(err.str().find("--cn may only be specified once"), std::string::npos);
+
+    out.str({});
+    err.str({});
+    EXPECT_EQ(caSubcommand({"revoke", "--ca", "ca", "--cert", "leaf.crt", "--serial", "01"}, out, err), 2);
+    EXPECT_NE(err.str().find("exactly one of --cert or --serial"), std::string::npos);
+}
+
+TEST(CaCommandTest, RevokeRejectsMalformedSerialBeforeMutatingTheIndex) {
+    test_support::ScopedTempCwd cwd("ca-invalid-serial");
+    const std::filesystem::path caDir = cwd.path() / "ca";
+    const std::filesystem::path revoked = caDir / "revoked.txt";
+    std::ostringstream out, err;
+
+    ASSERT_EQ(caSubcommand({"init", "--cn", "psx-fleet", "--dir", caDir.string()}, out, err), 0) << err.str();
+
+    for (const std::string& malformed : {std::string("01ZZ"), std::string()}) {
+        {
+            std::ofstream index(revoked, std::ios::binary | std::ios::trunc);
+            ASSERT_TRUE(index.is_open());
+            index << "AB\n";
+        }
+        std::filesystem::remove(caDir / "crl.pem");
+        out.str({});
+        err.str({});
+
+        EXPECT_EQ(caSubcommand({"revoke", "--ca", caDir.string(), "--serial", malformed}, out, err), 2);
+        EXPECT_NE(err.str().find("--serial must be non-empty hexadecimal"), std::string::npos) << err.str();
+        EXPECT_EQ(readFile(revoked), "AB\n");
+        EXPECT_FALSE(std::filesystem::exists(caDir / "crl.pem"));
+    }
+}
+
+TEST(CaCommandTest, RevokeCanonicalizesAndDeduplicatesSerials) {
+    test_support::ScopedTempCwd cwd("ca-canonical-serial");
+    const std::filesystem::path caDir = cwd.path() / "ca";
+    const std::filesystem::path revoked = caDir / "revoked.txt";
+    std::ostringstream out, err;
+
+    ASSERT_EQ(caSubcommand({"init", "--cn", "psx-fleet", "--dir", caDir.string()}, out, err), 0) << err.str();
+    {
+        std::ofstream index(revoked, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(index.is_open());
+        index << "00ab\n";
+    }
+
+    ASSERT_EQ(caSubcommand({"revoke", "--ca", caDir.string(), "--serial", "aB"}, out, err), 0) << err.str();
+    EXPECT_EQ(readFile(revoked), "AB\n");
+}
+
 TEST(CaCommandTest, RevokeProducesACrlThatRejectsTheRevokedLeaf) {
     test_support::ScopedTempCwd cwd("ca-revoke");
     const std::filesystem::path caDir = cwd.path() / "ca";

@@ -1,188 +1,149 @@
-# Testing Strategy
+# Testing
 
-## Current Test Surface
+PipeShellX uses GoogleTest with each test discovered individually by CTest.
+Tests are enabled by default and cannot be silently omitted: CMake uses an
+installed GoogleTest when requested or fetches the pinned v1.17.0 source.
 
-The GoogleTest suite lives in `tests/` and is built unconditionally: GoogleTest
-is fetched by CMake `FetchContent` (pinned to `v1.17.0`), so the tests can never
-be silently skipped. Each `TEST` is registered with CTest individually through
-`gtest_discover_tests`.
+Release validation records the final discovered count and pass/skip result in
+the commit or release handoff rather than hard-coding a number here as the suite
+continues to grow.
 
-| File | Covers |
-|---|---|
-| `test_cli_options.cpp` | `--verbose`, `--log-file` (both forms), `--version`, `--help`, rejection of unknown or incomplete arguments |
-| `test_client_config.cpp` | `clients.txt` parsing (legacy and `ssh://` forms), password rejection, duplicate detection, per-inventory `known_hosts` derivation, `ClientManager::addClient` persisting without secrets |
-| `test_command_executor.cpp` | allowlist (`top` rejected, `hostname` accepted), explicit paths, shell metacharacters, length bounds, quoting, exit-code propagation |
-| `test_logger.cpp` | line format, level filtering, console mirror, stderr fallback, unwritable paths, parent-directory creation, default log path resolution, 4-thread interleaving check |
-| `test_process_manager.cpp` | local execution, invalid command, timeout; regression: fast remote failure is not a timeout; hung worker (silent loopback listener) does time out; timeout SIGKILLs the whole process group (grandchild holding the pipes); a holder outside the group is abandoned after the 2 s drain grace |
-| `test_process_manager_golden.cpp` | the v0.1.0 behavioural contract of `ProcessManager` (output capture, remote grouping, error classes, password over a descriptor, timeouts) verified against a fake `ssh`/`sshpass` on `PATH` |
-| `unit/os/*.cpp` | the shared `psx::os` suite: `Result`, `Handle` (CLOEXEC audit, 10 k cycles), `Pipe`, `Process` (`posix_spawn`, limits, groups, EINTR injection, soak), `Poller` per backend, `ChildExitSource` per mode, `SignalSource` |
-| `unit/runtime/test_reactor.cpp` | the `Reactor` on the poll and native backends |
-| `test_ssh_auth.cpp` | hardened `ssh` argv (`PATH` lookup, `accept-new`, `UserKnownHostsFile`, `BatchMode`, `ServerAliveInterval`), `sshpass -d <fd>` with the password never on argv, auth and host-key failure classifiers |
+## Coverage map
 
-`tests/test_support.hpp` provides `ScopedTempCwd` (runs a test in a fresh
-temporary working directory so a stray `clients.txt` or log file cannot
-influence it), `ScopedEnv` (scoped environment overrides),
-`refusedLoopbackClient()` (127.0.0.1:1 — a deterministic, instant SSH
-"connection refused") and `SilentListener` (a loopback socket that never
-accepts, i.e. a deterministic hung host). No test depends on external network
-reachability.
+| Area | Evidence in the suite |
+| --- | --- |
+| OS primitives | Handle inheritance/leaks, pipe EOF/nonblocking/broken-pipe behavior, process spawn/groups/limits/reaping, sockets, TLS, poller/child/signal backends, atomic file rewrite. |
+| Runtime | Reactor readiness, timers, child exits, signals, backend parametrization, and retry backoff. |
+| Streams and sinks | Bounded-buffer policies, credit windows, line framing, spool replay, grouped/stream/JSON/ordered/consensus rendering. |
+| Inventory and policy | INI parsing, precedence, selectors, legacy `clients.txt` import, identity preservation, secret rejection, transport validation, serialization, duplicate detection, and optional command policy. |
+| Product CLI | Strict parsers and exit codes for `run`, `ping`, `diff`, `pipe`, `hosts`, `ca`, and `node`. |
+| SSH | Hardened argv, target-shell quoting, fake `ssh`/`sshpass` workers, error classification, timeout, fail-fast, cancellation, concurrency, retry gating, and golden behavior. |
+| Native transport | Frame/payload codecs, TLS identity/CRL, channel separation, credit/drop/spool behavior, leases, GOAWAY, session faults, pre-spawn node-policy rejection/exit 126, node fencing, concurrent connections, cancellation, timeout, fail-fast, canary, and audit integration. |
+| Pipelines | Parser/planner/YAML validation, local chains, declared-edge order, local fan-in/fan-out, bounded slow-consumer edges, deterministic pipefail, mixed linear placement, and exact rejection of non-linear remote DAGs. |
+| Diff | Strict option parsing, exact stdout consensus, stderr exclusion, drift/unanimous exit codes, and nonzero stage exit as host failure. |
+| Packaging | Install-tree smoke, lowercase installed executable, relocatable exported CMake package consumed by a fresh downstream project, and required-OpenSSL failure behavior. |
 
-## Existing Validation Areas
+Most transport tests use loopback sockets or deterministic fake executables and
+do not require external network reachability. Scale tests exercise a
+1,000-stream multiplexed session, 1,000 simulated nodes, and a smaller
+concurrent real-mTLS server fan-out without requiring an external fleet.
 
-### IPC Tests
-
-Current coverage (`tests/unit/os/test_pipe.cpp`) includes:
-
-- write/read correctness and EOF as a zero-byte read
-- nonblocking reads/writes (`WouldBlock`, partial writes past the pipe capacity)
-- broken pipe reported as an error, never as `SIGPIPE`
-- non-inheritable descriptors at creation, verified by enumerating the process's descriptors
-
-### Process Tests
-
-Current coverage includes:
-
-- valid command execution
-- invalid command execution
-- timeout behavior
-
-## Gaps in Automated Testing
-
-Automated coverage is still missing for:
-
-- end-to-end SSH execution against a real `sshd` (the docker-compose fleet arrives in Phase 2)
-- high-volume stress execution
-- concurrent session execution
-- zombie-process regression tests
-- interactive terminal behavior
-
-## Manual Validation Already Performed
-
-The system has been validated with:
-
-- clean rebuild from scratch
-- functional execution of:
-  - `ls`
-  - `pwd`
-  - `whoami`
-  - `echo hello`
-  - `date`
-- 125-command single-session soak test
-- 4 concurrent sessions with 120 commands each
-- post-run zombie inspection
-
-These checks confirmed:
-
-- stable IPC behavior
-- correct process reaping
-- no observed defunct child processes after validation
-- no reported runtime errors during the soak and concurrency runs
-
-## Recommended Test Categories
-
-### Unit Tests
-
-Add tests for:
-
-- command parser behavior
-- allowlist enforcement
-- unsafe argument rejection
-- executable path resolution
-- logger formatting
-
-### Integration Tests
-
-Add tests that execute the full stack:
-
-- terminal client to command executor
-- command executor to process manager
-- stdout/stderr capture correctness
-- non-zero exit handling
-
-### Concurrency Tests
-
-Add repeatable automated tests for:
-
-- many parallel command sessions
-- repeated session create/end cycles
-- interleaved process completions
-- thread-safe logging under load
-
-### Lifecycle and Reliability Tests
-
-Add targeted tests for:
-
-- timeout kills process group
-- child reaping under fast exit conditions
-- large stdout/stderr output without deadlock
-- broken pipe handling
-
-### Regression Tests
-
-There was a previously fixed bug where the parent could continue looping after reaping a child and accidentally call `waitpid(-1, ...)`. Add a regression test for this exact path.
-
-## Running Tests
+## Running the suite
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build
+cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ```
 
-Run a single test or group with `ctest --test-dir build -R LoggerTest`.
-`-DPIPESHELLX_SYSTEM_GTEST=ON` uses an installed GoogleTest instead of the
-fetched copy (for offline builds).
+Use an installed GoogleTest for an offline build:
+
+```bash
+cmake -S . -B build-system-gtest \
+  -DPIPESHELLX_SYSTEM_GTEST=ON \
+  -DCMAKE_BUILD_TYPE=Debug
+```
+
+Run a focused CTest selection:
+
+```bash
+ctest --test-dir build -R 'DiffCommandTest|PipeCommandTest' --output-on-failure
+```
+
+Or invoke the test binary with a GoogleTest filter:
+
+```bash
+build/bin/pipeshellx_tests \
+  --gtest_filter='InventoryTest.*:HostsSubcommandTest.*:RunSubcommandTest.*:DiffCommandTest.*'
+```
+
+## Alternate configurations
 
 ### Sanitizers
 
 ```bash
-cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DPIPESHELLX_SANITIZE=address,undefined
-cmake --build build-asan
+cmake -S . -B build-asan \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DPIPESHELLX_SANITIZE=address,undefined
+cmake --build build-asan --parallel
 ctest --test-dir build-asan --output-on-failure
 ```
 
-`PIPESHELLX_SANITIZE=thread` is used for reactor tests from Phase 2 on.
+The build system also accepts the thread sanitizer on supported toolchains,
+although the main CI sanitizer job is ASan+UBSan.
 
-### Backend and soak knobs
+### SSH-only build
 
-- `PIPESHELLX_POLLER=poll|epoll|kqueue` forces the reactor backend. CTest
-  runs the golden, `ProcessManager` and `CommandExecutor` suites a second
-  time with `PIPESHELLX_POLLER=poll` (`golden_on_poll_backend`), which is how
-  the Phase 1 criterion "poll backend removable without behaviour change" is
-  checked on every run.
-- `PIPESHELLX_SOAK=1` lengthens the spawn and `execute()` soaks to 10 000
-  cycles (descriptor count and zombie checks); the default is a few hundred.
-- `./scripts/check_layering.sh` is the layering lint (also a CI job).
+```bash
+cmake -S . -B build-native-off \
+  -DPIPESHELLX_NATIVE_TRANSPORT=OFF \
+  -DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=TRUE
+cmake --build build-native-off --parallel
+ctest --test-dir build-native-off --output-on-failure
+```
 
-### Continuous integration
+Native-only source/tests are excluded, while the CLI must still explain that
+`node`, `ca`, `diff`, native `run`,
+and remote `pipe` are unavailable.
 
-`.github/workflows/ci.yml` runs on every push and pull request:
+### Portable poll backend and soak
 
-- `{ubuntu-latest, macos-latest} × {gcc, clang} × {Debug, Release}` — configure,
-  build with `-Werror`, `ctest`, and a CLI smoke test (`--version`, `--help`,
-  unknown flag exits `2`);
-- an AddressSanitizer + UndefinedBehaviorSanitizer job (ubuntu, clang, Debug).
+`PIPESHELLX_POLLER=poll` forces the portable reactor backend. CTest
+also registers `golden_on_poll_backend` for the golden,
+`ProcessManager`, and `CommandExecutor` suites.
 
-`.github/workflows/bench.yml` runs the baseline harness nightly (see
-`docs/benchmarks.md`).
+`PIPESHELLX_SOAK=1` lengthens spawn/execute loops for descriptor and
+zombie checks:
 
-## Production-Readiness Testing Recommendations
+```bash
+PIPESHELLX_SOAK=1 build/bin/pipeshellx_tests \
+  --gtest_filter='ProcessTest.*:ProcessManagerTest.*'
+```
 
-Before treating the system as operationally mature, add:
+### Layering
 
-- integration tests against a real SSH fleet (Phase 2)
-- stress tests with larger command counts
-- failure-injection tests around `fork`, `pipe`, and `poll`
-- platform validation on target Linux environments
-- log verification tests
+```bash
+./scripts/check_layering.sh
+```
 
-## Success Criteria
+The check rejects platform headers outside the OS implementation, public
+platform types, and upward layer dependencies.
 
-A stronger test suite should prove:
+## Continuous integration
 
-- commands are validated correctly
-- IPC never deadlocks under expected workloads
-- child processes are always reaped
-- concurrent sessions remain isolated
-- no FD leaks appear across repeated executions
-- security controls reject unsupported input consistently
+`.github/workflows/ci.yml` is configured for:
+
+- Linux GCC and Clang, Debug and Release;
+- macOS AppleClang, Debug and Release (macOS+Homebrew GCC is explicitly
+  excluded because it is not a supported Apple SDK compiler pairing);
+- warnings as errors;
+- CLI version/help/error smoke tests;
+- ASan+UBSan on Linux Clang Debug;
+- layering lint;
+- static-OpenSSL install/downstream-package smoke;
+- an SSH-only native-disabled build/install/downstream smoke.
+
+`.github/workflows/bench.yml` configures a Release build without the
+test suite, starts localhost OpenSSH, runs the baseline spawn/fan-out harness,
+and uploads the result as a best-effort nightly artifact.
+
+These statements describe workflow configuration. They do not claim that an
+unpublished commit or release tag has already passed GitHub-hosted CI.
+
+## Known gaps
+
+The current suite does not complete these release/roadmap items:
+
+- a Windows controller/native-node build and MSVC/clang-cl test matrix;
+- end-to-end qualification against a heterogeneous real SSH/native fleet;
+- general non-linear remote DAG execution (the product rejects it);
+- reconnect/resume testing (the protocol does not implement it);
+- node-death containment for every hard-kill/platform case;
+- in-tree continuous libFuzzer jobs (structured and mutation fuzz-style tests
+  exist, but not the release fuzzing program);
+- sandbox/privilege-separation tests, because those features are deferred;
+- signed-audit and release-artifact verification, also deferred.
+
+Passing the POSIX suite is necessary for v0.6, but it is not evidence that
+deferred Windows, isolation, resilience, or release-distribution milestones
+are complete.

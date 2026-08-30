@@ -1,176 +1,181 @@
-# Security Considerations
+# Security Model
 
-## Threat Model
+PipeShellX is a remote-execution tool. Its security boundary is the operator
+account, the inventory and credentials that account controls, and (for native
+transport) the operating-system account running each node. It is not a
+multi-tenant sandbox.
 
-This system executes operating system commands on behalf of a user. The main security risks are:
+## Trust model
 
-- command injection
-- arbitrary executable launch
-- path abuse
-- unsafe shell expansion
-- privilege misuse
-- denial of service through hung or noisy child processes
+- The controller operator is trusted to choose commands and target hosts.
+- SSH targets are trusted through OpenSSH host-key verification and the
+  account selected by the inventory/OpenSSH configuration.
+- Native nodes trust the fleet CA and may additionally restrict controller
+  certificate SAN URIs with `node --allow`.
+- An authenticated native controller is powerful: unless the node was started
+  with `--policy FILE`, it may request arbitrary argv. An accepted
+  request runs as the node daemon's OS account.
+- Command output and remote hosts are untrusted input. Output is kept on its
+  stdout/stderr channel and bounded according to the selected capture policy.
 
-## Current Security Controls
+Run native nodes under a dedicated, least-privileged account. Do not expose a
+node listener to a CA population or controller identity that should not have
+command-execution authority.
 
-### No Shell Execution
+## Execution surfaces
 
-The system does not use:
+The commands do not share one universal allowlist:
 
-- `system()`
-- `popen()`
-- `/bin/sh -c`
+| Surface | Current behavior |
+| --- | --- |
+| `pipeshellx shell` | Legacy teaching/demo REPL. `CommandExecutor` applies its fixed command allowlist, trusted-directory resolution, argument limits, and metacharacter checks. |
+| `pipeshellx run` without `--policy` | Unrestricted operator tool. The supplied argv is allowed. |
+| `pipeshellx run --policy FILE` | Controller-side policy may allow command names, cap argv length, and reject shell metacharacters before any host is contacted. It is not a node-side sandbox. |
+| SSH `run` | PipeShellX starts the local OpenSSH client directly, but serializes argv for the target's configured remote shell. The remote shell participates in interpretation. |
+| Native `run`, `diff`, and remote `pipe` | The authenticated node receives argv in a framed request and starts it directly. An operator may explicitly request a shell such as `sh -c`. Optional node `--policy` can reject the request before spawn. |
+| Local `pipe` | Stages are started from argv. A pipeline file can likewise name a shell explicitly. |
 
-Commands are executed directly through `execvp()` with an argument vector. This removes shell expansion behavior such as:
+The optional policy format is line based:
 
-- pipes
-- command chaining
-- variable expansion
-- redirection syntax
-- subshell execution
+```text
+allow uptime
+allow systemctl
+max-args 8
+# Add this only when the allowed command intentionally accepts them:
+allow-shell-metacharacters
+```
 
-### Command Allowlist
+An empty allow set does not create an allowlist; it permits any command name
+(the default metacharacter guard still applies). The same policy format can be
+loaded independently at two boundaries:
 
-Only a fixed set of commands is allowed:
+- `run --policy FILE` rejects on the controller before contacting a
+  host;
+- `node --policy FILE` rejects a native `OPEN` before
+  creating pipes or a process, writes a policy diagnostic to that stage's
+  stderr channel, and returns stage exit `126`.
 
-- `ls`
-- `cat`
-- `echo`
-- `pwd`
-- `whoami`
-- `date`
-- `uptime`
-- `df`
-- `du`
-- `ps`
-- `id`
-- `hostname`
+The controller policy is not transmitted to or trusted by the node. For
+defense in depth, configure both when the fleet should have a restricted
+command surface. Service-unit generators preserve the node policy flag.
 
-Any command outside this list is rejected. `top` was removed from the list
-because it is interactive and hangs the REPL.
+## SSH transport
 
-### Trusted Executable Resolution
+PipeShellX delegates authentication and remote-shell execution to the system
+OpenSSH client:
 
-Executables are resolved only from trusted system directories:
+- `StrictHostKeyChecking=accept-new` records an unknown key on first use
+  and rejects a later key change.
+- `UserKnownHostsFile=<inventory>.known_hosts` isolates host trust per
+  inventory. Pre-seed and verify this file out of band to avoid TOFU.
+- `BatchMode=yes` avoids an unattended prompt when no legacy in-memory
+  password is present.
+- Connect and keepalive timeouts bound common hangs.
+- `--reuse` uses an OpenSSH control socket under the PipeShellX state
+  directory; protect that directory as operator credentials.
 
-- `/bin`
-- `/usr/bin`
+SSH remote commands are quoted for `posix`, `cmd`, or
+`powershell`. Quoting preserves argv for supported cases; it does not
+turn the remote shell into a sandbox. In particular, `cmd.exe`
+metacharacters are not escaped. See [Authentication](authentication.md) and
+[Windows support](windows.md).
 
-Explicit paths are rejected. This prevents:
+The legacy interactive password path sends a password to `sshpass -d`
+over a pipe, never on argv. New inventory mutation refuses embedded
+`user:password@host` values and secret keys, and legacy imports discard
+recognized secret query parameters. Passwords are never serialized to an
+inventory. Ordinary in-memory strings are not locked or guaranteed to be
+zeroed; secure-memory work remains deferred.
 
-- execution from the current working directory
-- user-supplied relative path tricks
-- arbitrary path-based binary execution
+## Native mTLS transport
 
-### Argument Filtering
+The psx/1 backplane uses OpenSSL 3 and mutual TLS 1.3:
 
-Arguments are length-bounded and rejected if they contain unsafe shell-like metacharacters such as:
+- both peers must present a certificate chaining to the configured CA;
+- the controller can pin a host's exact SAN URI through inventory `san=`;
+- a node can restrict controller SAN URIs with `--allow`;
+- `--crl` enables CA-issued certificate-revocation checks;
+- there is no clear-text downgrade.
 
-- `;`
-- `&`
-- `|`
-- `` ` ``
-- `$`
-- `<`
-- `>`
-- `\`
+CA trust without an inventory SAN pin accepts any CA-signed node. A node with no
+`--allow` accepts any CA-signed controller and emits a warning. Use both
+identity controls for a scoped fleet. Add `node --policy FILE` when
+CA-authorized controllers should be command-restricted; without it, identity
+authorization permits arbitrary argv. Protect CA keys, controller private
+keys, node private keys, inventories, policies, and CRLs with OS permissions
+and an operational rotation process.
 
-This is a defense-in-depth layer. The main protection remains the no-shell execution model.
+The wire protocol separates stdout and stderr, enforces per-stream credit, and
+fences stages when a controller connection is lost. It does not yet support
+reconnect/resume; a broken connection is terminal. See the
+[psx/1 wire protocol](wire_protocol.md).
 
-### Process Group Control
+## Availability and containment
 
-Each child is placed into its own process group. On timeout, the system kills the entire group rather than only the direct child. This reduces the risk of runaway descendant processes.
+- SSH workers and local stages have dedicated process groups. Timeout,
+  fail-fast, and operator cancellation terminate in-flight work and reap owned
+  children.
+- Native stages are also owned and fenced by the controller connection.
+- Drop capture can be bounded with `--ring` and
+  `--overflow drop-oldest|drop-newest`; buffering sinks receive only retained
+  bytes and report loss. `block` is lossless and unbounded. Spool keeps a
+  bounded in-memory tail but has unbounded temporary-disk and final
+  materialization costs.
+- Credit windows bound native in-flight data, not total lossless capture.
+- Resource limits exist in parts of the POSIX process path, but configurable
+  per-stage limits are not complete.
 
-### Resource Limits
+These controls reduce accidental resource exhaustion. They do not defend a
+node from malicious code executing with the node account's privileges.
 
-Child processes are constrained with:
+## Audit and logs
 
-- CPU limit
-- address space limit
+`run --audit-log FILE` appends unsigned JSON Lines:
+`run_started`, one `stage_finished` per selected host, and
+`run_finished`. Records contain the command, host/stage identifiers,
+outcomes, cancellation/timeout/abort state, attempts, and dropped-byte counts;
+they do not contain captured stdout/stderr. Audit is opt-in, and an unwritable
+path produces a warning and continues without audit.
 
-These limits reduce impact from abusive or malformed commands, although the values are currently hardcoded.
+The audit file is neither tamper-evident nor signed, has no built-in retention,
+and may contain sensitive command arguments. Store it on appropriately
+protected storage. Signed audit chains remain Phase 6 work.
 
-### SSH Transport Defaults
+Application logs also contain command context. They do not intentionally log
+passwords or command output, but commands and paths themselves may be
+sensitive.
 
-Remote execution spawns the system OpenSSH client with hardened defaults
-(`src/ssh_auth.cpp`, enforced by `tests/test_ssh_auth.cpp`):
+## Inventory mutation
 
-- `ssh` is resolved from `PATH`; no hard-coded `/usr/bin/ssh`.
-- `StrictHostKeyChecking=accept-new` (OpenSSH ≥ 7.6) with
-  `UserKnownHostsFile="<inventory>.known_hosts"`: the key of a host is recorded
-  on first contact in a trust store that lives next to the inventory file; a
-  changed key fails the host and is reported as `ERROR: host key verification
-  failed`. The old `StrictHostKeyChecking=no` (MITM-open) default is gone. The
-  path is quoted for OpenSSH's option parser so directories with spaces or `%`
-  cannot redirect the trust store.
-- On timeout the whole process group of a worker is SIGKILLed; output is
-  drained for at most 2 s afterwards so a daemonised grandchild holding the
-  pipes cannot keep a run alive.
-- `BatchMode=yes` whenever no password is in play, so nothing can hang on an
-  interactive prompt; `ConnectTimeout=5` and `ServerAliveInterval=15` always.
-- Passwords are never on a command line: the worker child creates a pipe,
-  writes the secret into it, and runs `sshpass -d <fd>`. The password is not
-  visible in `ps`, not written to `clients.txt`, and not written to the log.
+`hosts add`, `remove`, and `import` require an
+explicit `-i FILE` INI target. Mutations:
 
-### Logging
+- reject duplicate hosts and secret-bearing add operands;
+- refuse to rewrite a file whose basename is `clients.txt`, because
+  that name is reserved for legacy import semantics;
+- write a canonical, secret-free inventory with a same-directory temporary
+  file and atomic rename;
+- preserve the existing target's permissions, and create a new target as a
+  private file on POSIX.
 
-Logs default to a file (`$XDG_STATE_HOME/pipeshellx/pipeshellx.log` or
-`~/.local/state/pipeshellx/pipeshellx.log`; `--log-file` overrides). Command
-lines are logged; passwords and command output are not.
+Atomic replacement prevents partial files; it is not a transaction across
+multiple concurrent writers. Coordinate administrative writes externally.
 
-## Remaining Risks
+## Current limitations
 
-### Allowlisted Command Scope
+The following are explicitly not security guarantees in v0.6:
 
-Some allowed commands expose system information:
+- no seccomp, Landlock, chroot, namespace, container, AppContainer, or other
+  stage sandbox;
+- no privilege dropping or per-controller OS-user separation in the node;
+- node policy is optional defense in depth, not a mandatory sandbox; without
+  `node --policy` an authorized controller may request arbitrary argv;
+- no locked/zeroing secret-memory type;
+- no signed or hash-chained audit;
+- no Windows controller or native Windows node;
+- no reconnect/resume after transport loss.
 
-- `ps`
-- `id`
-- `df`
-- `du`
-- `hostname`
-
-These are not injection risks, but they are policy risks. In a more restricted deployment, the allowlist should be narrower.
-
-### `cat` Risk
-
-`cat` can read files available to the running user. If the execution environment contains sensitive readable files, this is a disclosure risk.
-
-### Environment Inheritance
-
-The child inherits the parent environment. Although executable resolution is constrained, environment variables can still affect subprocess behavior in other ways.
-
-### No User Separation
-
-The current application assumes the permissions of the user running `PipeShellX`. It does not implement:
-
-- privilege dropping
-- chroot jail
-- namespaces
-- seccomp filtering
-- per-session OS account separation
-
-## Recommended Hardening
-
-For stronger deployment:
-
-- run the service under a dedicated low-privilege user
-- remove high-risk commands from the allowlist
-- make resource limits configurable
-- add seccomp or platform sandboxing
-- restrict accessible filesystem locations
-- consider namespaces or container isolation
-- ship the log file to a centralized sink
-- prefer key, agent, or certificate authentication; password-backed hosts are a compatibility feature
-
-## Security Posture Summary
-
-The current system is substantially safer than a shell-backed executor because it:
-
-- avoids shell invocation
-- restricts commands by allowlist
-- resolves executables from trusted directories
-- validates argument content
-- constrains process execution
-
-It is appropriate as a controlled teaching/demo system. It should not be treated as a hardened multi-tenant remote execution service without additional sandboxing and policy controls.
+For production use, combine a dedicated node account, tightly scoped CA and
+SAN allowlists, inventory SAN pins, CRLs, pre-seeded SSH host keys, optional
+controller and node policies, filesystem permissions, external audit shipping,
+and OS- or container-level isolation.

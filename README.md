@@ -1,323 +1,265 @@
 # PipeShellX
 
-## Description
+PipeShellX 0.6.0 is a C++20 command-execution controller for Linux and macOS.
+It can fan one command out to inventory hosts over system OpenSSH or an
+optional native mutual-TLS transport, run local process graphs, and operate a
+native node daemon. The executable and CMake executable target are both
+lowercase: `pipeshellx`.
 
-PipeShellX is a C++ systems programming project that demonstrates how operating system primitives can be used to build a controlled command execution workflow.
+Current capabilities include:
 
-The project focuses on low-level process execution using:
+- bounded-concurrency SSH or native fan-out with grouped, streaming, JSON,
+  ordered, and consensus output;
+- INI inventories with group, tag, and explicit-host selection, plus atomic
+  `hosts add`, `remove`, and legacy `clients.txt` import;
+- native TLS 1.3 nodes with CA-issued identities, SAN authorization, optional
+  CRLs and command policy, and a local status socket;
+- inline pipelines and file-defined, all-local acyclic fan-in/fan-out graphs
+  with bounded per-edge buffering and deterministic pipefail;
+- an event-driven POSIX runtime built around nonblocking pipes,
+  `epoll`/`kqueue`/`poll`, process groups, signals, and exact child reaping.
 
-- `posix_spawn()` (with a `fork()` fallback only where `posix_spawn` cannot express a request) for process creation
-- unnamed pipes for IPC, non-inheritable at creation
-- `posix_spawn` file actions for standard stream redirection
-- `epoll` / `kqueue` / `poll` readiness demultiplexing behind one `Reactor`
-- `pidfd` / `kqueue EVFILT_PROC` for pollable child exits, `waitpid()` exactly once per child
+## Quick start
 
-It provides an interactive terminal client, structured logging, command validation, and a process manager designed to avoid deadlocks and zombie processes.
-
-The project also supports distributed execution over SSH when a `clients.txt` file is present. In that mode, a command entered once in the terminal is executed in parallel across all configured remote clients.
-
-## Key Features
-
-- Interactive terminal-based command execution
-- Command allowlist with input validation
-- Safe execution without shell invocation
-- Parent/child IPC using stdin, stdout, and stderr pipes
-- Nonblocking pipe handling with `poll()`
-- Timeout-aware process execution
-- Process group cleanup on timeout or failure
-- Structured logging with timestamp, PID, session ID, and command
-- Distributed SSH execution across multiple configured clients
-- Per-client grouped output and normalized remote error reporting
-- Hardened SSH defaults: `ssh` from `PATH`, `accept-new` host keys with a per-inventory `known_hosts`, `BatchMode`, passwords handed to `sshpass` over a pipe (never on a command line)
-- File-based structured logging by default; `--verbose` mirrors log lines to the console
-
-## Operating System Concepts Demonstrated
-
-- Process creation with `posix_spawn()` (and why `fork()` is avoided on the hot path)
-- Inter-process communication with unnamed pipes and the `O_CLOEXEC` invariant
-- Nonblocking I/O with `fcntl()` and edge-triggered draining
-- Event demultiplexing with `epoll`, `kqueue`, and `poll`
-- Pollable child exits with `pidfd_open()` / `EVFILT_PROC`, reaping with `waitpid()`
-- Operator signals as events via `signalfd` / `EVFILT_SIGNAL`
-- Resource limiting with `prlimit()` / `setrlimit()`
-- Process-group based termination with `kill()`
-
-## Architecture Overview
-
-The system is organized into a small set of focused modules:
-
-- `TerminalClient`
-  Handles user interaction, command history, colored output, and terminal-facing errors.
-- `CommandExecutor`
-  Parses commands, validates user input, resolves executables from trusted paths, and prepares execution context.
-- `ProcessManager`
-  Spawns local commands and parallel SSH workers on the `psx` runtime (`posix_spawn`, reactor-driven pipes, pollable child exits, deadlines), collects their output, and normalizes failures.
-- `psx::os` / `psx::runtime` (`include/psx/`)
-  The OS primitive layer (`Handle`, `Pipe`, `Process`, `Poller`, `ChildExitSource`, `SignalSource`) and the single-threaded `Reactor` built on it; public headers use `std::` types only, platform code lives under `src/os/posix/`.
-- `Logger`
-  Provides structured logs for command execution, process lifecycle, IPC activity, and failures.
-- `ClientConfig`
-  Loads and validates `clients.txt` for distributed SSH execution and derives the per-inventory `known_hosts` path.
-- `ssh_auth`
-  Builds the hardened OpenSSH argument vector and classifies authentication and host-key failures.
-
-For more detail, see:
-
-- [docs/architecture.md](docs/architecture.md)
-- [docs/distributed_execution.md](docs/distributed_execution.md)
-- [docs/ipc_design.md](docs/ipc_design.md)
-- [docs/process_management.md](docs/process_management.md)
-
-## Installation
-
-### Prerequisites
-
-- CMake 3.20 or newer
-- C++20-capable compiler (GCC ≥ 11, Clang ≥ 14, Apple Clang ≥ 14)
-- Ninja or Make
-- Linux or macOS (both are built and tested in CI; Windows arrives in Phase 3 of `PLAN.md`)
-- network access on the first configure: GoogleTest is fetched automatically
-  (`-DPIPESHELLX_SYSTEM_GTEST=ON` uses an installed copy instead)
-- OpenSSH client ≥ 7.6 (for `StrictHostKeyChecking=accept-new`; 2017 or newer on every supported OS)
-- `sshpass`, only for password-backed hosts
-
-### Build
+The default build enables native transport and therefore requires OpenSSL 3.
+Tests are enabled and use an installed GoogleTest when requested or fetch the
+pinned source during configuration.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
+cmake --build build --parallel
 ctest --test-dir build --output-on-failure
+
+./build/bin/pipeshellx --version
+./build/bin/pipeshellx --help
 ```
 
-The executable will be generated at:
+Required build tools are CMake 3.20 or newer, a C++20 compiler, and Ninja or
+Make. Linux and macOS are the supported controller and native-node platforms.
+OpenSSH 7.6 or newer is required for SSH execution because PipeShellX uses
+`StrictHostKeyChecking=accept-new`.
+
+For an SSH-only build that does not discover or link OpenSSL:
 
 ```bash
-build/bin/PipeShellX
+cmake -S . -B build-ssh \
+  -DPIPESHELLX_NATIVE_TRANSPORT=OFF \
+  -DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=TRUE
+cmake --build build-ssh --parallel
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the sanitizer build and the other CMake options.
+Release builders may add `-DPIPESHELLX_STATIC_OPENSSL=ON` to prefer static
+OpenSSL libraries. This controls dependency selection; it is not a promise
+that every platform library will be folded into one fully static executable.
 
-## Usage
-
-Run the interactive client:
+Install to a staging prefix with:
 
 ```bash
-./build/bin/PipeShellX
+cmake --install build --prefix /tmp/pipeshellx-prefix
+/tmp/pipeshellx-prefix/bin/pipeshellx --version
 ```
 
-At the prompt, enter an allowed command:
+The always-present build targets are `pipeshellx` and
+`pipeshellx_lib`; `pipeshellx_tests` and
+`pipeshellx_bench_baseline` are present when their respective build
+options are enabled. The install exports the library as `pipeshellx::lib`:
 
-```text
-cmd> pwd
-cmd> whoami
-cmd> echo hello
-cmd> date
-cmd> exit
+```cmake
+find_package(pipeshellx 0.6 CONFIG REQUIRED)
+target_link_libraries(my_program PRIVATE pipeshellx::lib)
 ```
 
-### Built-in Terminal Commands
+See [Deployment](docs/deployment.md) and
+[Contributing](CONTRIBUTING.md) for the full option and validation matrix.
 
-- `history` shows command history
-- `exit` or `quit` terminates the application
+## Inventory and host management
 
-### Command-Line Options
+An INI inventory can mix SSH and native metadata:
 
-| Flag | Effect |
-|---|---|
-| `-v`, `--verbose` | log at DEBUG level and mirror every log line to stderr |
-| `--log-file <path>` | write the log to `<path>` instead of the default location |
-| `-h`, `--help` | show usage and exit |
-| `--version` | print the version and exit |
+```ini
+[defaults]
+user = deploy
+identity = /home/operator/.ssh/fleet_ed25519
 
-Logs go to `$XDG_STATE_HOME/pipeshellx/pipeshellx.log` (falling back to
-`~/.local/state/pipeshellx/pipeshellx.log`) by default, so the terminal stays
-clean unless `--verbose` is given. An unknown flag exits with status `2`.
+[web]
+web-01 tag=prod,blue transport=ssh
+web-02 port=2222 transport=ssh
 
-## Distributed Usage
-
-Create a `clients.txt` file in the directory where you run the application:
-
-```text
-user@192.168.1.10
-user@192.168.1.11
-user@192.168.1.12
+[nodes]
+node-01 transport=native san=spiffe://psx/node/node-01 native_port=7433
 ```
 
-Then run the shell normally:
+Normal inventory resolution uses the first available source:
+
+1. `-i FILE` or `--inventory FILE`;
+2. `PIPESHELLX_INVENTORY`;
+3. `./inventory.ini`;
+4. legacy `./clients.txt`;
+5. `$XDG_CONFIG_HOME/pipeshellx/inventory.ini`, or
+   `$HOME/.config/pipeshellx/inventory.ini`.
+
+`run`, `ping`, `diff`, and `hosts list` use that resolver. A
+remote `pipe` deliberately requires an explicit `-i FILE`.
+Inventory mutations also require an explicit INI target:
 
 ```bash
-./build/bin/PipeShellX
+pipeshellx hosts list -i fleet.ini
+pipeshellx hosts add web-03 -i fleet.ini --group web \
+  --user deploy --transport ssh --tag prod
+pipeshellx hosts remove web-03 -i fleet.ini
+pipeshellx hosts import clients.txt -i fleet.ini
 ```
 
-When `clients.txt` is present, an entered command is executed on all configured clients in parallel over SSH.
+Rewrites are atomic and reject duplicate hosts and secret-bearing entries.
+SSH host trust is kept per inventory in `<inventory>.known_hosts`. Pre-seed
+and verify that file when trust on first use is not acceptable. See
+[Authentication and inventory](docs/authentication.md).
 
-Host keys are recorded on first contact in `clients.txt.known_hosts` next to the inventory (`StrictHostKeyChecking=accept-new`). A host whose key later changes is refused and reported as `ERROR: host key verification failed`.
+## Run commands on hosts
 
-SSH authentication is delegated to the system OpenSSH client by default. When a password is supplied through the interactive `add-client` prompt, PipeShellX keeps it in memory for the current session and invokes `sshpass -d <fd> ssh ...` for that client, handing the password over a pipe so that it never appears on a command line. Passwords are not written to `clients.txt`.
+`run` requires `--` before the command argv. With no selector it targets
+every inventory host; `-g GROUP`, `-t TAG`, and
+`-H host1,host2` are mutually exclusive.
 
-### SSH Authentication
+```bash
+# SSH, using the inventory's transport
+pipeshellx run -i fleet.ini -g web --stream -c 32 -- uptime
 
-PipeShellX supports these SSH authentication modes:
+# Native mTLS
+pipeshellx run -i fleet.ini -g nodes --transport native \
+  --cert controller.crt --key controller.key --ca ca/ca.crt \
+  --canary 10% --fail-fast -- uname -a
+```
 
-- key-based authentication through the local OpenSSH client
-- password-based authentication through `sshpass` when the password is supplied interactively
-- `ssh-agent` authentication through the local OpenSSH client
-- `~/.ssh/config`-driven authentication and host settings through the local OpenSSH client
+Common controls include `--timeout S`, `-c N`,
+`--fail-fast`, `--policy FILE`,
+`--ring SIZE`, `--overflow POLICY`,
+`--audit-log FILE`, and the output modes
+`--group`, `--stream`, `--json`,
+`--consensus`, and `--ordered`.
 
-No application-specific authentication configuration is required for key-based auth, `ssh-agent`, or `~/.ssh/config`. PipeShellX defers those behaviors to the system `ssh` client.
+The ring is a retained-capture limit for drop/spool policies. The default
+`block` policy is lossless and unbounded; spool can grow temporary disk and
+materializes the full result at completion. See the detailed output contract
+before using lossless modes with untrusted or indefinite producers.
 
-For password-only hosts:
+SSH-only controls are `--shell posix|cmd|powershell`,
+`--reuse`, and `--idempotent --retries N`.
+Native-only controls are `--cert`, `--key`,
+`--ca`, optional `--crl`,
+`--native-port`, and `--canary`. Without an explicit
+`--transport`, all selected inventory hosts must declare the same
+transport; a mixed selection exits with a configuration error.
 
-1. run `add-client user@host`
-2. answer `Password required? (y/n)` with `y`
-3. enter the password at the hidden prompt
+`run` exits `0` when all selected stages succeed, `1`
+when any stage fails, `2` for usage or configuration errors,
+`3` when no hosts are selected, and `130` after operator
+cancellation. See [Distributed execution](docs/distributed_execution.md) for
+the precise output, backpressure, retry, and failure contracts, and
+[JSON output](docs/json.md) for the machine-readable schema.
 
-The password is kept in memory only for the current process. It is not printed to the terminal, not written to logs, and not persisted to `clients.txt`.
+## Native CA and node
 
-Example:
+A minimal local CA setup is:
+
+```bash
+pipeshellx ca init --cn pipeshellx-fleet --dir ca
+pipeshellx ca issue --san spiffe://psx/controller/ops \
+  --ca ca --out controller
+pipeshellx ca issue --san spiffe://psx/node/node-01 \
+  --ca ca --out node-01
+
+pipeshellx node --listen 0.0.0.0:7433 \
+  --cert node-01.crt --key node-01.key --ca ca/ca.crt \
+  --allow spiffe://psx/controller/ops \
+  --control /run/pipeshellx/node.ctl
+```
+
+`--allow` restricts admitted controller SAN URIs. Omitting it admits any
+CA-signed controller and emits a warning. Add optional
+`--policy FILE` to reject disallowed argv before spawn; without a
+node policy, an admitted controller can request arbitrary argv as the node's OS
+account. `node status --control PATH` reads the daemon's local JSON
+status snapshot. `node systemd-unit` and
+`node launchd-plist` emit service definitions; they do not install
+or start them.
+
+For enrollment that keeps a node key on the node, use
+`node keygen` followed by `ca sign`. See
+[Authentication](docs/authentication.md), [Security](docs/security.md), and
+the [psx/1 wire protocol](docs/wire_protocol.md).
+
+## Pipelines
+
+Run an all-local inline chain:
+
+```bash
+pipeshellx pipe "'/bin/echo hello' | '/usr/bin/tr a-z A-Z'"
+```
+
+`pipe --file pipeline.yaml` loads declared stages and edges. All-local
+acyclic files support fan-in and fan-out, follow edges rather than declaration
+order, bound buffering per edge, reap every child, and use the rightmost
+nonzero exit in deterministic planner order. `pipe --check` validates
+without execution.
+
+Remote stages use native mTLS, not SSH, and require `-i`,
+`--cert`, `--key`, and `--ca`. If any stage
+is remote, the declared graph must be one chain. Non-linear mixed or remote
+graphs exit `2` with:
 
 ```text
-cmd> whoami
-CLIENT user@192.168.1.10
-ubuntu
-
-CLIENT user@192.168.1.11
-devuser
-
-CLIENT user@192.168.1.12
-laptop
+pipeshellx pipe: non-linear remote DAGs are not supported; use a single declared chain
 ```
 
-Example failure output:
+The supported first-stage `@group` gather form is described in
+[Pipelines](docs/pipelines.md). General remote DAG execution is not silently
+linearized and is not implemented.
 
-```text
-cmd> hostname
-CLIENT user@192.168.1.10
-ERROR: connection failed
-```
+## Platform and security boundaries
 
-## Example Commands
+- Linux and macOS are supported as controllers and native nodes. Windows is
+  supported only as an OpenSSH target reached from a POSIX controller; choose
+  `--shell cmd` or `--shell powershell` as appropriate. There is
+  no Windows controller, native node, or Windows CI job. See
+  [Windows support](docs/windows.md).
+- There is no universal command allowlist. The legacy `shell` REPL
+  (also entered when no subcommand is given) has a small demonstration
+  allowlist; `run` is unrestricted unless `--policy` is
+  supplied, and `node --policy` is a separate optional check.
+- SSH starts OpenSSH directly on the controller, but the target SSH service
+  invokes its configured remote shell. Native stages and local pipeline stages
+  receive argv directly unless the operator explicitly requests a shell.
+- PipeShellX is not a multi-tenant sandbox. Per-stage sandboxing, privilege
+  separation, signed/tamper-evident audit, native reconnect/resume, and general
+  remote DAGs are not v0.6 capabilities.
+- `run --json` and `diff --json` are implemented command
+  output modes. Operational logs remain rotating structured text; optional
+  `--audit-log` output is unsigned JSON Lines.
 
-The current allowlist includes:
+## Tests and CI
 
-- `ls`
-- `cat`
-- `echo`
-- `pwd`
-- `whoami`
-- `date`
-- `hostname`
-- `uptime`
-- `df`
-- `du`
-- `ps`
-- `id`
+CTest discovers the GoogleTest suite. The configured CI matrix covers Linux
+with GCC and Clang in Debug and Release, plus macOS AppleClang in Debug and
+Release. Separate jobs run Linux Clang ASan+UBSan, layering checks, a
+static-OpenSSL install/downstream-package smoke test, and an SSH-only
+native-disabled build/install/downstream smoke test. The nightly benchmark
+workflow is best-effort and does not gate merges.
 
-Example session:
+These are workflow configurations, not a claim that an unpublished commit has
+already passed hosted CI. See [Testing](docs/testing.md).
 
-```text
-cmd> ls
-cmd> pwd
-cmd> whoami
-cmd> echo hello
-cmd> date
-```
+## Documentation
 
-Distributed example:
+- [Architecture](docs/architecture.md)
+- [Deployment](docs/deployment.md)
+- [Distributed execution](docs/distributed_execution.md)
+- [Authentication and inventory](docs/authentication.md)
+- [Pipelines, output, and consensus](docs/pipelines.md)
+- [Security model](docs/security.md)
+- [psx/1 wire protocol](docs/wire_protocol.md)
+- [Testing](docs/testing.md)
 
-```text
-cmd> uptime
-cmd> hostname
-cmd> df -h
-```
-
-## Project Directory Structure
-
-```text
-.
-├── CMakeLists.txt
-├── CONTRIBUTING.md
-├── PLAN.md                    # roadmap and architecture (single source of truth for scope)
-├── README.md
-├── SECURITY.md
-├── .clang-format / .clang-tidy
-├── .github/workflows/         # ci.yml (build + test matrix, sanitizers), bench.yml (nightly)
-├── bench/
-│   └── baseline.cpp           # pipeshellx_bench_baseline (docs/benchmarks.md)
-├── docs/
-│   ├── adr/                   # architecture decision records
-│   ├── architecture.md
-│   ├── authentication.md
-│   ├── benchmarks.md
-│   ├── deployment.md
-│   ├── distributed_execution.md
-│   ├── ipc_design.md
-│   ├── process_management.md
-│   ├── security.md
-│   ├── system_flow.md
-│   └── testing.md
-├── include/
-│   ├── psx/                   # public, std-only headers of the new core
-│   │   ├── result.hpp         # psx::Result<T> / psx::Error (ADR-005)
-│   │   ├── os/                # Handle, Pipe, io, Process, Poller, ChildExitSource, SignalSource
-│   │   └── runtime/           # Reactor
-│   ├── cli_options.hpp
-│   ├── client_config.hpp
-│   ├── client_manager.hpp
-│   ├── command_executor.hpp
-│   ├── logger.hpp
-│   ├── process_manager.hpp
-│   ├── ssh_auth.hpp
-│   └── terminal_client.hpp
-├── src/
-│   ├── CMakeLists.txt
-│   ├── os/posix/              # the only place platform headers appear
-│   ├── runtime/               # reactor.cpp (platform-agnostic)
-│   ├── cli_options.cpp
-│   ├── client_config.cpp
-│   ├── client_manager.cpp
-│   ├── command_executor.cpp
-│   ├── logger.cpp
-│   ├── main.cpp
-│   ├── process_manager.cpp
-│   ├── ssh_auth.cpp
-│   └── terminal_client.cpp
-└── tests/
-    ├── CMakeLists.txt         # GoogleTest via FetchContent; gtest_discover_tests
-    ├── test_support.hpp       # ScopedTempCwd, ScopedEnv, FakeSshOnPath, refusedLoopbackClient
-    ├── unit/os/               # shared psx::os suite (handle/pipe/process/poller/sources)
-    ├── unit/runtime/          # reactor
-    ├── test_cli_options.cpp
-    ├── test_client_config.cpp
-    ├── test_command_executor.cpp
-    ├── test_logger.cpp
-    ├── test_process_manager.cpp
-    ├── test_process_manager_golden.cpp
-    └── test_ssh_auth.cpp
-```
-
-## Future Improvements
-
-- True live streaming output to the terminal callback
-- Configurable command policy and resource limits
-- Stronger sandboxing with seccomp, namespaces, or containers
-- Expanded automated tests for concurrency, stress, and failure injection
-- Log rotation and JSON log output
-- Better support for production-style service deployment
-- Configurable client configuration path instead of fixed `clients.txt`
-- True live per-client streaming output for distributed execution
-
-## Additional Documentation
-
-- [docs/system_flow.md](docs/system_flow.md)
-- [docs/distributed_execution.md](docs/distributed_execution.md)
-- [docs/authentication.md](docs/authentication.md)
-- [docs/security.md](docs/security.md)
-- [docs/deployment.md](docs/deployment.md)
-- [docs/testing.md](docs/testing.md)
-
-## License
-
-PipeShellX is licensed under the [Apache License 2.0](LICENSE).
-
-See [PLAN.md](PLAN.md) for the product roadmap from the current prototype to the 1.0 launch.
+PipeShellX is distributed under the terms in [LICENSE](LICENSE); bundled and
+third-party notices are recorded in [NOTICE](NOTICE), and release changes are
+listed in [CHANGELOG.md](CHANGELOG.md).

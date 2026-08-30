@@ -5,9 +5,13 @@
 #include <gtest/gtest.h>
 
 #include <string>
+#include <vector>
 
 using psx::transport::decodeOpen;
 using psx::transport::encodeOpen;
+using psx::transport::kMaxOpenArgc;
+using psx::transport::kMaxOpenArgumentBytes;
+using psx::transport::kMaxOpenCwdBytes;
 using psx::transport::OpenRequest;
 
 TEST(OpenRequestTest, RoundTripsArgvAndCwd) {
@@ -17,16 +21,54 @@ TEST(OpenRequestTest, RoundTripsArgvAndCwd) {
     EXPECT_EQ(out.value(), in);
 }
 
-TEST(OpenRequestTest, HandlesEmptyArgvEmptyCwdAndBinaryArgs) {
+TEST(OpenRequestTest, HandlesEmptyCwdAndOpaqueNonNulArguments) {
     for (const OpenRequest& in : {
-             OpenRequest{.argv = {}, .cwd = ""},
-             OpenRequest{.argv = {""}, .cwd = ""},                                // one empty arg
-             OpenRequest{.argv = {std::string("a\x00b", 3), "c"}, .cwd = "d\ne"}, // NUL + newline
+             OpenRequest{.argv = {"x"}, .cwd = ""},
+             OpenRequest{.argv = {"x", "", "c"}, .cwd = "d\ne"},
          }) {
         const auto out = decodeOpen(encodeOpen(in));
         ASSERT_TRUE(out.ok()) << out.error().message();
         EXPECT_EQ(out.value(), in);
     }
+}
+
+TEST(OpenRequestTest, RejectsEmptyArgvAndEmptyArgvZero) {
+    for (const OpenRequest& in : {
+             OpenRequest{.argv = {}, .cwd = ""},
+             OpenRequest{.argv = {""}, .cwd = ""},
+             OpenRequest{.argv = {"", "argument"}, .cwd = "/tmp"},
+         }) {
+        EXPECT_FALSE(decodeOpen(encodeOpen(in)).ok());
+    }
+}
+
+TEST(OpenRequestTest, RejectsEmbeddedNulInEveryExecVisibleString) {
+    for (const OpenRequest& in : {
+             OpenRequest{.argv = {std::string("a\0b", 3)}, .cwd = ""},
+             OpenRequest{.argv = {"x", std::string("a\0b", 3)}, .cwd = ""},
+             OpenRequest{.argv = {"x"}, .cwd = std::string("a\0b", 3)},
+         }) {
+        EXPECT_FALSE(decodeOpen(encodeOpen(in)).ok());
+    }
+}
+
+TEST(OpenRequestTest, RejectsV1FieldsAboveTheirResourceBounds) {
+    OpenRequest tooMany{.argv = std::vector<std::string>(kMaxOpenArgc + 1, "x"), .cwd = ""};
+    EXPECT_FALSE(decodeOpen(encodeOpen(tooMany)).ok());
+
+    OpenRequest longArgument{.argv = {"x", std::string(kMaxOpenArgumentBytes + 1, 'a')}, .cwd = ""};
+    EXPECT_FALSE(decodeOpen(encodeOpen(longArgument)).ok());
+
+    OpenRequest longCwd{.argv = {"x"}, .cwd = std::string(kMaxOpenCwdBytes + 1, 'c')};
+    EXPECT_FALSE(decodeOpen(encodeOpen(longCwd)).ok());
+}
+
+TEST(OpenRequestTest, AcceptsV1FieldsAtTheirResourceBounds) {
+    OpenRequest atLimits{.argv = std::vector<std::string>(kMaxOpenArgc, ""), .cwd = std::string(kMaxOpenCwdBytes, 'c')};
+    atLimits.argv.front() = std::string(kMaxOpenArgumentBytes, 'a');
+    const auto decoded = decodeOpen(encodeOpen(atLimits));
+    ASSERT_TRUE(decoded.ok()) << decoded.error().message();
+    EXPECT_EQ(decoded.value(), atLimits);
 }
 
 TEST(OpenRequestTest, VersionByteIsFirst) {

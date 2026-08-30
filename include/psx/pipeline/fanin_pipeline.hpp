@@ -8,6 +8,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -42,6 +43,7 @@ private:
     void onSourceOutput(std::string_view data);
     void onSourceDone(std::vector<psx::transport::NativeController::HostResult> results);
     void onDownstreamDone(Outcome downstreamOutcome);
+    void finishIfReady();
     void finish(Outcome outcome);
 
     psx::runtime::Reactor& reactor_;
@@ -54,6 +56,10 @@ private:
     bool hasDownstream_ = false;
     int sourceExit_ = 0;      // pipefail across the source hosts
     std::string sourceError_; // non-empty: a source host failed to run
+    std::optional<Outcome> downstreamOutcome_;
+    bool sourceDone_ = false;
+    bool downstreamDone_ = false;
+    bool sourceCancellationRequested_ = false;
     bool done_ = false;
 };
 

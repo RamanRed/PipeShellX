@@ -1,229 +1,192 @@
 # Distributed Execution
 
-## Overview
+PipeShellX 0.6 fans operator-supplied argv out to inventory hosts over either
+system OpenSSH or the native psx/1 mTLS backplane. There is no automatic local
+fallback when an inventory is absent: `run` reports a configuration
+error. Use `pipe` for an explicit local pipeline or
+`shell` for the legacy REPL.
 
-The project now supports distributed command execution across multiple remote machines over SSH.
+## Run model
 
-When a `clients.txt` file is present in the working directory, the command execution path switches from local execution to remote fan-out execution:
-
-- one SSH worker process is created per configured client
-- all workers run in parallel
-- stdout and stderr are captured independently for each client
-- results are returned to the parent and displayed grouped by client
-
-If `clients.txt` is not present, the system continues to use the original local execution path.
-
-## Client Configuration
-
-The client list is loaded from:
-
-```text
-clients.txt
+```bash
+pipeshellx run -i fleet.ini -g web -- uptime
+pipeshellx run -i fleet.ini -t prod --stream -c 32 -- journalctl -n 20
+pipeshellx run -i fleet.ini -H web-01,web-02 --json -- id
 ```
 
-Example:
+The command grammar requires `--` before argv. Exactly one of
+`-g GROUP`, `-t TAG`, or `-H h1,h2` may be
+given; no selector means all hosts. Inventory lookup and mutation are documented
+in [Authentication and inventory](authentication.md).
 
-```text
-user@192.168.1.10
-user@192.168.1.11
-user@192.168.1.12
+The controller:
+
+1. parses options and argv strictly;
+2. loads and selects inventory hosts;
+3. applies an optional `--policy FILE` before contacting any host;
+4. chooses one transport for the selected set;
+5. schedules work up to `-c N` concurrent hosts;
+6. preserves stdout and stderr as separate channels;
+7. renders stage results and a run summary;
+8. appends audit outcome records when `--audit-log FILE` is set.
+
+Without `--policy`, `run` is an unrestricted trusted-operator
+tool. It is not governed by the legacy shell's fixed demo allowlist.
+
+## Transport selection
+
+Each inventory host has `transport=ssh` by default and may instead
+declare `transport=native`.
+
+- `--transport ssh|native` overrides every selected host.
+- Without an override, a homogeneous selected set uses its declared transport.
+- A mixed selected set exits `2` rather than silently choosing one.
+
+`ping` is SSH-only. Native hosts must be excluded from a ping
+selection. `diff` and remote `pipe` use native transport
+only in v0.6.
+
+## SSH execution
+
+One managed OpenSSH process represents each in-flight host. The controller
+quotes argv for the chosen target shell and passes the resulting remote command
+to `ssh`. OpenSSH handles keys, agents, certificates, config, proxy
+rules, and host keys.
+
+The local controller does not launch `/bin/sh -c` to start SSH, but the
+target SSH service does invoke its configured remote shell. Choose
+`--shell posix|cmd|powershell` accordingly. This is not shell-free
+execution and does not itself restrict the requested command.
+
+`-c` is a sliding window, not a promise to start every SSH process at
+once. It bounds controller process/descriptor use. `--reuse` enables
+OpenSSH ControlMaster sockets for repeated connections.
+
+Retries are conservative:
+
+```bash
+pipeshellx run -i fleet.ini -g web --idempotent --retries 2 -- uptime
 ```
 
-The configuration loader:
+Only explicitly idempotent SSH commands are retried, and only for classified
+transient transport failures. Authentication failures, host-key changes,
+timeouts, and a command's own nonzero exit are not retried.
 
-- reads one client per line
-- ignores blank lines
-- ignores `#` comments
-- validates the `user@host` format
-- rejects duplicate entries
+## Native execution
 
-Implementation:
-
-- `include/client_config.hpp`
-- `src/client_config.cpp`
-
-## SSH Execution Model
-
-For a command entered at the terminal:
-
-```text
-cmd> whoami
+```bash
+pipeshellx run -i fleet.ini -g nodes --transport native \
+  --cert controller.crt --key controller.key --ca ca/ca.crt \
+  --crl ca/crl.pem -- uname -a
 ```
 
-the distributed execution layer transforms it into one SSH command per client:
+The controller opens mutually authenticated TLS connections and sends a
+versioned argv request. A node starts the process directly as the node daemon's
+OS account and maps stdin/stdout/stderr to psx/1 channels. No remote shell is
+inserted, although the argv may explicitly request one.
 
-```text
-ssh user@192.168.1.10 'whoami'
-ssh user@192.168.1.11 'whoami'
-ssh user@192.168.1.12 'whoami'
+Native execution provides:
+
+- certificate SAN pinning and optional CRL checking;
+- multiplexed streams with per-stream credit;
+- independent stdout/stderr capture and rendering;
+- timeout, Ctrl-C cancellation, fail-fast abort, and dropped-byte metadata;
+- `--canary N` or `--canary N%` staged rollout;
+- connection leases, graceful drain, and node-side fencing when the controller
+  connection is lost.
+
+An authenticated controller is authorized to request arbitrary argv unless
+the daemon has its own `node --policy FILE`. That independent policy
+uses the same format, rejects before spawn, emits a diagnostic on the stage's
+stderr channel, and returns exit `126`. It is defense in depth, not a
+sandbox. Use a dedicated OS account, a narrowly scoped CA/SAN allowlist, and a
+node policy where appropriate. See [Security](security.md).
+
+The protocol has no reconnect/resume. A lost connection fails unfinished work;
+it does not fabricate successful exits. The complete contract is in
+[the psx/1 wire protocol](wire_protocol.md).
+
+## Output and backpressure
+
+`run` offers these primary sinks:
+
+| Mode | Behavior |
+| --- | --- |
+| `--group` | Default; prints one completed block per host. |
+| `--stream` | Emits live host-tagged whole lines, keeping stdout and stderr on their original controller streams. |
+| `--json` | Emits one JSON object per completed stage and one summary object. |
+| `--consensus` | Buckets stage output for a consensus/drift view. |
+
+`--ordered` wraps the chosen sink and emits by host order after
+completion. The JSON schema is documented in [JSON output](json.md).
+
+Capture is configurable with `--ring SIZE` and
+`--overflow block|drop-oldest|drop-newest|spool`:
+
+- `block` is lossless and unbounded; it ignores the ring size;
+- drop policies bound each retained stdout/stderr channel, feed buffering
+  sinks only retained bytes, and report discarded bytes;
+- `spool` keeps the configured in-memory tail and spills older bytes to a
+  temporary file, but lossless completion reconstructs the full result and
+  does not bound disk growth or final materialization;
+- live `--stream` output emits every line as it arrives; a drop policy bounds
+  the separately returned capture, not what was already displayed.
+
+Native transport also applies credit windows on the wire. Credit bounds data in
+flight and is returned as the controller handles bytes; it is not a cap on
+lossless controller capture. Output from separate hosts is not globally ordered
+unless an ordered sink is selected.
+
+## Cancellation, timeout, and failures
+
+`--timeout S` bounds stages. `--fail-fast` stops pending work
+and aborts in-flight siblings after a final failure. Ctrl-C cancels an active
+run and returns `130`; owned processes are terminated and reaped, and
+the summary/audit records cancellation state.
+
+Product exit codes for `run` are:
+
+| Code | Meaning |
+| ---: | --- |
+| `0` | Every selected stage succeeded. |
+| `1` | At least one stage failed. |
+| `2` | Usage, policy, inventory, credential, or transport configuration error. |
+| `3` | No hosts were selected. |
+| `130` | Operator cancellation. |
+
+Stage output is never treated as proof of success by itself; exit status,
+timeout, cancellation, abort, and transport errors all contribute to the
+result.
+
+## Strict drift consensus
+
+`diff` is a native-mTLS drift command:
+
+```bash
+pipeshellx diff --json -i fleet.ini -g nodes \
+  --cert controller.crt --key controller.key --ca ca/ca.crt \
+  -- cat /etc/example.conf
 ```
 
-Each SSH invocation is executed directly through `execvp()` in a child worker process. The implementation does not invoke a shell locally.
+It compares exact successful stdout bytes. Stderr is excluded from consensus,
+so a diagnostic on stderr cannot create false drift. Any transport failure or
+nonzero remote exit is a host failure and makes `diff` exit
+`2`; otherwise it exits `0` for unanimous stdout or
+`1` for drift.
 
-The SSH worker currently uses:
+Selectors are mutually exclusive, unknown options and missing values are
+rejected, and `--native-port` is parsed strictly in
+`1..65535`.
 
-- `ssh` resolved from `PATH`
-- `-o StrictHostKeyChecking=accept-new`
-- `-o UserKnownHostsFile=<inventory>.known_hosts` (one trust store per inventory file)
-- `-o BatchMode=yes` unless a password prompt must be answered by `sshpass`
-- `-o ConnectTimeout=5`
-- `-o ServerAliveInterval=15`
+## Current limitations
 
-Authentication is intentionally delegated to the system OpenSSH client. PipeShellX does not implement SSH authentication itself; it executes `ssh` and lets OpenSSH apply config files, agent state, keys, and other supported authentication mechanisms.
-
-If a client has a non-empty in-memory password captured through the interactive shell, the worker child creates a pipe, writes the password into it, and prepends `sshpass -d <fd>` before the `ssh` invocation, so the secret never appears on a command line. Otherwise it uses plain `ssh`.
-
-A host whose key has changed since it was recorded is refused by OpenSSH and reported as `ERROR: host key verification failed`.
-
-## Multi-Client Architecture
-
-Distributed execution extends the existing architecture rather than replacing it.
-
-### Existing Flow
-
-```text
-TerminalClient
-  -> CommandExecutor
-  -> ProcessManager
-```
-
-### Distributed Flow
-
-```text
-TerminalClient
-  -> CommandExecutor
-      -> ClientConfig loads clients.txt
-      -> ProcessManager::executeRemote(...)
-          -> fork one SSH worker per client
-          -> collect output with pipes
-          -> waitpid on each worker
-```
-
-### Responsibilities
-
-#### CommandExecutor
-
-- parses and validates the entered command
-- loads `clients.txt` if present
-- builds the remote SSH command payload
-- decides whether execution is local or distributed
-
-#### ProcessManager
-
-- forks one worker per client
-- creates per-worker pipes
-- redirects worker stdout/stderr
-- executes SSH through `execvp()`
-- captures and classifies client errors
-- reaps worker processes
-
-## IPC Integration
-
-Distributed execution reuses the same OS concepts already present in the local command runner.
-
-For each client worker:
-
-- one stdout pipe is created
-- one stderr pipe is created
-- the worker redirects its output with `dup2()`
-- the parent reads outputs using nonblocking I/O and `poll()`
-
-This means the parent can collect output from multiple remote clients concurrently without serial blocking.
-
-### Per-Client Pipe Ownership
-
-Parent owns:
-
-- worker stdout read end
-- worker stderr read end
-
-Child owns:
-
-- worker stdout write end (as its descriptor 1)
-- worker stderr write end (as its descriptor 2)
-- descriptor 3: the password pipe, for `sshpass -d 3` workers only
-
-Every other descriptor of the controller is non-inheritable, so a worker
-cannot see its siblings' pipes. The parent closes the write ends as soon as
-`posix_spawn` returns.
-
-## Parallel Execution Flow
-
-The parent process does the following:
-
-1. load all configured clients
-2. for each client:
-   - create stdout/stderr pipes (`psx::os::Pipe`)
-   - for a password-backed client, create the password pipe and write the secret into it
-   - `psx::os::Process::spawn()` the `ssh` (or `sshpass -d 3 ssh`) worker in its own process group, stdio wired through `posix_spawn` file actions
-3. register every worker's pipes and exit with the `psx::runtime::Reactor`
-4. run the reactor until all workers are complete:
-   - readable pipes are drained edge-triggered
-   - each exit is reaped once when the `ChildExitSource` reports it
-   - at the deadline every incomplete worker's process group is `SIGKILL`ed, then a 2 s drain grace applies
-5. build per-client results and classify failures
-
-This ensures all remote commands start in parallel rather than one after another.
-
-## Output Grouping
-
-Results are displayed grouped by client:
-
-```text
-CLIENT user@192.168.1.10
-ubuntu-node
-
-CLIENT user@192.168.1.11
-dev-server
-
-CLIENT user@192.168.1.12
-laptop
-```
-
-On failure:
-
-```text
-CLIENT user@192.168.1.10
-ERROR: connection failed
-```
-
-## Error Handling
-
-The remote execution path classifies common SSH failures into normalized client-scoped messages:
-
-- `ERROR: connection failed`
-- `ERROR: unreachable host`
-- `ERROR: authentication failed`
-- `ERROR: command timed out`
-- `ERROR: command failed with exit code <n>`
-
-Raw SSH stderr is still captured internally for diagnostics and logging.
-
-## Logging
-
-Distributed execution logs:
-
-- command entered
-- remote worker creation
-- remote stdout/stderr reads
-- SSH worker reaping
-- normalized client errors
-
-Each log line includes:
-
-- timestamp
-- PID
-- session ID
-- client ID
-- command
-
-## Current Constraints
-
-- Distributed execution activates only when `clients.txt` exists in the current working directory.
-- The command allowlist still applies before any SSH fan-out happens.
-- Output is grouped after collection, not streamed in real time to the terminal by client.
-- The implementation assumes SSH connectivity and delegates authentication selection to the local OpenSSH client.
-
-## Summary
-
-The distributed execution layer preserves the original architecture while extending it from single-host command execution to multi-client SSH-based fan-out. It keeps process creation, pipe-based IPC, and child reaping inside `ProcessManager`, which makes the extension consistent with the rest of the system.
+- No Windows controller or native Windows node; a POSIX controller can reach a
+  Windows OpenSSH target.
+- No reconnect/resume for native work.
+- Node policy is optional; there is no mandatory policy, privilege separation,
+  or sandbox.
+- No SSH implementation of cross-node pipeline edges.
+- General non-linear DAGs are local-only; any graph containing a remote stage
+  must be a single declared chain.
+- The test suite uses deterministic fake/loopback transports for most failure
+  coverage; real-fleet qualification remains operational work.

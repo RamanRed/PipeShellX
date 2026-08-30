@@ -101,7 +101,7 @@ public:
             const epoll_event& ev = raw_[static_cast<std::size_t>(i)];
             if (ev.data.u64 == kWakeToken) {
                 std::uint64_t counter = 0;
-                (void)::read(eventFd_, &counter, sizeof(counter));
+                [[maybe_unused]] const ssize_t bytesRead = ::read(eventFd_, &counter, sizeof(counter));
                 continue;
             }
             Readiness readiness = Readiness::None;

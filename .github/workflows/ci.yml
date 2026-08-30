@@ -24,31 +24,30 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         compiler: [gcc, clang]
         build_type: [Debug, Release]
+        exclude:
+          # Homebrew GCC is not a supported compiler for the Apple SDK. Linux
+          # supplies the GCC coverage; macOS is covered by AppleClang.
+          - os: macos-latest
+            compiler: gcc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Select compiler
         shell: bash
         run: |
           if [[ "${{ matrix.compiler }}" == "gcc" ]]; then
-            if [[ "${{ runner.os }}" == "macOS" ]]; then
-              # Homebrew GCC on the macOS runner image
-              GCC_BIN=$(ls /opt/homebrew/bin/g++-* /usr/local/bin/g++-* 2>/dev/null | sort -V | tail -1)
-              if [[ -z "${GCC_BIN}" ]]; then echo "no Homebrew g++ on this runner image"; exit 1; fi
-              echo "CXX=${GCC_BIN}" >> "$GITHUB_ENV"
-              echo "CC=${GCC_BIN/g++/gcc}" >> "$GITHUB_ENV"
-            else
-              echo "CXX=g++" >> "$GITHUB_ENV"
-              echo "CC=gcc" >> "$GITHUB_ENV"
-            fi
+            echo "CXX=g++" >> "$GITHUB_ENV"
+            echo "CC=gcc" >> "$GITHUB_ENV"
           else
             echo "CXX=clang++" >> "$GITHUB_ENV"
             echo "CC=clang" >> "$GITHUB_ENV"
           fi
 
-      - name: Install sshpass (macOS)
+      - name: Install native transport and SSH helpers (macOS)
         if: runner.os == 'macOS'
-        run: brew install sshpass || true
+        run: |
+          brew install openssl@3
+          brew install sshpass || true
 
       - name: Configure
         run: cmake -S . -B build -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
@@ -61,15 +60,78 @@ jobs:
 
       - name: Smoke test CLI
         run: |
-          ./build/bin/PipeShellX --version
-          ./build/bin/PipeShellX --help
-          ! ./build/bin/PipeShellX --bogus
+          ./build/bin/pipeshellx --version
+          ./build/bin/pipeshellx --help
+          if ./build/bin/pipeshellx --bogus; then
+            echo "unknown CLI option unexpectedly succeeded" >&2
+            exit 1
+          fi
+
+  packaging:
+    name: Install + downstream CMake package (ubuntu, Release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure static-OpenSSL release
+        run: >-
+          cmake -S . -B build-package -DCMAKE_BUILD_TYPE=Release
+          -DPIPESHELLX_BUILD_TESTS=OFF -DPIPESHELLX_BUILD_BENCH=OFF
+          -DPIPESHELLX_STATIC_OPENSSL=ON
+
+      - name: Build and install
+        run: |
+          cmake --build build-package --parallel
+          cmake --install build-package --prefix "$RUNNER_TEMP/pipeshellx-prefix"
+
+      - name: Smoke installed CLI and exported package
+        run: |
+          "$RUNNER_TEMP/pipeshellx-prefix/bin/pipeshellx" --version
+          test -f "$RUNNER_TEMP/pipeshellx-prefix/share/doc/pipeshellx/LICENSE"
+          test -f "$RUNNER_TEMP/pipeshellx-prefix/share/doc/pipeshellx/NOTICE"
+          test -f "$RUNNER_TEMP/pipeshellx-prefix/share/doc/pipeshellx/README.md"
+          test -f "$RUNNER_TEMP/pipeshellx-prefix/share/doc/pipeshellx/CHANGELOG.md"
+          if grep -R -E "$GITHUB_WORKSPACE|pipeshellx_warnings" \
+            "$RUNNER_TEMP/pipeshellx-prefix/lib/cmake/pipeshellx"; then
+            echo "installed CMake export leaked a build path or warnings target" >&2
+            exit 1
+          fi
+          cmake -S tests/packaging/downstream -B build-consumer \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/pipeshellx-prefix"
+          cmake --build build-consumer --parallel
+          ./build-consumer/bin/pipeshellx_package_consumer
+
+  native-off:
+    name: SSH-only build without OpenSSL
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure without discovering OpenSSL
+        run: >-
+          cmake -S . -B build-native-off -DCMAKE_BUILD_TYPE=Release
+          -DPIPESHELLX_NATIVE_TRANSPORT=OFF
+          -DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=TRUE
+          -DPIPESHELLX_BUILD_TESTS=OFF -DPIPESHELLX_BUILD_BENCH=OFF
+
+      - name: Build, install, and smoke
+        run: |
+          cmake --build build-native-off --parallel
+          ./build-native-off/bin/pipeshellx --version
+          ./build-native-off/bin/pipeshellx --help
+          cmake --install build-native-off --prefix "$RUNNER_TEMP/pipeshellx-native-off"
+          cmake -S tests/packaging/downstream -B build-native-off-consumer \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/pipeshellx-native-off"
+          cmake --build build-native-off-consumer --parallel
+          ./build-native-off-consumer/bin/pipeshellx_package_consumer
 
   layering:
     name: Layering lint (platform headers, public types, layer order)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Check layering rules
         run: ./scripts/check_layering.sh
 
@@ -82,7 +144,7 @@ jobs:
       ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
       UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DPIPESHELLX_SANITIZE=address,undefined
       - name: Build

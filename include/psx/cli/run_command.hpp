@@ -42,19 +42,28 @@ struct RunInvocation {
     std::string policyPath;                 // --policy FILE: restrict the command (empty = unrestricted)
     bool reuse = false;                     // --reuse: ssh ControlMaster connection reuse
     int retries = 0;                        // --retries N: extra attempts on a transient transport failure
+    bool retriesExplicit = false;           // --retries was supplied (including --retries 0)
     bool idempotent = false;                // --idempotent: allow retrying the command
     RemoteShell shell = RemoteShell::Posix; // --shell: remote command quoting (posix/cmd/powershell)
+    bool shellExplicit = false;             // --shell was supplied (including --shell posix)
     bool failFast = false;                  // --fail-fast: abort the run on the first final failure
     std::string auditPath;                  // --audit-log FILE: append a JSONL audit trail (empty = off)
     bool native = false;                    // --transport native: use the psx/1 mTLS backplane instead of ssh
+    bool transportExplicit = false;         // --transport was supplied; overrides per-host inventory transport
     std::string certPath;                   // --cert: controller certificate (native)
-    std::string keyPath;                    // --key: controller private key (native)
-    std::string caPath;                     // --ca: trusted CA (native)
-    std::string crlPath;                    // --crl: optional CRL to reject revoked node certs (native)
-    int nativePort = 7433;                  // --native-port: the node listener port (native)
-    std::string canary;                     // --canary N|N%: roll out to this subset first (native)
-    bool colour = true;                     // --no-color turns it off
-    std::vector<std::string> command;       // the argv after `--`
+    bool certExplicit = false;
+    std::string keyPath; // --key: controller private key (native)
+    bool keyExplicit = false;
+    std::string caPath; // --ca: trusted CA (native)
+    bool caExplicit = false;
+    std::string crlPath; // --crl: optional CRL to reject revoked node certs (native)
+    bool crlExplicit = false;
+    int nativePort = 7433; // --native-port: the node listener port (native)
+    bool nativePortExplicit = false;
+    std::string canary; // --canary N|N%: roll out to this subset first (native)
+    bool canaryExplicit = false;
+    bool colour = true;               // --no-color turns it off
+    std::vector<std::string> command; // the argv after `--`
 };
 
 // Parses the args following `run`. Throws CliError on any grammar violation.

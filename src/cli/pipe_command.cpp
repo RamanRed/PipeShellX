@@ -1,7 +1,7 @@
 #include "psx/cli/pipe_command.hpp"
 
 #include "psx/os/signal_source.hpp"
-#include "psx/pipeline/local_runner.hpp"
+#include "psx/pipeline/dag_runner.hpp"
 #include "psx/pipeline/parser.hpp"
 #include "psx/pipeline/pipeline.hpp"
 #include "psx/pipeline/pipeline_yaml.hpp"
@@ -10,12 +10,17 @@
 
 #include "psx/inventory/inventory.hpp"
 
+#include <algorithm>
+#include <charconv>
 #include <exception>
 #include <fstream>
 #include <optional>
 #include <ostream>
+#include <set>
 #include <string>
 #include <string_view>
+#include <system_error>
+#include <unordered_map>
 #include <vector>
 
 #if defined(PIPESHELLX_HAVE_TLS)
@@ -38,42 +43,92 @@ struct PipeArgs {
     int nativePort = 7433;     // --native-port
     bool check = false;        // --check: validate + print the plan, do not run
     bool fileRequested = false;
+    std::string argumentError;
 };
+
+bool looksLikeOption(std::string_view value) {
+    return !value.empty() && value.front() == '-';
+}
+
+bool looksLikeSignedInteger(std::string_view value) {
+    if (!value.empty() && (value.front() == '-' || value.front() == '+')) {
+        value.remove_prefix(1);
+    }
+    return !value.empty() && std::all_of(value.begin(), value.end(), [](char c) { return c >= '0' && c <= '9'; });
+}
 
 // Splits recognised flags from the pipeline spec (everything else, rejoined).
 PipeArgs parsePipeArgs(const std::vector<std::string>& args) {
     PipeArgs out;
     std::vector<std::string> specParts;
+    bool inventorySeen = false;
+    bool fileSeen = false;
+    bool certSeen = false;
+    bool keySeen = false;
+    bool caSeen = false;
+    bool nativePortSeen = false;
+    bool checkSeen = false;
     for (std::size_t i = 0; i < args.size(); ++i) {
         const std::string& arg = args[i];
-        auto takeValue = [&](std::string& dest) {
-            if (i + 1 < args.size()) {
-                dest = args[++i];
+        auto takeValue = [&](std::string_view canonical, bool& seen, std::string& destination,
+                             bool signedInteger = false) {
+            if (seen) {
+                out.argumentError = "duplicate option '" + std::string(canonical) + "'";
+                return false;
             }
+            seen = true;
+            if (i + 1 >= args.size() ||
+                (looksLikeOption(args[i + 1]) && !(signedInteger && looksLikeSignedInteger(args[i + 1])))) {
+                out.argumentError = "option '" + arg + "' requires a value";
+                return false;
+            }
+            destination = args[++i];
+            return true;
         };
         if (arg == "-i") {
-            takeValue(out.inventoryPath);
+            if (!takeValue("-i", inventorySeen, out.inventoryPath)) {
+                break;
+            }
         } else if (arg == "-f" || arg == "--file") {
+            if (!takeValue("--file", fileSeen, out.filePath)) {
+                break;
+            }
             out.fileRequested = true;
-            takeValue(out.filePath);
         } else if (arg == "--cert") {
-            takeValue(out.certPath);
+            if (!takeValue("--cert", certSeen, out.certPath)) {
+                break;
+            }
         } else if (arg == "--key") {
-            takeValue(out.keyPath);
+            if (!takeValue("--key", keySeen, out.keyPath)) {
+                break;
+            }
         } else if (arg == "--ca") {
-            takeValue(out.caPath);
+            if (!takeValue("--ca", caSeen, out.caPath)) {
+                break;
+            }
         } else if (arg == "--check") {
+            if (checkSeen) {
+                out.argumentError = "duplicate option '--check'";
+                break;
+            }
+            checkSeen = true;
             out.check = true;
         } else if (arg == "--native-port") {
             std::string value;
-            takeValue(value);
-            if (!value.empty()) {
-                try {
-                    out.nativePort = std::stoi(value);
-                } catch (const std::exception&) {
-                    out.nativePort = -1; // flagged as invalid below
-                }
+            if (!takeValue("--native-port", nativePortSeen, value, true)) {
+                break;
             }
+            int parsedPort = 0;
+            const auto converted = std::from_chars(value.data(), value.data() + value.size(), parsedPort);
+            if (converted.ec != std::errc{} || converted.ptr != value.data() + value.size() || parsedPort < 1 ||
+                parsedPort > 65535) {
+                out.argumentError = "--native-port must be an integer in 1..65535";
+                break;
+            }
+            out.nativePort = parsedPort;
+        } else if (looksLikeOption(arg)) {
+            out.argumentError = "unknown option '" + arg + "'";
+            break;
         } else {
             specParts.push_back(arg);
         }
@@ -100,8 +155,45 @@ std::optional<std::string> slurp(const std::string& path) {
     return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 }
 
-// Runs an all-local pipeline via LocalRunner; returns the pipefail exit code.
-int runLocal(const std::vector<psx::pipeline::Stage>& stages, std::ostream& out, std::ostream& err) {
+std::vector<psx::pipeline::Stage> stagesInPlanOrder(const psx::pipeline::Pipeline& pipeline,
+                                                    const psx::pipeline::Planner::Plan& plan) {
+    std::unordered_map<std::string, const psx::pipeline::Stage*> byId;
+    byId.reserve(pipeline.stages.size());
+    for (const auto& stage : pipeline.stages) {
+        byId.emplace(stage.id, &stage);
+    }
+    std::vector<psx::pipeline::Stage> ordered;
+    ordered.reserve(plan.order.size());
+    for (const std::string& id : plan.order) {
+        ordered.push_back(*byId.at(id));
+    }
+    return ordered;
+}
+
+// The existing remote runner accepts only a single sequence. Prove that the
+// declared graph is exactly that sequence before handing it off, so no remote
+// DAG can ever be silently linearised.
+bool isDeclaredChain(const psx::pipeline::Pipeline& pipeline, const psx::pipeline::Planner::Plan& plan) {
+    std::set<std::pair<std::string, std::string>> edges;
+    for (const auto& edge : pipeline.edges) {
+        edges.emplace(edge.from, edge.to);
+    }
+    if (plan.order.size() == 1) {
+        return edges.empty();
+    }
+    if (edges.size() + 1 != plan.order.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i + 1 < plan.order.size(); ++i) {
+        if (edges.count({plan.order[i], plan.order[i + 1]}) == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Runs an all-local graph via DagRunner; returns the topological pipefail code.
+int runLocal(const psx::pipeline::Pipeline& pipeline, std::ostream& out, std::ostream& err) {
     auto reactor = psx::runtime::Reactor::create({.signals = {psx::os::Signal::Interrupt, psx::os::Signal::Terminate}});
     if (!reactor.ok()) {
         err << "pipeshellx pipe: " << reactor.error().message() << "\n";
@@ -111,9 +203,9 @@ int runLocal(const std::vector<psx::pipeline::Stage>& stages, std::ostream& out,
 
     int exitCode = 0;
     bool completed = false;
-    psx::pipeline::LocalRunner runner(
+    psx::pipeline::DagRunner runner(
         r, [&out](std::string_view chunk) { out.write(chunk.data(), static_cast<std::streamsize>(chunk.size())); });
-    auto started = runner.run(stages, [&](psx::pipeline::LocalRunner::Outcome outcome) {
+    auto started = runner.run(pipeline, [&](psx::pipeline::DagRunner::Outcome outcome) {
         exitCode = outcome.exitCode;
         completed = true;
         r.stop();
@@ -122,7 +214,10 @@ int runLocal(const std::vector<psx::pipeline::Stage>& stages, std::ostream& out,
         err << "pipeshellx pipe: cannot start pipeline: " << started.error().message() << "\n";
         return 2;
     }
-    (void)r.onSignal([&r](psx::os::Signal) { r.stop(); });
+    (void)r.onSignal([&r, &runner](psx::os::Signal) {
+        runner.cancel();
+        r.stop();
+    });
     (void)r.run();
     out.flush();
     return completed ? exitCode : 130;
@@ -376,6 +471,10 @@ int runCheck(const std::vector<psx::pipeline::Stage>& stages,
 
 int pipeSubcommand(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
     const PipeArgs parsed = parsePipeArgs(args);
+    if (!parsed.argumentError.empty()) {
+        err << "pipeshellx pipe: " << parsed.argumentError << "\n";
+        return 2;
+    }
     if (parsed.fileRequested && !parsed.spec.empty()) {
         err << "pipeshellx pipe: --file cannot be combined with an inline pipeline spec\n";
         return 2;
@@ -404,10 +503,12 @@ int pipeSubcommand(const std::vector<std::string>& args, std::ostream& out, std:
         err << "pipeshellx pipe: " << pipeline.error().message() << "\n";
         return 2;
     }
-    if (auto plan = psx::pipeline::Planner::plan(pipeline.value()); !plan.ok()) {
-        err << "pipeshellx pipe: " << plan.error().message() << "\n";
+    auto planned = psx::pipeline::Planner::plan(pipeline.value());
+    if (!planned.ok()) {
+        err << "pipeshellx pipe: " << planned.error().message() << "\n";
         return 2;
     }
+    const std::vector<psx::pipeline::Stage> orderedStages = stagesInPlanOrder(pipeline.value(), planned.value());
 
     bool anyRemote = false;
     for (const auto& stage : pipeline.value().stages) {
@@ -415,15 +516,19 @@ int pipeSubcommand(const std::vector<std::string>& args, std::ostream& out, std:
             anyRemote = true;
         }
     }
+    if (anyRemote && !isDeclaredChain(pipeline.value(), planned.value())) {
+        err << "pipeshellx pipe: non-linear remote DAGs are not supported; use a single declared chain\n";
+        return 2;
+    }
     if (parsed.check) {
-        return runCheck(pipeline.value().stages, parsed, out, err);
+        return runCheck(orderedStages, parsed, out, err);
     }
 
     if (!anyRemote) {
-        return runLocal(pipeline.value().stages, out, err);
+        return runLocal(pipeline.value(), out, err);
     }
 #if defined(PIPESHELLX_HAVE_TLS)
-    return runSegmented(pipeline.value().stages, parsed, out, err);
+    return runSegmented(orderedStages, parsed, out, err);
 #else
     err << "pipeshellx pipe: this build has no native transport support (OpenSSL); "
            "remote @placement stages are unavailable\n";

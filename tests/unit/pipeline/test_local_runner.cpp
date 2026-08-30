@@ -89,6 +89,29 @@ TEST(LocalRunnerTest, AllStagesSucceedGivesZero) {
     EXPECT_EQ(result.outcome.exitCode, 0);
 }
 
+TEST(LocalRunnerTest, CancelKillsAndReapsEveryUnfinishedStage) {
+    auto reactor = Reactor::create();
+    ASSERT_TRUE(reactor.ok());
+    LocalRunner runner(*reactor.value());
+    LocalRunner::Outcome outcome;
+    bool completed = false;
+    ASSERT_TRUE(runner
+                    .run({stage({"/usr/bin/yes"})},
+                         [&](LocalRunner::Outcome result) {
+                             outcome = std::move(result);
+                             completed = true;
+                             reactor.value()->stop();
+                         })
+                    .ok());
+    reactor.value()->after(std::chrono::milliseconds(10), [&] { runner.cancel(); });
+    reactor.value()->after(std::chrono::seconds(3), [&] { reactor.value()->stop(); });
+    ASSERT_TRUE(reactor.value()->run().ok());
+
+    ASSERT_TRUE(completed);
+    EXPECT_EQ(outcome.stageExitCodes, (std::vector<int>{137}));
+    EXPECT_EQ(outcome.exitCode, 137);
+}
+
 namespace {
 RunResult runWithStdin(const std::vector<Stage>& stages, const std::string& input) {
     auto reactor = Reactor::create();

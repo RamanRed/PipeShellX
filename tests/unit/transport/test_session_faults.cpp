@@ -33,7 +33,7 @@ TEST(SessionFaultTest, DataForAnUnknownStreamIsRejected) {
     EXPECT_FALSE(node.receive(frame(FrameType::Data, 0, 999, "bytes")).ok());
 }
 
-TEST(SessionFaultTest, DataAfterTheStreamIsClosedIsIgnored) {
+TEST(SessionFaultTest, DataAfterPeerExitIsRejectedBecauseItCannotBeACrossDirectionRace) {
     NullHandler h;
     std::string toPeer;
     Session ctl(Role::Controller, [&](std::string_view s) { toPeer.append(s); }, h);
@@ -41,9 +41,9 @@ TEST(SessionFaultTest, DataAfterTheStreamIsClosedIsIgnored) {
     // The node reports EXIT: the controller erases the stream.
     ASSERT_TRUE(
         ctl.receive(frame(FrameType::Exit, kFlagEndStream, id, encodeExit({ExitStatus::Kind::Exited, 0}))).ok());
-    // A straggler DATA for the now-closed stream is a benign close race (the peer
-    // had it in flight when EXIT crossed): ignored, not fatal.
-    EXPECT_TRUE(ctl.receive(frame(FrameType::Data, 0, id, "late")).ok());
+    // DATA and EXIT originated at the same peer and preserve wire order, so DATA
+    // after EXIT is not a cross-direction race and must be rejected.
+    EXPECT_FALSE(ctl.receive(frame(FrameType::Data, 0, id, "late")).ok());
 }
 
 TEST(SessionFaultTest, DuplicateExitIsRejected) {
@@ -55,16 +55,40 @@ TEST(SessionFaultTest, DuplicateExitIsRejected) {
     EXPECT_FALSE(ctl.receive(exit).ok()) << "a second EXIT targets a stream that no longer exists";
 }
 
-TEST(SessionFaultTest, WindowUpdateForAClosedStreamIsIgnoredNotFatal) {
+TEST(SessionFaultTest, WindowUpdateAfterPeerExitIsRejectedBecauseItIsSameDirection) {
     NullHandler h;
     Session ctl(Role::Controller, [](std::string_view) {}, h);
     const StreamId id = ctl.open({.argv = {"x"}, .cwd = ""});
     // The stream closes via EXIT...
     ASSERT_TRUE(
         ctl.receive(frame(FrameType::Exit, kFlagEndStream, id, encodeExit({ExitStatus::Kind::Exited, 0}))).ok());
-    // ...then a straggler WINDOW_UPDATE arrives for it: ignored, not fatal (the
-    // closed-stream race, a real bug this locks in).
-    EXPECT_TRUE(ctl.receive(frame(FrameType::WindowUpdate, 0, id, encodeWindowUpdate(128))).ok());
+    // ...then a WINDOW_UPDATE arrives from that same peer. Frame order makes
+    // this impossible as a valid cross-direction close race.
+    EXPECT_FALSE(ctl.receive(frame(FrameType::WindowUpdate, 0, id, encodeWindowUpdate(128))).ok());
+}
+
+TEST(SessionFaultTest, FramesCrossingALocallySentExitAreTolerated) {
+    NullHandler h;
+    std::string toPeer;
+    Session node(Role::Node, [&](std::string_view bytes) { toPeer.append(bytes); }, h);
+    ASSERT_TRUE(node.receive(frame(FrameType::Open, 0, 1, encodeOpen({.argv = {"x"}, .cwd = ""}))).ok());
+    node.sendExit(1, {ExitStatus::Kind::Exited, 0});
+    ASSERT_FALSE(toPeer.empty());
+
+    // These controller-originated frames could already have been in flight when
+    // the node sent EXIT in the opposite direction.
+    EXPECT_TRUE(node.receive(frame(FrameType::Data, 0, 1, "crossing stdin")).ok());
+    EXPECT_TRUE(node.receive(frame(FrameType::WindowUpdate, 0, 1, encodeWindowUpdate(128))).ok());
+}
+
+TEST(SessionFaultTest, CrossDirectionCloseRaceStillHonorsAReceivedHalfClose) {
+    NullHandler h;
+    Session node(Role::Node, [](std::string_view) {}, h);
+    ASSERT_TRUE(node.receive(frame(FrameType::Open, 0, 1, encodeOpen({.argv = {"x"}, .cwd = ""}))).ok());
+    node.sendExit(1, {ExitStatus::Kind::Exited, 0});
+
+    ASSERT_TRUE(node.receive(frame(FrameType::Data, kFlagEndStream, 1, "last stdin")).ok());
+    EXPECT_FALSE(node.receive(frame(FrameType::Data, 0, 1, "after eof")).ok());
 }
 
 TEST(SessionFaultTest, UnknownFrameTypeIsRejected) {
@@ -81,6 +105,182 @@ TEST(SessionFaultTest, OpenReceivedByAControllerIsRejected) {
     NullHandler h;
     Session ctl(Role::Controller, [](std::string_view) {}, h);
     EXPECT_FALSE(ctl.receive(frame(FrameType::Open, 0, 1, encodeOpen({.argv = {"x"}, .cwd = ""}))).ok());
+}
+
+TEST(SessionFaultTest, OpenIdsAreNonzeroAndStrictlySequential) {
+    const std::string payload = encodeOpen({.argv = {"x"}, .cwd = ""});
+
+    for (const StreamId first : {0U, 2U, 99U}) {
+        NullHandler h;
+        Session node(Role::Node, [](std::string_view) {}, h);
+        EXPECT_FALSE(node.receive(frame(FrameType::Open, 0, first, payload)).ok()) << "first id " << first;
+    }
+
+    for (const StreamId second : {0U, 1U, 3U, 99U}) {
+        NullHandler h;
+        Session node(Role::Node, [](std::string_view) {}, h);
+        ASSERT_TRUE(node.receive(frame(FrameType::Open, 0, 1, payload)).ok());
+        EXPECT_FALSE(node.receive(frame(FrameType::Open, 0, second, payload)).ok()) << "second id " << second;
+    }
+
+    NullHandler h;
+    Session node(Role::Node, [](std::string_view) {}, h);
+    EXPECT_TRUE(node.receive(frame(FrameType::Open, 0, 1, payload)).ok());
+    EXPECT_TRUE(node.receive(frame(FrameType::Open, 0, 2, payload)).ok());
+}
+
+TEST(SessionFaultTest, OpenAfterLocallySentGoAwayIsRejected) {
+    NullHandler h;
+    Session node(Role::Node, [](std::string_view) {}, h);
+    node.goAway();
+    EXPECT_FALSE(node.receive(frame(FrameType::Open, 0, 1, encodeOpen({.argv = {"x"}, .cwd = ""}))).ok());
+}
+
+TEST(SessionFaultTest, OpenAfterPeerSentGoAwayIsRejected) {
+    NullHandler h;
+    Session node(Role::Node, [](std::string_view) {}, h);
+    ASSERT_TRUE(node.receive(frame(FrameType::GoAway, 0, 0, "")).ok());
+    EXPECT_FALSE(node.receive(frame(FrameType::Open, 0, 1, encodeOpen({.argv = {"x"}, .cwd = ""}))).ok());
+}
+
+TEST(SessionFaultTest, ConnectionFramesRequireZeroStreamFlagsAndPayload) {
+    for (const FrameType type : {FrameType::Ping, FrameType::Pong, FrameType::GoAway}) {
+        const std::vector<Frame> invalid = {
+            {.type = type, .flags = 0, .streamId = 1, .payload = {}},
+            {.type = type, .flags = kFlagEndStream, .streamId = 0, .payload = {}},
+            {.type = type, .flags = 0, .streamId = 0, .payload = "x"},
+        };
+        for (const Frame& bad : invalid) {
+            NullHandler h;
+            Session peer(Role::Node, [](std::string_view) {}, h);
+            EXPECT_FALSE(peer.receive(encodeFrame(bad)).ok())
+                << "type=" << static_cast<int>(type) << " flags=" << static_cast<int>(bad.flags)
+                << " stream=" << bad.streamId << " payload=" << bad.payload.size();
+        }
+    }
+}
+
+TEST(SessionFaultTest, StreamFramesRequireNonzeroIdsAndTheirDefinedFlags) {
+    {
+        NullHandler h;
+        Session node(Role::Node, [](std::string_view) {}, h);
+        EXPECT_FALSE(node.receive(frame(FrameType::Data, 0, 0, "x")).ok());
+    }
+    {
+        NullHandler h;
+        Session controller(Role::Controller, [](std::string_view) {}, h);
+        EXPECT_FALSE(controller.receive(frame(FrameType::WindowUpdate, 0, 0, encodeWindowUpdate(1))).ok());
+    }
+    {
+        NullHandler h;
+        Session controller(Role::Controller, [](std::string_view) {}, h);
+        EXPECT_FALSE(
+            controller.receive(frame(FrameType::Exit, kFlagEndStream, 0, encodeExit({ExitStatus::Kind::Exited, 0})))
+                .ok());
+    }
+
+    {
+        NullHandler h;
+        Session node(Role::Node, [](std::string_view) {}, h);
+        EXPECT_FALSE(
+            node.receive(frame(FrameType::Open, kFlagEndStream, 1, encodeOpen({.argv = {"x"}, .cwd = ""}))).ok());
+    }
+    {
+        NullHandler h;
+        Session node(Role::Node, [](std::string_view) {}, h);
+        ASSERT_TRUE(node.receive(frame(FrameType::Open, 0, 1, encodeOpen({.argv = {"x"}, .cwd = ""}))).ok());
+        EXPECT_FALSE(node.receive(frame(FrameType::Data, 0x04, 1, "x")).ok());
+    }
+    {
+        NullHandler h;
+        Session controller(Role::Controller, [](std::string_view) {}, h);
+        const StreamId id = controller.open({.argv = {"x"}, .cwd = ""});
+        EXPECT_FALSE(
+            controller.receive(frame(FrameType::WindowUpdate, kFlagEndStream, id, encodeWindowUpdate(1))).ok());
+    }
+    {
+        NullHandler h;
+        Session controller(Role::Controller, [](std::string_view) {}, h);
+        const StreamId id = controller.open({.argv = {"x"}, .cwd = ""});
+        EXPECT_FALSE(
+            controller.receive(frame(FrameType::Exit, kFlagStderr, id, encodeExit({ExitStatus::Kind::Exited, 0})))
+                .ok());
+    }
+}
+
+TEST(SessionFaultTest, ControllerToNodeDataCannotClaimAnOutputChannel) {
+    NullHandler h;
+    Session node(Role::Node, [](std::string_view) {}, h);
+    ASSERT_TRUE(node.receive(frame(FrameType::Open, 0, 1, encodeOpen({.argv = {"x"}, .cwd = ""}))).ok());
+    EXPECT_FALSE(node.receive(frame(FrameType::Data, kFlagStderr, 1, "not stdin")).ok());
+}
+
+TEST(SessionFaultTest, DataAfterReceivedEndStreamIsRejected) {
+    NullHandler h;
+    Session node(Role::Node, [](std::string_view) {}, h);
+    ASSERT_TRUE(node.receive(frame(FrameType::Open, 0, 1, encodeOpen({.argv = {"x"}, .cwd = ""}))).ok());
+    ASSERT_TRUE(node.receive(frame(FrameType::Data, kFlagEndStream, 1, "last")).ok());
+    EXPECT_FALSE(node.receive(frame(FrameType::Data, 0, 1, "late")).ok());
+}
+
+TEST(SessionFaultTest, MalformedControlPayloadsAreNeverHiddenByCloseRaceTolerance) {
+    for (const std::string& payload : {std::string(), std::string("\0\0\0", 3), encodeWindowUpdate(0)}) {
+        NullHandler h;
+        Session node(Role::Node, [](std::string_view) {}, h);
+        ASSERT_TRUE(node.receive(frame(FrameType::Open, 0, 1, encodeOpen({.argv = {"x"}, .cwd = ""}))).ok());
+        node.sendExit(1, {ExitStatus::Kind::Exited, 0});
+        EXPECT_FALSE(node.receive(frame(FrameType::WindowUpdate, 0, 1, payload)).ok());
+    }
+
+    for (const std::string& payload : {std::string(), std::string("\0\0\0\0", 4), std::string("\0\0\0\0\0\0", 6)}) {
+        NullHandler h;
+        Session controller(Role::Controller, [](std::string_view) {}, h);
+        const StreamId id = controller.open({.argv = {"x"}, .cwd = ""});
+        EXPECT_FALSE(controller.receive(frame(FrameType::Exit, kFlagEndStream, id, payload)).ok());
+    }
+}
+
+TEST(SessionFaultTest, ReservedFlagBitsAreRejectedDeterministicallyForEveryFrameType) {
+    for (std::uint8_t bit = 0x04; bit != 0; bit = static_cast<std::uint8_t>(bit << 1)) {
+        {
+            NullHandler h;
+            Session node(Role::Node, [](std::string_view) {}, h);
+            EXPECT_FALSE(node.receive(frame(FrameType::Open, bit, 1, encodeOpen({.argv = {"x"}, .cwd = ""}))).ok());
+        }
+        {
+            NullHandler h;
+            Session node(Role::Node, [](std::string_view) {}, h);
+            ASSERT_TRUE(node.receive(frame(FrameType::Open, 0, 1, encodeOpen({.argv = {"x"}, .cwd = ""}))).ok());
+            EXPECT_FALSE(node.receive(frame(FrameType::Data, bit, 1, "x")).ok());
+        }
+        {
+            NullHandler h;
+            Session controller(Role::Controller, [](std::string_view) {}, h);
+            const StreamId id = controller.open({.argv = {"x"}, .cwd = ""});
+            EXPECT_FALSE(controller.receive(frame(FrameType::WindowUpdate, bit, id, encodeWindowUpdate(1))).ok());
+        }
+        {
+            NullHandler h;
+            Session controller(Role::Controller, [](std::string_view) {}, h);
+            const StreamId id = controller.open({.argv = {"x"}, .cwd = ""});
+            EXPECT_FALSE(
+                controller.receive(frame(FrameType::Exit, bit, id, encodeExit({ExitStatus::Kind::Exited, 0}))).ok());
+        }
+        for (const FrameType type : {FrameType::Ping, FrameType::Pong, FrameType::GoAway}) {
+            NullHandler h;
+            Session peer(Role::Node, [](std::string_view) {}, h);
+            EXPECT_FALSE(peer.receive(frame(type, bit, 0, "")).ok());
+        }
+    }
+}
+
+TEST(SessionFaultTest, SemanticProtocolErrorPoisonsTheSession) {
+    NullHandler h;
+    std::string outbound;
+    Session node(Role::Node, [&](std::string_view bytes) { outbound.append(bytes); }, h);
+    ASSERT_FALSE(node.receive(frame(FrameType::Ping, kFlagEndStream, 0, "")).ok());
+    EXPECT_FALSE(node.receive(frame(FrameType::Ping, 0, 0, "")).ok());
+    EXPECT_TRUE(outbound.empty()) << "a poisoned session must not auto-answer later frames";
 }
 
 // --- Fuzz: arbitrary and corrupted byte streams must never crash (ASan/UBSan

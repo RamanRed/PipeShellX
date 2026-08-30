@@ -1,9 +1,5 @@
 #include "psx/cli/selection.hpp"
 
-#include <filesystem>
-#include <fstream>
-#include <sstream>
-
 namespace psx::cli {
 
 namespace {
@@ -16,6 +12,7 @@ ClientEntry toClientEntry(const psx::inventory::Host& host, const std::string& k
     entry.identityFile = host.identity;
     entry.expectedSan = host.san;
     entry.nativePort = host.nativePort;
+    entry.transport = host.transport;
     entry.knownHostsFile = knownHosts;
     entry.raw = entry.serialize();
     return entry;
@@ -39,23 +36,16 @@ std::vector<psx::inventory::Host> select(const psx::inventory::Inventory& invent
 
 ResolvedHosts resolveHosts(const std::string& inventoryPath, const Selector& selector, std::ostream& err) {
     ResolvedHosts resolved;
-    resolved.inventoryPath = inventoryPath;
+    resolved.inventoryPath = psx::inventory::Inventory::resolvePath(inventoryPath);
 
     psx::inventory::Inventory inventory;
     try {
-        if (!inventoryPath.empty()) {
-            inventory = psx::inventory::Inventory::loadFromFile(inventoryPath);
-        } else if (std::filesystem::exists("clients.txt")) {
-            std::ifstream file("clients.txt");
-            std::stringstream buffer;
-            buffer << file.rdbuf();
-            inventory = psx::inventory::Inventory::importClientsTxt(buffer.str(), "clients.txt");
-            resolved.inventoryPath = "clients.txt";
-        } else {
-            err << "no inventory (pass -i FILE or add a clients.txt)\n";
+        if (resolved.inventoryPath.empty()) {
+            err << "no inventory (pass -i FILE, set PIPESHELLX_INVENTORY, or add inventory.ini)\n";
             resolved.exitCode = 2;
             return resolved;
         }
+        inventory = psx::inventory::Inventory::loadFromFile(resolved.inventoryPath);
     } catch (const std::exception& ex) {
         err << ex.what() << "\n";
         resolved.exitCode = 2;

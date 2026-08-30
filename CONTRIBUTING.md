@@ -15,7 +15,7 @@ to use an installed copy instead).
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
 ctest --test-dir build --output-on-failure
-./build/bin/PipeShellX --help
+./build/bin/pipeshellx --help
 ```
 
 Useful options:

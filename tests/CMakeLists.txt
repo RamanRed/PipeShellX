@@ -23,7 +23,8 @@ endif()
 set(PIPESHELLX_TLS_TEST_SOURCES "")
 if(PIPESHELLX_NATIVE_TRANSPORT AND OpenSSL_FOUND)
     set(PIPESHELLX_TLS_TEST_SOURCES unit/os/test_tls.cpp unit/transport/test_tls_stream.cpp
-        unit/transport/test_native_transport.cpp unit/ca/test_certificate_authority.cpp
+        unit/transport/test_native_transport.cpp unit/transport/test_node_policy.cpp
+        unit/ca/test_certificate_authority.cpp
         unit/cli/test_ca_command.cpp
     unit/cli/test_diff_command.cpp
     unit/cli/test_pipe_command.cpp unit/cli/test_node_command.cpp)
@@ -50,6 +51,7 @@ add_executable(pipeshellx_tests
     unit/pipeline/test_parser.cpp
     unit/pipeline/test_pipeline_yaml.cpp
     unit/pipeline/test_local_runner.cpp
+    unit/pipeline/test_dag_runner.cpp
     unit/policy/test_policy.cpp
     unit/cli/test_run_command.cpp
     unit/cli/test_ping_command.cpp
@@ -96,3 +98,41 @@ add_test(NAME golden_on_poll_backend
     COMMAND pipeshellx_tests --gtest_filter=Golden*:ProcessManagerTest.*:CommandExecutorTest.*
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(golden_on_poll_backend PROPERTIES ENVIRONMENT "PIPESHELLX_POLLER=poll" TIMEOUT 300)
+
+# Installation is a supported API: verify the lowercase executable, relocatable
+# CMake export, and a fresh downstream find_package/link/run cycle.
+set(_pipeshellx_smoke_bindir "${CMAKE_INSTALL_BINDIR}")
+set(_pipeshellx_smoke_libdir "${CMAKE_INSTALL_LIBDIR}")
+set(_pipeshellx_smoke_datadir "${CMAKE_INSTALL_DATADIR}")
+if(_pipeshellx_smoke_bindir STREQUAL "")
+    set(_pipeshellx_smoke_bindir bin)
+endif()
+if(_pipeshellx_smoke_libdir STREQUAL "")
+    set(_pipeshellx_smoke_libdir lib)
+endif()
+if(_pipeshellx_smoke_datadir STREQUAL "")
+    set(_pipeshellx_smoke_datadir share)
+endif()
+if(NOT PIPESHELLX_SANITIZE)
+    add_test(NAME packaging_install_consumer_smoke
+        COMMAND ${CMAKE_COMMAND}
+            -DPIPESHELLX_BUILD_DIR=${PROJECT_BINARY_DIR}
+            -DPIPESHELLX_SOURCE_DIR=${PROJECT_SOURCE_DIR}
+            -DPIPESHELLX_INSTALL_BINDIR=${_pipeshellx_smoke_bindir}
+            -DPIPESHELLX_INSTALL_LIBDIR=${_pipeshellx_smoke_libdir}
+            -DPIPESHELLX_INSTALL_DATADIR=${_pipeshellx_smoke_datadir}
+            -DPIPESHELLX_GENERATOR=${CMAKE_GENERATOR}
+            -DPIPESHELLX_CONFIG=$<CONFIG>
+            -P ${PROJECT_SOURCE_DIR}/cmake/RunInstallSmoke.cmake)
+    set_tests_properties(packaging_install_consumer_smoke PROPERTIES LABELS packaging RUN_SERIAL TRUE TIMEOUT 180)
+endif()
+
+# PIPESHELLX_NATIVE_TRANSPORT=ON is a hard contract, not an opportunistic
+# feature toggle: configuration must fail clearly when OpenSSL 3 is absent.
+add_test(NAME native_transport_requires_openssl3
+    COMMAND ${CMAKE_COMMAND}
+        -DPIPESHELLX_BUILD_DIR=${PROJECT_BINARY_DIR}
+        -DPIPESHELLX_SOURCE_DIR=${PROJECT_SOURCE_DIR}
+        -DPIPESHELLX_GENERATOR=${CMAKE_GENERATOR}
+        -P ${PROJECT_SOURCE_DIR}/cmake/RequireOpenSSL3Smoke.cmake)
+set_tests_properties(native_transport_requires_openssl3 PROPERTIES LABELS packaging RUN_SERIAL TRUE TIMEOUT 120)

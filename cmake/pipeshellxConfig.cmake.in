@@ -1,0 +1,27 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+
+if(@PIPESHELLX_NATIVE_TRANSPORT@)
+    if(@PIPESHELLX_STATIC_OPENSSL@)
+        if(DEFINED OPENSSL_USE_STATIC_LIBS)
+            set(_pipeshellx_saved_static_openssl "${OPENSSL_USE_STATIC_LIBS}")
+            set(_pipeshellx_had_static_openssl TRUE)
+        endif()
+        set(OPENSSL_USE_STATIC_LIBS TRUE)
+    endif()
+    find_dependency(OpenSSL 3.0 COMPONENTS SSL Crypto)
+    if(@PIPESHELLX_STATIC_OPENSSL@)
+        if(_pipeshellx_had_static_openssl)
+            set(OPENSSL_USE_STATIC_LIBS "${_pipeshellx_saved_static_openssl}")
+        else()
+            unset(OPENSSL_USE_STATIC_LIBS)
+        endif()
+        unset(_pipeshellx_had_static_openssl)
+        unset(_pipeshellx_saved_static_openssl)
+    endif()
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/pipeshellxTargets.cmake")
+check_required_components(pipeshellx)

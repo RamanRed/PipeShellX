@@ -16,6 +16,7 @@ class OrderedSink : public Sink {
 public:
     explicit OrderedSink(std::unique_ptr<Sink> inner) : inner_(std::move(inner)) {}
 
+    bool streamsLive() const noexcept override { return false; }
     void stageStarted(std::string_view stage) override;
     void line(std::string_view stage, Channel channel, std::string_view text) override;
     void stageFinished(std::string_view stage, const StageResult& result) override;

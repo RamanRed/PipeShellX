@@ -32,10 +32,10 @@ public:
         pos_ += 4;
         return true;
     }
-    // Reads a u32 length then that many bytes.
-    bool takeString(std::string& out) {
+    // Reads a bounded u32 length then that many bytes.
+    bool takeString(std::string& out, std::uint32_t maxLength) {
         std::uint32_t len = 0;
-        if (!takeU32(len) || remaining() < len) {
+        if (!takeU32(len) || len > maxLength || remaining() < len) {
             return false;
         }
         out.assign(data_.data() + pos_, len);
@@ -50,6 +50,33 @@ private:
 };
 
 } // namespace
+
+psx::Result<void> validateOpenRequest(const OpenRequest& request) {
+    if (request.argv.empty()) {
+        return malformed("OPEN payload: argv must not be empty");
+    }
+    if (request.argv.size() > kMaxOpenArgc) {
+        return malformed("OPEN payload: argc exceeds the maximum");
+    }
+    if (request.argv.front().empty()) {
+        return malformed("OPEN payload: argv[0] must not be empty");
+    }
+    for (const std::string& argument : request.argv) {
+        if (argument.size() > kMaxOpenArgumentBytes) {
+            return malformed("OPEN payload: argument exceeds the maximum");
+        }
+        if (argument.find('\0') != std::string::npos) {
+            return malformed("OPEN payload: argument contains NUL");
+        }
+    }
+    if (request.cwd.size() > kMaxOpenCwdBytes) {
+        return malformed("OPEN payload: cwd exceeds the maximum");
+    }
+    if (request.cwd.find('\0') != std::string::npos) {
+        return malformed("OPEN payload: cwd contains NUL");
+    }
+    return {};
+}
 
 std::string encodeOpen(const OpenRequest& request) {
     std::string out;
@@ -77,20 +104,26 @@ psx::Result<OpenRequest> decodeOpen(std::string_view payload) {
     if (!reader.takeU32(argc)) {
         return malformed("OPEN payload: missing argc");
     }
+    if (argc > kMaxOpenArgc) {
+        return malformed("OPEN payload: argc exceeds the maximum");
+    }
     OpenRequest request;
-    request.argv.reserve(argc < 1024 ? argc : 1024); // cap the pre-reservation; growth is still exact
+    request.argv.reserve(argc);
     for (std::uint32_t i = 0; i < argc; ++i) {
         std::string arg;
-        if (!reader.takeString(arg)) {
+        if (!reader.takeString(arg, kMaxOpenArgumentBytes)) {
             return malformed("OPEN payload: truncated argument");
         }
         request.argv.push_back(std::move(arg));
     }
-    if (!reader.takeString(request.cwd)) {
+    if (!reader.takeString(request.cwd, kMaxOpenCwdBytes)) {
         return malformed("OPEN payload: truncated cwd");
     }
     if (reader.remaining() != 0) {
         return malformed("OPEN payload: trailing bytes");
+    }
+    if (auto valid = validateOpenRequest(request); !valid.ok()) {
+        return valid.error();
     }
     return request;
 }

@@ -3,6 +3,7 @@
 #include "psx/transport/control_payloads.hpp"
 
 #include <algorithm>
+#include <limits>
 
 namespace psx::transport {
 
@@ -13,36 +14,67 @@ psx::Error protocolError(const char* what) {
 std::uint8_t channelFlag(Channel channel) {
     return channel == Channel::Stderr ? kFlagStderr : 0;
 }
+bool hasOnlyFlags(const Frame& frame, std::uint8_t allowed) {
+    return (frame.flags & static_cast<std::uint8_t>(~allowed)) == 0;
+}
+psx::Result<void> validateConnectionFrame(const Frame& frame) {
+    if (frame.streamId != 0 || frame.flags != 0 || !frame.payload.empty()) {
+        return protocolError("connection frame must have stream 0, flags 0, and an empty payload");
+    }
+    return {};
+}
+psx::Result<void> validateStreamFrame(const Frame& frame, std::uint8_t allowedFlags) {
+    if (frame.streamId == 0) {
+        return protocolError("stream frame must have a nonzero stream id");
+    }
+    if (!hasOnlyFlags(frame, allowedFlags)) {
+        return protocolError("frame contains unknown or reserved flags");
+    }
+    return {};
+}
 } // namespace
 
 Session::Session(Role role, WriteFn write, SessionHandler& handler, std::uint32_t initialWindow)
     : role_(role), write_(std::move(write)), handler_(handler), initialWindow_(initialWindow) {}
 
 void Session::send(const Frame& frame) {
+    if (protocolFailed_) {
+        return;
+    }
     std::string wire;
     encodeFrameInto(wire, frame);
     write_(wire);
 }
 
 StreamId Session::open(const OpenRequest& request) {
+    if (protocolFailed_ || role_ != Role::Controller || sentGoAway_ || receivedGoAway_ || nextStreamId_ == 0 ||
+        !validateOpenRequest(request).ok()) {
+        return 0;
+    }
     const StreamId id = nextStreamId_++;
-    highestStream_ = std::max(highestStream_, id);
     streams_.try_emplace(id, initialWindow_);
     send(Frame{.type = FrameType::Open, .flags = 0, .streamId = id, .payload = encodeOpen(request)});
     return id;
 }
 
 void Session::sendData(StreamId id, std::string_view bytes, bool endStream, Channel channel) {
+    if (protocolFailed_ || (role_ == Role::Controller && channel != Channel::Stdout)) {
+        return;
+    }
     auto it = streams_.find(id);
     if (it == streams_.end()) {
         return; // unknown stream: nothing to send
     }
     Stream& stream = it->second;
+    if (stream.localDataClosed || stream.exitPending) {
+        return;
+    }
     if (!bytes.empty()) {
         stream.sendQueue.push_back({channel, std::string(bytes)});
         stream.sendBytes += bytes.size();
     }
     if (endStream) {
+        stream.localDataClosed = true;
         stream.sendEndPending = true;
     }
     flushStream(id, stream);
@@ -80,8 +112,9 @@ void Session::flushStream(StreamId id, Stream& stream) {
     // A deferred EXIT rides out once its DATA has fully drained (terminal).
     if (stream.sendQueue.empty() && !stream.sendEndPending && stream.exitPending) {
         const auto status = stream.exitStatus;
+        const bool peerDataClosed = stream.peerDataClosed;
         send(Frame{.type = FrameType::Exit, .flags = kFlagEndStream, .streamId = id, .payload = encodeExit(status)});
-        streams_.erase(id); // invalidates `stream`; nothing below may touch it
+        closeLocally(id, peerDataClosed); // invalidates `stream`; nothing below may touch it
         return;
     }
     // The buffer drained back below the high-water mark: the producer may resume.
@@ -90,12 +123,20 @@ void Session::flushStream(StreamId id, Stream& stream) {
     }
 }
 
+void Session::closeLocally(StreamId id, bool peerDataClosed) {
+    locallyClosedStreams_.insert_or_assign(id, LocallyClosedStream{.peerDataClosed = peerDataClosed});
+    streams_.erase(id);
+}
+
 bool Session::streamWritable(StreamId id) const {
     auto it = streams_.find(id);
     return it == streams_.end() || it->second.sendBytes < initialWindow_;
 }
 
 void Session::consume(StreamId id, std::uint32_t n) {
+    if (protocolFailed_) {
+        return;
+    }
     auto it = streams_.find(id);
     if (it == streams_.end()) {
         return;
@@ -107,11 +148,18 @@ void Session::consume(StreamId id, std::uint32_t n) {
 }
 
 void Session::sendExit(StreamId id, const psx::os::ExitStatus& status) {
+    if (protocolFailed_ || role_ != Role::Node) {
+        return;
+    }
     auto it = streams_.find(id);
     if (it == streams_.end()) {
         return; // already closed
     }
     Stream& stream = it->second;
+    if (stream.exitPending) {
+        return;
+    }
+    stream.localDataClosed = true;
     if (!stream.sendQueue.empty() || stream.sendEndPending) {
         // DATA is still flow-controlled in the buffer; EXIT must not overtake it.
         // flushStream() emits it once the buffer drains.
@@ -119,19 +167,30 @@ void Session::sendExit(StreamId id, const psx::os::ExitStatus& status) {
         stream.exitStatus = status;
         return;
     }
+    const bool peerDataClosed = stream.peerDataClosed;
     send(Frame{.type = FrameType::Exit, .flags = kFlagEndStream, .streamId = id, .payload = encodeExit(status)});
-    streams_.erase(it); // terminal
+    closeLocally(id, peerDataClosed); // terminal
 }
 
 void Session::ping() {
+    if (protocolFailed_) {
+        return;
+    }
     send(Frame{.type = FrameType::Ping, .flags = 0, .streamId = 0, .payload = {}});
 }
 
 void Session::goAway() {
+    if (protocolFailed_ || sentGoAway_) {
+        return;
+    }
+    sentGoAway_ = true;
     send(Frame{.type = FrameType::GoAway, .flags = 0, .streamId = 0, .payload = {}});
 }
 
 psx::Result<void> Session::receive(std::string_view bytes) {
+    if (protocolFailed_) {
+        return protocolError("session poisoned by an earlier protocol error");
+    }
     // Collect frames first, then dispatch, so a handler callback can safely call
     // back into this Session (e.g. reply on a stream) without reentering the
     // decoder's buffer.
@@ -142,7 +201,11 @@ psx::Result<void> Session::receive(std::string_view bytes) {
         }
     };
     if (auto decoded = decoder_.push(std::span<const char>(bytes.data(), bytes.size()), sink); !decoded.ok()) {
+        protocolFailed_ = true;
         return decoded.error();
+    }
+    if (!dispatchResult.ok()) {
+        protocolFailed_ = true;
     }
     return dispatchResult;
 }
@@ -150,76 +213,102 @@ psx::Result<void> Session::receive(std::string_view bytes) {
 psx::Result<void> Session::dispatch(Frame&& frame) {
     switch (frame.type) {
         case FrameType::Open: {
+            PSX_TRY(validateStreamFrame(frame, 0));
             if (role_ != Role::Node) {
                 return protocolError("OPEN received by a controller");
             }
-            if (streams_.count(frame.streamId) != 0) {
-                return protocolError("OPEN for an already-open stream");
+            if (sentGoAway_ || receivedGoAway_) {
+                return protocolError("OPEN received after GOAWAY");
+            }
+            if (frame.streamId != nextPeerStreamId_) {
+                return protocolError("OPEN stream ids must be strictly sequential");
             }
             auto request = decodeOpen(frame.payload);
             if (!request.ok()) {
                 return request.error();
             }
-            highestStream_ = std::max(highestStream_, frame.streamId);
+            nextPeerStreamId_ = frame.streamId == std::numeric_limits<StreamId>::max() ? 0 : frame.streamId + 1;
             streams_.try_emplace(frame.streamId, initialWindow_);
             handler_.onOpen(frame.streamId, request.value());
             return {};
         }
         case FrameType::Data: {
+            PSX_TRY(validateStreamFrame(frame, kFlagEndStream | kFlagStderr));
+            if (role_ == Role::Node && (frame.flags & kFlagStderr) != 0) {
+                return protocolError("controller DATA cannot select an output channel");
+            }
+            const bool endStream = (frame.flags & kFlagEndStream) != 0;
+            auto closed = locallyClosedStreams_.find(frame.streamId);
+            if (closed != locallyClosedStreams_.end()) {
+                if (closed->second.peerDataClosed) {
+                    return protocolError("DATA received after END_STREAM");
+                }
+                if (endStream) {
+                    closed->second.peerDataClosed = true;
+                }
+                return {}; // valid cross-direction race with our locally sent EXIT
+            }
             auto it = streams_.find(frame.streamId);
             if (it == streams_.end()) {
-                // A stream can close (EXIT) while the peer still has DATA in flight
-                // for it -- a benign race. Ignore DATA for an id that was opened
-                // once; an id we never opened is a real protocol violation.
-                if (frame.streamId <= highestStream_) {
-                    return {};
-                }
-                return protocolError("DATA for a stream that was never opened");
+                return protocolError("DATA for an unknown or peer-closed stream");
+            }
+            if (it->second.peerDataClosed) {
+                return protocolError("DATA received after END_STREAM");
             }
             if (!it->second.recvWindow.onData(static_cast<std::uint32_t>(frame.payload.size()))) {
                 return protocolError("DATA exceeds the stream's flow-control window");
             }
-            const bool endStream = (frame.flags & kFlagEndStream) != 0;
+            if (endStream) {
+                it->second.peerDataClosed = true;
+            }
             const Channel channel = (frame.flags & kFlagStderr) != 0 ? Channel::Stderr : Channel::Stdout;
             handler_.onData(frame.streamId, frame.payload, endStream, channel);
             return {};
         }
         case FrameType::Exit: {
+            PSX_TRY(validateStreamFrame(frame, kFlagEndStream));
             if (role_ != Role::Controller) {
                 return protocolError("EXIT received by a node");
-            }
-            if (streams_.count(frame.streamId) == 0) {
-                return protocolError("EXIT for an unknown stream");
             }
             auto status = decodeExit(frame.payload);
             if (!status.ok()) {
                 return status.error();
+            }
+            if (streams_.count(frame.streamId) == 0) {
+                return protocolError("EXIT for an unknown stream");
             }
             streams_.erase(frame.streamId); // terminal
             handler_.onExit(frame.streamId, status.value());
             return {};
         }
         case FrameType::Ping:
+            PSX_TRY(validateConnectionFrame(frame));
             send(Frame{.type = FrameType::Pong, .flags = 0, .streamId = 0, .payload = {}}); // auto-reply
             return {};
         case FrameType::Pong:
+            PSX_TRY(validateConnectionFrame(frame));
             handler_.onPong();
             return {};
         case FrameType::GoAway:
-            goneAway_ = true;
+            PSX_TRY(validateConnectionFrame(frame));
+            receivedGoAway_ = true;
             handler_.onGoAway();
             return {};
         case FrameType::WindowUpdate: {
-            auto it = streams_.find(frame.streamId);
-            if (it == streams_.end()) {
-                // A stream can close (EXIT) while the peer still has in-flight
-                // WINDOW_UPDATEs for it; credit for a gone stream is a harmless
-                // no-op, so ignore it rather than tearing down the connection.
-                return {};
-            }
+            PSX_TRY(validateStreamFrame(frame, 0));
             auto delta = decodeWindowUpdate(frame.payload);
             if (!delta.ok()) {
                 return delta.error();
+            }
+            auto it = streams_.find(frame.streamId);
+            if (it == streams_.end()) {
+                // Credit crossing an EXIT that this endpoint sent is harmless.
+                // A frame arriving after the peer's EXIT is same-direction and
+                // cannot be explained by the close race.
+                if (locallyClosedStreams_.count(frame.streamId) != 0) {
+                    return {};
+                }
+                return protocolError("WINDOW_UPDATE for an unknown or peer-closed stream");
             }
             Stream& stream = it->second;
             if (static_cast<std::uint64_t>(stream.sendCredit) + delta.value() > kMaxStreamWindow) {

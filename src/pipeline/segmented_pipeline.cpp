@@ -20,6 +20,14 @@ void SegmentedPipeline::Segment::closeStdin() {
     }
 }
 
+void SegmentedPipeline::Segment::cancel() {
+    if (localRunner) {
+        localRunner->cancel();
+    } else if (remoteRunner) {
+        remoteRunner->cancel();
+    }
+}
+
 SegmentedPipeline::SegmentedPipeline(psx::runtime::Reactor& reactor,
                                      psx::os::TlsConfig controllerConfig,
                                      OnOutput onOutput,
@@ -30,7 +38,8 @@ SegmentedPipeline::SegmentedPipeline(psx::runtime::Reactor& reactor,
 SegmentedPipeline::~SegmentedPipeline() = default;
 
 psx::Result<void> SegmentedPipeline::run(const std::vector<ResolvedStage>& stages,
-                                         std::function<void(Outcome)> onComplete, bool externalStdin) {
+                                         std::function<void(Outcome)> onComplete,
+                                         bool externalStdin) {
     if (stages.empty()) {
         return psx::Error{psx::ErrorClass::InvalidArgument, 0, "empty pipeline"};
     }
@@ -129,21 +138,41 @@ void SegmentedPipeline::onSegmentDone(std::size_t index, std::vector<int> exitCo
     segments_[index].done = true;
     if (index + 1 < segments_.size()) {
         segments_[index + 1].closeStdin(); // EOF to the downstream segment
+    } else {
+        finalSegmentDone_ = true;
+        cancelUnfinishedUpstream();
+    }
+    if (!cancellingUpstream_) {
+        finishIfAllDone();
+    }
+}
+
+void SegmentedPipeline::cancelUnfinishedUpstream() {
+    cancellingUpstream_ = true;
+    for (std::size_t i = 0; i + 1 < segments_.size(); ++i) {
+        if (!segments_[i].done) {
+            segments_[i].cancel(); // completes that segment with real/known codes
+        }
+    }
+    cancellingUpstream_ = false;
+}
+
+void SegmentedPipeline::finishIfAllDone() {
+    if (!finalSegmentDone_) {
         return;
     }
-    // The final segment finished: its output is the pipeline result. Segments
-    // still running upstream are moot and are torn down with this object.
+    for (const Segment& segment : segments_) {
+        if (!segment.done) {
+            return;
+        }
+    }
     Outcome outcome;
     for (const Segment& segment : segments_) {
-        if (segment.done) {
-            for (const int code : segment.exitCodes) {
-                outcome.stageExitCodes.push_back(code);
-                if (code != 0) {
-                    outcome.exitCode = code; // pipefail: rightmost non-zero
-                }
+        for (const int code : segment.exitCodes) {
+            outcome.stageExitCodes.push_back(code);
+            if (code != 0) {
+                outcome.exitCode = code; // pipefail: rightmost non-zero
             }
-        } else {
-            outcome.stageExitCodes.insert(outcome.stageExitCodes.end(), segment.stageCount, 0);
         }
     }
     finish(std::move(outcome));

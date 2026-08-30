@@ -14,6 +14,8 @@ using psx::transport::Session;
 using psx::transport::StreamId;
 
 namespace {
+constexpr int kFencedExitCode = 137; // node connection teardown uses SIGKILL
+
 int toExitCode(const ExitStatus& status) {
     return status.kind == ExitStatus::Kind::Exited ? status.code : 128 + status.code;
 }
@@ -59,7 +61,8 @@ DistributedRunner::DistributedRunner(psx::runtime::Reactor& reactor,
 DistributedRunner::~DistributedRunner() = default;
 
 psx::Result<void> DistributedRunner::run(const std::vector<RemoteStage>& stages,
-                                         std::function<void(Outcome)> onComplete, bool externalStdin) {
+                                         std::function<void(Outcome)> onComplete,
+                                         bool externalStdin) {
     if (stages.empty()) {
         return psx::Error{psx::ErrorClass::InvalidArgument, 0, "empty pipeline"};
     }
@@ -161,6 +164,13 @@ void DistributedRunner::closeStdin() {
         first.session->sendData(first.streamId, {}, /*endStream=*/true);
     }
 }
+void DistributedRunner::cancel() {
+    if (done_) {
+        return;
+    }
+    fenceBefore(conns_.size());
+    finish(outcome()); // may destroy this; touch nothing afterwards
+}
 void DistributedRunner::forward(std::size_t index, std::string_view data) {
     if (done_) {
         return;
@@ -177,24 +187,42 @@ void DistributedRunner::onStageExit(std::size_t index) {
     if (done_) {
         return;
     }
+    // Once a stage exits, no predecessor can contribute any more useful input
+    // to it. Fence every predecessor that has not produced an EXIT rather than
+    // continuing to consume and silently discard an infinite producer.
+    fenceBefore(index);
     if (index + 1 < conns_.size()) {
         Conn& next = *conns_[index + 1];
         next.session->sendData(next.streamId, {}, /*endStream=*/true); // EOF to downstream stdin
         return;
     }
-    // The final stage finished: its output is complete (EXIT follows all its
-    // DATA). Any upstream still running is now moot -- it is fenced when the
-    // runner tears down -- so we report it as a clean, terminated stage (0).
-    Outcome outcome;
-    outcome.stageExitCodes.reserve(conns_.size());
+    finish(outcome());
+}
+
+void DistributedRunner::fenceBefore(std::size_t index) {
+    for (std::size_t i = 0; i < index; ++i) {
+        Conn& conn = *conns_[i];
+        if (conn.exited) {
+            continue;
+        }
+        conn.exited = true;
+        conn.exitCode = kFencedExitCode;
+        conn.session = nullptr;
+        conn.transport.reset(); // closes the connection; the node kills/reaps its stage
+    }
+}
+
+DistributedRunner::Outcome DistributedRunner::outcome() const {
+    Outcome result;
+    result.stageExitCodes.reserve(conns_.size());
     for (const auto& conn : conns_) {
-        const int code = conn->exited ? conn->exitCode : 0;
-        outcome.stageExitCodes.push_back(code);
+        const int code = conn->exitCode;
+        result.stageExitCodes.push_back(code);
         if (code != 0) {
-            outcome.exitCode = code; // pipefail: rightmost non-zero
+            result.exitCode = code; // pipefail: rightmost non-zero
         }
     }
-    finish(std::move(outcome));
+    return result;
 }
 
 void DistributedRunner::onConnError(std::size_t index, const std::string& message) {
