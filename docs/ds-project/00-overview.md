@@ -38,6 +38,8 @@ Use that door, not a new one.
 | 1 | `01-lamport-clocks.md` | Lamport logical clocks on stage dispatch (OPEN v2) + local event ticks | Yes -- `OpenRequest` v2 only | **Complete & Integrated** in `NativeController`, `DistributedRunner`, and `NodeStageRunner` with automated E2E tests |
 | 2 | `02-cluster-snapshot.md` | Point-in-time cluster state snapshot (simplified Chandy-Lamport), JSONL output + CLI viewer | No | **Complete & Integrated** in `NativeController`, `--snapshot-file` CLI flag, and `pipeshellx snapshot dump` CLI viewer with automated tests |
 | 3 | `03-election-stretch.md` | Bully algorithm for controller failover (multi-controller HA) | New, separate connection type -- design doc only, optional stretch goal | Design only, optional stretch |
+| Docs | `05-testing-guide.md` | Complete testing manual, build steps, and flow trace for every single test case | No | **Complete & Ready for Users/Graders** |
+| Docs | `06-ds-concepts-detailed.md` | Exhaustive analysis of all 18 DS concepts applied across Units I-IV with code mappings | No | **Complete Theoretical Reference** |
 
 Do Phase 1 and Phase 2 first -- both are small, additive, and don't put the
 core transport at risk. Phase 3 is a bigger, separate subsystem; only start
