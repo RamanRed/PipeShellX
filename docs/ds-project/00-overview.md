@@ -35,9 +35,9 @@ Use that door, not a new one.
 
 | Phase | File | What it adds | Wire protocol touched? | Status |
 | --- | --- | --- | --- | --- |
-| 1 | `01-lamport-clocks.md` | Lamport logical clocks on stage dispatch (OPEN v2) + local event ticks | Yes -- `OpenRequest` v2 only | **Code complete for the `NativeController` path** -- not yet compiled/run, see status note below |
-| 2 | `02-cluster-snapshot.md` | Point-in-time cluster state snapshot (simplified Chandy-Lamport), JSONL like the audit log | No | Recorder built; not yet wired into `NativeController`/`DistributedRunner` |
-| 3 | `03-election-stretch.md` | Bully algorithm for controller failover (multi-controller HA) | New, separate connection type -- design doc only, optional stretch goal | Design only, not started |
+| 1 | `01-lamport-clocks.md` | Lamport logical clocks on stage dispatch (OPEN v2) + local event ticks | Yes -- `OpenRequest` v2 only | **Complete & Integrated** in `NativeController`, `DistributedRunner`, and `NodeStageRunner` with automated E2E tests |
+| 2 | `02-cluster-snapshot.md` | Point-in-time cluster state snapshot (simplified Chandy-Lamport), JSONL output + CLI viewer | No | **Complete & Integrated** in `NativeController`, `--snapshot-file` CLI flag, and `pipeshellx snapshot dump` CLI viewer with automated tests |
+| 3 | `03-election-stretch.md` | Bully algorithm for controller failover (multi-controller HA) | New, separate connection type -- design doc only, optional stretch goal | Design only, optional stretch |
 
 Do Phase 1 and Phase 2 first -- both are small, additive, and don't put the
 core transport at risk. Phase 3 is a bigger, separate subsystem; only start
@@ -53,22 +53,29 @@ in new runtime code), add new source files to the relevant `CMakeLists.txt`,
 write a GoogleTest file for anything new under `tests/unit/`, and never
 weaken an existing protocol invariant to make a feature easier to add.
 
-## Already done in this pass
+## Completed Implementation
 
-- `include/psx/runtime/lamport_clock.hpp` -- new, self-contained, safe to
-  build immediately (see Phase 1 doc for how it plugs in).
-- `include/psx/runtime/cluster_snapshot.hpp` -- new, self-contained (see
-  Phase 2 doc).
-- `tests/unit/runtime/test_lamport_clock.cpp` -- new test file, registered
-  in `tests/CMakeLists.txt`.
-- `tests/unit/runtime/test_cluster_snapshot.cpp` -- new test file,
-  registered in `tests/CMakeLists.txt`.
-
-These build on their own today. What's **not** done yet is wiring
-`LamportClock` into `NativeController`/`NodeStageRunner` and wiring
-`ClusterSnapshot` into `DistributedRunner`/`NativeController` -- that
-requires editing `.cpp` files whose full implementation wasn't read in this
-session (risk of guessing wrong against real internals). Phase 1 and 2 docs
-give the exact integration points and signatures to use, plus the OPEN v2
-wire-format code written out in full so it only needs to be pasted in and
-checked against `tests/unit/transport/test_open_request.cpp`.
+- `include/psx/runtime/lamport_clock.hpp` & `tests/unit/runtime/test_lamport_clock.cpp`:
+  Header-only Lamport clock with `tick()`, `observe()`, and `value()`.
+- `include/psx/transport/wire.hpp`: Big-endian `writeU64BE` / `readU64BE` wire encoding.
+- `include/psx/transport/open_request.hpp` & `src/transport/open_request.cpp`:
+  `OPEN` v2 protocol with `lamportTs` field; backward-compatible v1 decoding.
+- `src/transport/session.cpp`: Automatically routes `encodeOpenV2` when `lamportTs != 0`.
+- `include/psx/transport/native_controller.hpp` & `src/transport/native_controller.cpp`:
+  Ticking `clock_.tick()` on launch; passing `lamportTs` to `OpenRequest` and returning in `HostResult`.
+- `include/psx/pipeline/distributed_runner.hpp` & `src/pipeline/distributed_runner.cpp`:
+  Ticking `clock_.tick()` on remote pipeline stage dispatch and exposing in `Outcome.stageLamportTimestamps`.
+- `include/psx/transport/node_stage_runner.hpp` & `src/transport/node_stage_runner.cpp`:
+  Observing controller timestamps on `onOpen` and advancing node clock.
+- `include/psx/runtime/cluster_snapshot.hpp` & `src/runtime/cluster_snapshot.cpp`:
+  `ClusterSnapshot` and `NodeSnapshot` data structures, JSONL serialization, parsing (`fromJsonLine`), file loading (`readFromFile`), and tabular rendering (`formatTable`).
+- `NativeController` Snapshot Wiring: `takeSnapshot()` automatically appends global cluster state to `--snapshot-file` on stage launch, completion, and exit.
+- CLI Integration: `--snapshot-file <PATH>` in `pipeshellx run`, and new CLI subcommand `pipeshellx snapshot [dump] <PATH> [--latest] [--json]`.
+- Comprehensive Unit & Integration Tests:
+  - `tests/unit/runtime/test_lamport_clock.cpp`
+  - `tests/unit/runtime/test_cluster_snapshot.cpp`
+  - `tests/unit/cli/test_snapshot_command.cpp`
+  - `tests/unit/cli/test_run_command.cpp`
+  - `tests/unit/transport/test_open_request.cpp`
+  - `tests/unit/transport/test_wire.cpp`
+  - `tests/unit/transport/test_native_transport.cpp` (Lamport integration and Cluster Snapshot integration tests).
