@@ -553,6 +553,7 @@ TEST(NativeControllerTest, RunsACommandOnANodeAndCollectsOutput) {
     EXPECT_EQ(results[0].exitCode, 0);
     EXPECT_EQ(results[0].output, "native-run\n");
     EXPECT_EQ(results[0].host, "127.0.0.1");
+    EXPECT_EQ(results[0].lamportTs, 1U);
 }
 
 TEST(NativeControllerTest, ReportsAnErrorForAnUnreachableNode) {
@@ -1304,6 +1305,8 @@ TEST(DistributedRunnerTest, BridgesTwoRemoteStages) {
     EXPECT_EQ(output, "a\nb\nc\n"); // stage1 (sort) output of stage0 (printf) input
     EXPECT_EQ(outcome.exitCode, 0);
     EXPECT_EQ(outcome.stageExitCodes, (std::vector<int>{0, 0}));
+    EXPECT_EQ(outcome.stageLamportTimestamps, (std::vector<std::uint64_t>{1, 2}));
+    EXPECT_EQ(runner.lamportClockValue(), 2U);
 }
 
 // pipefail across the wire: a failing downstream stage sets the pipeline code.
@@ -1866,3 +1869,60 @@ TEST(CanaryControllerTest, FailedCanarySkipsTheRest) {
     }
     EXPECT_EQ(out.acceptedByNode, 1U) << "only the canary connected; the rest were skipped";
 }
+
+// Lamport clock happens-before verification:
+// When the controller dispatches multiple stages across nodes, each stage dispatch
+// ticks the controller's clock, yielding strictly monotonic timestamps (1, 2, 3),
+// and the node observes the received timestamp, ensuring that local stage execution
+// happens strictly after dispatch.
+TEST(LamportClockIntegrationTest, StageDispatchesMaintainStrictHappensBeforeOrder) {
+    Fleet fleet = makeFleet();
+
+    auto listener = Socket::listen("127.0.0.1", 0);
+    ASSERT_TRUE(listener.ok());
+    const std::uint16_t port = listener.value().localPort().value();
+
+    auto reactor = Reactor::create();
+    ASSERT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+
+    psx::transport::NodeServer server(r, std::move(listener.value()),
+                                      {.certificatePem = fleet.nodeId.certificatePem,
+                                       .privateKeyPem = fleet.nodeId.privateKeyPem,
+                                       .caPem = fleet.caCert},
+                                      [](std::string_view san) { return san == "psx://controller"; });
+    ASSERT_TRUE(server.start().ok());
+
+    psx::transport::NativeController controller(r, {.certificatePem = fleet.ctlId.certificatePem,
+                                                    .privateKeyPem = fleet.ctlId.privateKeyPem,
+                                                    .caPem = fleet.caCert});
+
+    const std::vector<NativeController::Target> targets = {
+        {.host = "127.0.0.1", .port = port, .expectedSan = "psx://node/1"},
+        {.host = "127.0.0.1", .port = port, .expectedSan = "psx://node/1"},
+        {.host = "127.0.0.1", .port = port, .expectedSan = "psx://node/1"}};
+
+    std::vector<NativeController::HostResult> results;
+    ASSERT_TRUE(controller
+                    .start(targets, {"/bin/echo", "ds-test"},
+                           [&](std::vector<NativeController::HostResult> res) {
+                               results = std::move(res);
+                               r.stop();
+                           },
+                           {.concurrency = 1}) // serialized dispatch
+                    .ok());
+
+    r.after(std::chrono::seconds(10), [&] { r.stop(); });
+    ASSERT_TRUE(r.run().ok());
+
+    ASSERT_EQ(results.size(), 3U);
+    for (std::size_t i = 0; i < results.size(); ++i) {
+        EXPECT_TRUE(results[i].ok) << results[i].error;
+        EXPECT_EQ(results[i].exitCode, 0);
+        EXPECT_EQ(results[i].lamportTs, static_cast<std::uint64_t>(i + 1));
+    }
+    // Strict partial/total order check: ts(dispatch_0) < ts(dispatch_1) < ts(dispatch_2)
+    EXPECT_LT(results[0].lamportTs, results[1].lamportTs);
+    EXPECT_LT(results[1].lamportTs, results[2].lamportTs);
+}
+
