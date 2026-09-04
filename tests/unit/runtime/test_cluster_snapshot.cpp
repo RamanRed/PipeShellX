@@ -75,3 +75,67 @@ TEST(ClusterSnapshotTest, UnwritablePathReturnsFalseWithoutThrowing) {
     snap.record(NodeSnapshot{.host = "h1", .status = "running"});
     EXPECT_FALSE(snap.appendToFile("/this/path/does/not/exist/and/cannot/be/made/s.jsonl"));
 }
+
+TEST(ClusterSnapshotTest, FromJsonLineRoundTripsToJsonLine) {
+    ClusterSnapshot original("run-roundtrip", 1700000000000);
+    original.record(NodeSnapshot{.host = "nodeA", .stageId = "stage-0", .status = "exited", .exitCode = 0, .lamportTs = 10});
+    original.record(NodeSnapshot{.host = "nodeB", .stageId = "stage-1", .status = "running", .exitCode = 0, .lamportTs = 15});
+
+    const std::string line = original.toJsonLine();
+    auto parsed = ClusterSnapshot::fromJsonLine(line);
+    ASSERT_TRUE(parsed.ok()) << parsed.error().message();
+    EXPECT_EQ(parsed.value().runId(), "run-roundtrip");
+    EXPECT_EQ(parsed.value().timestampEpochMs(), 1700000000000);
+    ASSERT_EQ(parsed.value().nodes().size(), 2U);
+    EXPECT_EQ(parsed.value().nodes()[0], original.nodes()[0]);
+    EXPECT_EQ(parsed.value().nodes()[1], original.nodes()[1]);
+}
+
+TEST(ClusterSnapshotTest, FromJsonLineRejectsInvalidData) {
+    EXPECT_FALSE(ClusterSnapshot::fromJsonLine("not json").ok());
+    EXPECT_FALSE(ClusterSnapshot::fromJsonLine(R"({"type":"audit_log"})").ok());
+    EXPECT_FALSE(ClusterSnapshot::fromJsonLine(R"({"type":"cluster_snapshot"})").ok());
+}
+
+TEST(ClusterSnapshotTest, ReadFromFileLoadsAllSnapshots) {
+    test_support::ScopedTempCwd cwd("read-snapshots");
+    const std::string path = (cwd.path() / "snapshots.jsonl").string();
+
+    ClusterSnapshot s1("run-batch", 100);
+    s1.record(NodeSnapshot{.host = "h1", .status = "connecting"});
+    s1.appendToFile(path);
+
+    ClusterSnapshot s2("run-batch", 200);
+    s2.record(NodeSnapshot{.host = "h1", .status = "running"});
+    s2.appendToFile(path);
+
+    ClusterSnapshot s3("run-batch", 300);
+    s3.record(NodeSnapshot{.host = "h1", .status = "exited", .exitCode = 0, .lamportTs = 5});
+    s3.appendToFile(path);
+
+    auto list = ClusterSnapshot::readFromFile(path);
+    ASSERT_TRUE(list.ok());
+    ASSERT_EQ(list.value().size(), 3U);
+    EXPECT_EQ(list.value()[0].timestampEpochMs(), 100);
+    EXPECT_EQ(list.value()[1].timestampEpochMs(), 200);
+    EXPECT_EQ(list.value()[2].timestampEpochMs(), 300);
+    EXPECT_EQ(list.value()[2].nodes()[0].status, "exited");
+    EXPECT_EQ(list.value()[2].nodes()[0].lamportTs, 5U);
+}
+
+TEST(ClusterSnapshotTest, FormatTableRendersExpectedColumns) {
+    ClusterSnapshot snap("run-table-test", 123456789);
+    snap.record(NodeSnapshot{.host = "10.0.0.1", .stageId = "s0", .status = "exited", .exitCode = 0, .lamportTs = 1});
+    snap.record(NodeSnapshot{.host = "10.0.0.2", .stageId = "s1", .status = "running", .exitCode = 0, .lamportTs = 2});
+
+    const std::string table = snap.formatTable();
+    EXPECT_NE(table.find("Cluster Snapshot [Run: run-table-test"), std::string::npos);
+    EXPECT_NE(table.find("HOST"), std::string::npos);
+    EXPECT_NE(table.find("STAGE"), std::string::npos);
+    EXPECT_NE(table.find("STATUS"), std::string::npos);
+    EXPECT_NE(table.find("EXIT"), std::string::npos);
+    EXPECT_NE(table.find("LAMPORT_TS"), std::string::npos);
+    EXPECT_NE(table.find("10.0.0.1"), std::string::npos);
+    EXPECT_NE(table.find("10.0.0.2"), std::string::npos);
+}
+

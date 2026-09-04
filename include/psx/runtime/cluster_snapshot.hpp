@@ -1,6 +1,7 @@
 #pragma once
 
 #include "psx/json/json.hpp"
+#include "psx/result.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -8,6 +9,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace psx::runtime {
@@ -22,6 +24,11 @@ struct NodeSnapshot {
     std::string status;          // e.g. "running", "exited", "connecting", "lost"
     int exitCode = 0;            // meaningful only when status == "exited"
     std::uint64_t lamportTs = 0; // 0 if unknown / peer has no LamportClock wired in yet
+
+    bool operator==(const NodeSnapshot& other) const {
+        return host == other.host && stageId == other.stageId && status == other.status &&
+               exitCode == other.exitCode && lamportTs == other.lamportTs;
+    }
 };
 
 // A point-in-time capture across every tracked node in a run. Passive: the
@@ -29,53 +36,30 @@ struct NodeSnapshot {
 // serializes. This class never polls the network itself.
 class ClusterSnapshot {
 public:
-    explicit ClusterSnapshot(std::string runId) : runId_(std::move(runId)) {}
+    explicit ClusterSnapshot(std::string runId);
+    ClusterSnapshot(std::string runId, std::int64_t tsEpochMs);
 
-    // Records one node's state. Call once per host per capture round; call
-    // record() again with a fresh ClusterSnapshot instance for the next
-    // round rather than reusing one instance across rounds, so nodes()
-    // reflects exactly one point in time.
+    // Records one node's state. Call once per host per capture round.
     void record(NodeSnapshot node) { nodes_.push_back(std::move(node)); }
 
     const std::vector<NodeSnapshot>& nodes() const noexcept { return nodes_; }
+    const std::string& runId() const noexcept { return runId_; }
+    std::int64_t timestampEpochMs() const noexcept { return tsEpochMs_; }
 
-    // One JSON object, no trailing newline:
-    // {"type":"cluster_snapshot","run_id":"...","ts_epoch_ms":...,
-    //  "nodes":[{"host":...,"stage_id":...,"status":...,"exit_code":...,
-    //  "lamport_ts":...}, ...]}
-    std::string toJsonLine() const {
-        std::ostringstream body;
-        body << "{\"type\":\"cluster_snapshot\",\"run_id\":" << json::quote(runId_)
-             << ",\"ts_epoch_ms\":" << nowMillis() << ",\"nodes\":[";
-        for (std::size_t i = 0; i < nodes_.size(); ++i) {
-            const NodeSnapshot& n = nodes_[i];
-            if (i != 0) {
-                body << ',';
-            }
-            body << "{\"host\":" << json::quote(n.host) << ",\"stage_id\":" << json::quote(n.stageId)
-                 << ",\"status\":" << json::quote(n.status) << ",\"exit_code\":" << n.exitCode
-                 << ",\"lamport_ts\":" << n.lamportTs << "}";
-        }
-        body << "]}";
-        return body.str();
-    }
+    // One JSON object, no trailing newline.
+    std::string toJsonLine() const;
 
-    // Appends toJsonLine() + '\n' to `path`, creating missing parent
-    // directories, matching psx::audit::AuditLog's degrade-to-false-never-
-    // throw behaviour on an unwritable path.
-    bool appendToFile(const std::string& path) const {
-        std::error_code ignored;
-        const std::filesystem::path file(path);
-        if (file.has_parent_path()) {
-            std::filesystem::create_directories(file.parent_path(), ignored);
-        }
-        std::ofstream out(path, std::ios::app);
-        if (!out) {
-            return false;
-        }
-        out << toJsonLine() << '\n';
-        return static_cast<bool>(out);
-    }
+    // Appends toJsonLine() + '\n' to `path`, creating missing parent directories.
+    bool appendToFile(const std::string& path) const;
+
+    // Parses a snapshot from a JSON line string.
+    static psx::Result<ClusterSnapshot> fromJsonLine(std::string_view line);
+
+    // Reads all snapshots from a JSONL file.
+    static psx::Result<std::vector<ClusterSnapshot>> readFromFile(const std::string& path);
+
+    // Formats this snapshot as an aligned table suitable for CLI inspection.
+    std::string formatTable() const;
 
 private:
     static std::int64_t nowMillis() {
@@ -84,6 +68,7 @@ private:
     }
 
     std::string runId_;
+    std::int64_t tsEpochMs_ = 0;
     std::vector<NodeSnapshot> nodes_;
 };
 

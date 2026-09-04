@@ -56,6 +56,7 @@ add_executable(pipeshellx_tests
     unit/policy/test_policy.cpp
     unit/cli/test_run_command.cpp
     unit/cli/test_ping_command.cpp
+    unit/cli/test_snapshot_command.cpp
     unit/stream/test_line_framer.cpp
     unit/stream/test_spool_buffer.cpp
     unit/runtime/test_reactor.cpp
@@ -64,6 +65,7 @@ add_executable(pipeshellx_tests
     unit/runtime/test_cluster_snapshot.cpp
     unit/audit/test_audit_log.cpp
     unit/transport/test_frame_codec.cpp
+    unit/transport/test_wire.cpp
     unit/transport/test_open_request.cpp
     unit/transport/test_control_payloads.cpp
     unit/transport/test_session.cpp

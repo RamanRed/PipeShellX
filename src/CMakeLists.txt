@@ -85,6 +85,7 @@ add_library(pipeshellx_lib
     ${PIPESHELLX_PIPELINE_SOURCES}
     ${PIPESHELLX_POLICY_SOURCES}
     runtime/reactor.cpp
+    runtime/cluster_snapshot.cpp
     transport/frame_codec.cpp
     transport/open_request.cpp
     transport/control_payloads.cpp
@@ -97,6 +98,7 @@ add_library(pipeshellx_lib
     cli/diff_command.cpp
     cli/pipe_command.cpp
     cli/run_command.cpp
+    cli/snapshot_command.cpp
     cli_options.cpp
     client_config.cpp
     client_manager.cpp
