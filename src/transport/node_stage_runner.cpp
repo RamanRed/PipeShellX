@@ -42,6 +42,15 @@ NodeStageRunner::~NodeStageRunner() {
 }
 
 void NodeStageRunner::onOpen(StreamId id, const OpenRequest& request) {
+    // Lamport clock: adopt the controller's timestamp when it sent one (OPEN
+    // v2), otherwise this is still a local event worth ordering, so tick
+    // regardless. See docs/ds-project/01-lamport-clocks.md.
+    if (request.lamportTs != 0) {
+        clock_.observe(request.lamportTs);
+    } else {
+        clock_.tick();
+    }
+
     if (request.argv.empty()) {
         session_->sendExit(id, {ExitStatus::Kind::Exited, 127});
         return;

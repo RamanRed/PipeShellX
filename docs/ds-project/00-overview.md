@@ -35,8 +35,8 @@ Use that door, not a new one.
 
 | Phase | File | What it adds | Wire protocol touched? | Status |
 | --- | --- | --- | --- | --- |
-| 1 | `01-lamport-clocks.md` | Lamport logical clocks on stage dispatch (OPEN v2) + local event ticks | Yes -- `OpenRequest` v2 only | Not started |
-| 2 | `02-cluster-snapshot.md` | Point-in-time cluster state snapshot (simplified Chandy-Lamport), JSONL like the audit log | No | Not started |
+| 1 | `01-lamport-clocks.md` | Lamport logical clocks on stage dispatch (OPEN v2) + local event ticks | Yes -- `OpenRequest` v2 only | **Code complete for the `NativeController` path** -- not yet compiled/run, see status note below |
+| 2 | `02-cluster-snapshot.md` | Point-in-time cluster state snapshot (simplified Chandy-Lamport), JSONL like the audit log | No | Recorder built; not yet wired into `NativeController`/`DistributedRunner` |
 | 3 | `03-election-stretch.md` | Bully algorithm for controller failover (multi-controller HA) | New, separate connection type -- design doc only, optional stretch goal | Design only, not started |
 
 Do Phase 1 and Phase 2 first -- both are small, additive, and don't put the

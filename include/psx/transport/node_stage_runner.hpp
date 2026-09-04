@@ -2,6 +2,7 @@
 
 #include "psx/os/handle.hpp"
 #include "psx/os/process.hpp"
+#include "psx/runtime/lamport_clock.hpp"
 #include "psx/runtime/reactor.hpp"
 #include "psx/transport/session.hpp"
 
@@ -44,6 +45,13 @@ public:
 
     std::size_t runningStages() const noexcept { return stages_.size(); }
 
+    // This node's current Lamport clock value (see
+    // docs/ds-project/01-lamport-clocks.md). Advances on every OPEN received
+    // from a v2-speaking controller (observe()) or, for a v1 controller with
+    // no timestamp, on a plain local tick() so the node's own event ordering
+    // still advances.
+    std::uint64_t lamportClockValue() const noexcept { return clock_.value(); }
+
 private:
     struct Stage {
         psx::os::Process process;
@@ -78,6 +86,7 @@ private:
     CommandValidator validator_;
     Session* session_ = nullptr;
     std::unordered_map<StreamId, Stage> stages_;
+    psx::runtime::LamportClock clock_;
 };
 
 } // namespace psx::transport
