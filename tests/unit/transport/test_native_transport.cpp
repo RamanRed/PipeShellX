@@ -14,6 +14,7 @@
 #include "psx/os/socket.hpp"
 #include "psx/os/tls.hpp"
 #include "psx/runtime/reactor.hpp"
+#include "test_support.hpp"
 #include "tls_certs.hpp"
 
 #include <gtest/gtest.h>
@@ -1925,4 +1926,82 @@ TEST(LamportClockIntegrationTest, StageDispatchesMaintainStrictHappensBeforeOrde
     EXPECT_LT(results[0].lamportTs, results[1].lamportTs);
     EXPECT_LT(results[1].lamportTs, results[2].lamportTs);
 }
+
+// Cluster snapshot verification (simplified Chandy-Lamport local state capture):
+// As nodes start and finish their assigned stages, NativeController captures
+// point-in-time cluster states (JSONL lines with host, stageId, status, exit code, lamportTs).
+TEST(ClusterSnapshotIntegrationTest, ControllerRecordsNodeSnapshotsToDisk) {
+    test_support::ScopedTempCwd cwd("cluster-snapshot-test");
+    const std::string snapshotFile = (cwd.path() / "snapshots.jsonl").string();
+
+    Fleet fleet = makeFleet();
+
+    auto listener = Socket::listen("127.0.0.1", 0);
+    ASSERT_TRUE(listener.ok());
+    const std::uint16_t port = listener.value().localPort().value();
+
+    auto reactor = Reactor::create();
+    ASSERT_TRUE(reactor.ok());
+    Reactor& r = *reactor.value();
+
+    psx::transport::NodeServer server(r, std::move(listener.value()),
+                                      {.certificatePem = fleet.nodeId.certificatePem,
+                                       .privateKeyPem = fleet.nodeId.privateKeyPem,
+                                       .caPem = fleet.caCert},
+                                      [](std::string_view san) { return san == "psx://controller"; });
+    ASSERT_TRUE(server.start().ok());
+
+    psx::transport::NativeController controller(r, {.certificatePem = fleet.ctlId.certificatePem,
+                                                    .privateKeyPem = fleet.ctlId.privateKeyPem,
+                                                    .caPem = fleet.caCert});
+
+    const std::vector<NativeController::Target> targets = {
+        {.host = "127.0.0.1", .port = port, .expectedSan = "psx://node/1"}};
+
+    std::vector<NativeController::HostResult> results;
+    ASSERT_TRUE(controller
+                    .start(targets, {"/bin/echo", "snap-test"},
+                           [&](std::vector<NativeController::HostResult> res) {
+                               results = std::move(res);
+                               r.stop();
+                           },
+                           {.snapshotPath = snapshotFile, .runId = "run-snap-01"})
+                    .ok());
+
+    r.after(std::chrono::seconds(5), [&] { r.stop(); });
+    ASSERT_TRUE(r.run().ok());
+
+    ASSERT_EQ(results.size(), 1U);
+    EXPECT_TRUE(results[0].ok);
+
+    // In-memory captureSnapshot() verification:
+    auto snap = controller.captureSnapshot();
+    ASSERT_EQ(snap.nodes().size(), 1U);
+    EXPECT_EQ(snap.nodes()[0].host, "127.0.0.1");
+    EXPECT_EQ(snap.nodes()[0].status, "exited");
+    EXPECT_EQ(snap.nodes()[0].exitCode, 0);
+    EXPECT_EQ(snap.nodes()[0].lamportTs, 1U);
+
+    // On-disk JSONL verification:
+    std::ifstream in(snapshotFile);
+    ASSERT_TRUE(in.good());
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty()) {
+            lines.push_back(line);
+        }
+    }
+    ASSERT_FALSE(lines.empty());
+    for (const auto& l : lines) {
+        EXPECT_NE(l.find(R"("type":"cluster_snapshot")"), std::string::npos);
+        EXPECT_NE(l.find(R"("run_id":"run-snap-01")"), std::string::npos);
+        EXPECT_NE(l.find(R"("127.0.0.1")"), std::string::npos);
+    }
+    const std::string& lastLine = lines.back();
+    EXPECT_NE(lastLine.find(R"("status":"exited")"), std::string::npos);
+    EXPECT_NE(lastLine.find(R"("exit_code":0)"), std::string::npos);
+    EXPECT_NE(lastLine.find(R"("lamport_ts":1)"), std::string::npos);
+}
+
 

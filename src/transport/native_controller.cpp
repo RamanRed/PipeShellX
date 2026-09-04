@@ -176,10 +176,14 @@ void NativeController::fillSlots() {
     }
     filling_ = true;
     const std::size_t limit = options_.concurrency == 0 ? conns_.size() : options_.concurrency;
+    const std::size_t prevStarted = nextToStart_;
     while (nextToStart_ < conns_.size() && active_ < limit && !cancelling_) {
         launch(nextToStart_++);
     }
     filling_ = false;
+    if (nextToStart_ > prevStarted) {
+        takeSnapshot();
+    }
 }
 
 void NativeController::launch(std::size_t index) {
@@ -209,7 +213,14 @@ void NativeController::launch(std::size_t index) {
                                    .onReady =
                                        [this, raw] {
                                            if (!raw->done && raw->session != nullptr) {
-                                               raw->session->open(OpenRequest{.argv = command_, .cwd = {}});
+                                               // Lamport tick: dispatching this stage is a local
+                                               // event, ordered relative to every other OPEN this
+                                               // controller sends and whatever the receiving node
+                                               // observes off it. See
+                                               // docs/ds-project/01-lamport-clocks.md.
+                                               raw->result.lamportTs = clock_.tick();
+                                               raw->session->open(OpenRequest{
+                                                   .argv = command_, .cwd = {}, .lamportTs = raw->result.lamportTs});
                                            }
                                        },
                                    .onError = [raw](const psx::Error& error) { raw->fail(error.message()); }},
@@ -257,6 +268,7 @@ void NativeController::onConnDone(std::size_t index) {
         // Retire it on the next reactor turn so its callback stack has unwound.
         retireTimers_.push_back(reactor_.after(std::chrono::milliseconds(0), [this, index] { retire(index); }));
     }
+    takeSnapshot();
     completeIfReady();
 }
 
@@ -281,6 +293,7 @@ void NativeController::completeIfReady() {
         return;
     }
     completed_ = true;
+    takeSnapshot();
     std::vector<HostResult> results;
     results.reserve(conns_.size());
     for (auto& conn : conns_) {
@@ -290,6 +303,42 @@ void NativeController::completeIfReady() {
         auto callback = std::move(onComplete_);
         callback(std::move(results)); // may destroy this controller
     }
+}
+
+psx::runtime::ClusterSnapshot NativeController::captureSnapshot() const {
+    const std::string runId = options_.runId.empty() ? "pipeshellx-run" : options_.runId;
+    psx::runtime::ClusterSnapshot snapshot(runId);
+    for (const auto& conn : conns_) {
+        psx::runtime::NodeSnapshot node;
+        node.host = conn->target.host;
+        node.stageId = "stage-" + std::to_string(conn->index);
+        if (conn->done) {
+            if (conn->result.ok) {
+                node.status = "exited";
+            } else if (conn->result.timedOut) {
+                node.status = "timed_out";
+            } else if (conn->result.cancelled) {
+                node.status = "cancelled";
+            } else {
+                node.status = "lost";
+            }
+        } else if (conn->active) {
+            node.status = "running";
+        } else {
+            node.status = "connecting";
+        }
+        node.exitCode = conn->result.exitCode;
+        node.lamportTs = conn->result.lamportTs != 0 ? conn->result.lamportTs : clock_.value();
+        snapshot.record(std::move(node));
+    }
+    return snapshot;
+}
+
+void NativeController::takeSnapshot() {
+    if (options_.snapshotPath.empty()) {
+        return;
+    }
+    captureSnapshot().appendToFile(options_.snapshotPath);
 }
 
 } // namespace psx::transport
