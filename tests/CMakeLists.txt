@@ -60,6 +60,8 @@ add_executable(pipeshellx_tests
     unit/stream/test_spool_buffer.cpp
     unit/runtime/test_reactor.cpp
     unit/runtime/test_backoff.cpp
+    unit/runtime/test_lamport_clock.cpp
+    unit/runtime/test_cluster_snapshot.cpp
     unit/audit/test_audit_log.cpp
     unit/transport/test_frame_codec.cpp
     unit/transport/test_open_request.cpp
